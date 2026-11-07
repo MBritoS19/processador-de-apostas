@@ -346,3 +346,94 @@ O CHALLENGE §7.4 diz que "uma referência não pode ser revertida duas vezes **
 - **Crédito além do limite do `numeric(20,2)`** → `BALANCE_LIMIT_EXCEEDED`, com a wallet intacta.
 
 **Limitação conhecida:** um `REFUND` de uma BET que já tem `WIN` PROCESSED é aceito. A spec não proíbe, e o provedor pode estornar uma rodada cancelada depois de liquidada. O jogador fica com o prêmio e com o valor da aposta. Barrar isso exige definir a prioridade entre liquidação e estorno, o que é decisão de negócio.
+
+## 16. API HTTP (Fase 4)
+
+### Mapeamento de status
+
+O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento vale para todos os endpoints:
+
+| Situação | Status | Corpo | Reenviar? |
+|---|---|---|---|
+| `Processed` | 200 | `{ transactionId, status, balance, idempotentReplay }` | — |
+| Wallet aberta (`POST /wallets`) | 201 | `{ id, playerId, balance, version: 1 }` | — |
+| `PendingReference` | 202 | `{ transactionId, status, nextReferenceCheckAt, idempotentReplay }` | consultar depois |
+| Payload, header ou parâmetro inválido (`InvalidInput`), JSON malformado, id que não é UUID | 400 `INVALID_INPUT` | envelope | não; corrigir |
+| Recurso ou rota inexistente | 404 `NOT_FOUND` | envelope | não |
+| Mesma key (ou id externo) com outro payload | 409 `IDEMPOTENCY_CONFLICT` + `existingTransactionId` | envelope | não |
+| Wallet duplicada (player + moeda) | 409 `WALLET_ALREADY_EXISTS` + `walletId` | envelope | não; usar o `walletId` |
+| `Rejected` (REJECTED **e** FAILED) | 422 | `{ transactionId, status, failureCode, balance?, idempotentReplay }` | não; o replay devolve o mesmo 422 |
+| Falha transitória (lock timeout, deadlock, version, banco fora) | 503 `TRANSIENT_FAILURE` + `Retry-After: 1` | envelope | sim, com a mesma key |
+| Bug | 500 `INTERNAL_ERROR` | envelope | não |
+
+- **Envelope de erro único:** `{ "error": { "code", "message", ...detalhes } }`, renderizado pelo `ApiExceptionFilter` global. Cobre também as exceções do Nest (JSON malformado, rota desconhecida) e os erros inesperados. `message` é texto fixo nosso: mensagens do Postgres nunca chegam ao cliente (o 500 só é logado, com nome e SQLSTATE).
+- **503 é exclusivo de falha transitória.** `FAILED` é terminal: um 503 faria o provedor reenviar e receber o mesmo replay para sempre. Por isso vai como 422 com `status: "FAILED"`. Erros transitórios lançados fora dos use cases (nas consultas) são reconhecidos pelo mesmo `translatePersistenceError` e também viram 503.
+- **422 não usa o envelope de erro:** é o resultado de uma transação gravada (tem `transactionId` e é replayável), com o mesmo formato do 200.
+- **Replay** devolve o mesmo status do original e `idempotentReplay: true`. Uma `PendingReference` pode já ter se resolvido; nesse caso o replay devolve o estado atual (§13).
+- `Idempotency-Key` ausente ou só com espaços → 400. A validação do corpo é a do use case (`parse`), que roda antes de abrir a transação: nada inválido é gravado.
+
+### Abertura de wallet
+
+- O use case `OpenWallet` (application) usa a mesma `WagerUnitOfWork`. Numa transação SQL, grava a wallet (version 1), a transação `OPENING` (factory `WagerTransaction.opening`, que já nasce PROCESSED), o lançamento CREDIT e o `WalletBalanceChanged` na outbox. A OPENING é interna e **não** gera `WagerTransactionProcessed`.
+- Saldo inicial zero não gera OPENING, lançamento nem evento.
+- A duplicata é detectada pela constraint `uq_wallets_player_currency`, traduzida como `UniqueViolationError('wallet')`. O 409 relê e devolve o `walletId` existente, para o cliente que perdeu a resposta do primeiro POST.
+- `playerId` segue a regra de texto do use case (obrigatório, não vazio, até 256 caracteres).
+- **Nomes reservados:** a OPENING usa `providerId = "internal"` e key/id externo `opening:<walletId>`. Providers externos não podem usar esse `providerId` nem keys com prefixo `opening:` (400), e `GET /providers/internal/...` também é 400. Sem isso, um cliente poderia ler as OPENINGs ou receber o id delas num 409.
+
+### Consultas
+
+- `GET /wallets/:id`, `GET /wagering/transactions/:id` e `GET /providers/:providerId/wagering/transactions/:externalId`: 404 quando não existe, 400 quando o id não é UUID. Campos ausentes saem como `null`, nunca omitidos.
+
+### Cursor do ledger
+
+- `GET /wallets/:id/ledger?cursor=&limit=` devolve os lançamentos em ordem crescente de `wallet_ledger_entries.seq` (identity). `limit` tem padrão 50 e teto 200; fora disso, 400.
+- Cursor = base64url de `v1:<seq>` do último item da página. É opaco para o cliente, e o prefixo de versão permite trocar o formato sem quebrar cursores em circulação. Cursor vazio, malformado, fora da faixa de `bigint` ou repetido na query → 400.
+- **Estável, sem pular nem repetir:** os lançamentos de uma wallet só são gravados sob o lock dela (§12), então `seq` cresce na ordem de commit dentro da wallet. Uma inserção nova sempre fica depois de qualquer cursor já emitido.
+- `nextCursor` é `null` na última página: a consulta busca `limit + 1` para saber se há mais.
+
+### Reconciliação
+
+- `POST /wallets/:id/reconciliation` lê o saldo e a soma do ledger (CREDIT − DEBIT) **num único statement**, então os dois vêm do mesmo snapshot.
+- `difference = storedBalance − calculatedBalance`. `consistent` é `difference == 0.00`, e `checkedEntries` é o número de lançamentos somados.
+- **Nunca corrige.** Na divergência: log `warn` em JSON (`reconciliation_divergence`, com `walletId` e `correlationId`), incremento de `wagering_reconciliation_divergences_total` e `consistent: false` na resposta. Corrigir exige investigar a causa; um ajuste automático esconderia o bug que a gerou.
+- Cobre o que o schema não garante (§11): problemas no encadeamento de `balance_before` ou no valor do lançamento aparecem como divergência de soma.
+
+### Autenticação (CHALLENGE §2)
+
+- **Decisão:** não implementada nesta fase, porque não vale pontos e competiria com a correção financeira. O ponto de extensão é o `AuthGuard` (no-op), aplicado ao `WageringController`. Health e `/metrics` ficam fora do guard.
+- **Desenho que adotaríamos:** IdP externo (Keycloak) com OAuth2 *client credentials*, um client por provider. O `AuthGuard` valida o JWT (assinatura via JWKS, `iss`, `aud`, `exp`) e coloca na requisição o `providerId` da claim do client.
+  - `POST /wagering/transactions`: `payload.providerId` diferente do token → 403. Hoje o use case confia no `providerId` do payload (ver pendência no PROGRESSO).
+  - Consultas: `GET /providers/:providerId/...` só para o próprio provider; `GET /wagering/transactions/:id` filtrado pelo provider do token (404 para transação alheia).
+  - `POST /wallets` e reconciliação: escopos administrativos próprios (`wallets:write`, `wallets:reconcile`), não o de provider.
+  - O SQS continua como canal interno confiável (§2), mas com as mesmas validações de domínio.
+- **Trade-off:** sem autenticação, qualquer cliente que alcance a API consegue submeter em nome de qualquer provider e ler transações e saldos. É aceitável só em ambiente de avaliação.
+
+## 17. Observabilidade (Fase 8, parte independente de SQS/outbox)
+
+### Logs
+
+- JSON (pino), uma linha por evento, a partir de um logger raiz (`infrastructure/observability/logger.ts`). O logger do Nest (boot, erros do framework) usa o mesmo JSON, via `PinoNestLogger`.
+- `correlationId`: lido de `X-Correlation-Id` quando casa com `^[A-Za-z0-9._:-]{1,128}$`; caso contrário, é gerado um UUID. É sempre devolvido no header da resposta, inclusive em erros que acontecem antes do middleware (como JSON malformado), e propagado até o `correlationId` dos eventos da outbox.
+- Campos: `correlationId`, `providerId`, `walletId` e `transactionId` quando existem; `messageId` entra com o SQS (Fase 5). O log de requisição usa o template da rota (`/wallets/:id`), não a URL.
+- Nunca entram nos logs: payload financeiro completo, valores, mensagens do Postgres.
+
+### Métricas
+
+- `InstrumentedProcessWagerTransaction` envolve o **use case**, não o controller, para que HTTP e o consumidor SQS (Fase 5) passem pelas mesmas métricas. Erros lançados também são medidos (`status="ERROR"`) e depois relançados.
+- Registry próprio (`new Registry()` por `ObservabilityMetrics`), nunca o default do prom-client: duas aplicações no mesmo processo (como nos testes) não colidem.
+- Labels só de conjunto fechado: `status`, `kind` e `failure_code`. Um `kind` fora do enum vira `UNKNOWN`, porque o valor cru vem do cliente e explodiria a cardinalidade. Ids nunca são labels.
+
+| Métrica | Tipo | Labels | Fase |
+|---|---|---|---|
+| `wagering_transactions_total` | counter | status, kind, failure_code | 8 |
+| `wagering_processing_duration_seconds` | histogram | status, kind, failure_code | 8 |
+| `wagering_idempotent_replays_total` | counter | kind | 8 |
+| `wagering_idempotency_conflicts_total` | counter | kind | 8 |
+| `wagering_lock_conflicts_total` | counter | — | 3/8 |
+| `wagering_reconciliation_divergences_total` | counter | — | 4/8 |
+| `wagering_retries_total` | counter | — | declarada; incrementa na 5 |
+| `wagering_dlq_messages_total` | counter | — | declarada; incrementa na 5 |
+| `wagering_outbox_lag_seconds` | gauge | — | declarada; idade do evento pendente mais antigo, Fase 6 |
+
+- `GET /metrics` é aberto, como os health checks. Em produção ficaria numa porta interna ou atrás da rede do scraper.
+- **Limitação:** os contadores são por instância (o Prometheus soma). O contador em memória do `LoggingLockConflictTelemetry` fica só para os testes.

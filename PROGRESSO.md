@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **4 — API HTTP** (aguardando início)
+Fase atual: **5 — Consumidor SQS** (aguardando plano)
 
 ---
 
@@ -51,14 +51,14 @@ Fase atual: **4 — API HTTP** (aguardando início)
 - [x] Cenário obrigatório: saldo 100, duas apostas de 80 → uma PROCESSED, uma REJECTED, saldo 20, um débito
 
 ## Fase 4 — API HTTP (§9)
-- [ ] `POST /wallets` com transação `OPENING` + lançamento CREDIT na mesma transação
-- [ ] Wallet duplicada retorna conflito
-- [ ] `POST /wagering/transactions` com `Idempotency-Key` obrigatório
-- [ ] Endpoints de consulta (wallet, transação por id, transação por provider + id externo)
-- [ ] Ledger com cursor estável e opaco
-- [ ] `POST /wallets/:id/reconciliation` (divergência: log + métrica + sinalização na resposta)
-- [ ] Mapeamento de status HTTP consistente e documentado
-- [ ] Ponto de extensão de autenticação (decisão registrada)
+- [x] `POST /wallets` com transação `OPENING` + lançamento CREDIT na mesma transação
+- [x] Wallet duplicada retorna conflito
+- [x] `POST /wagering/transactions` com `Idempotency-Key` obrigatório
+- [x] Endpoints de consulta (wallet, transação por id, transação por provider + id externo)
+- [x] Ledger com cursor estável e opaco
+- [x] `POST /wallets/:id/reconciliation` (divergência: log + métrica + sinalização na resposta)
+- [x] Mapeamento de status HTTP consistente e documentado
+- [x] Ponto de extensão de autenticação (decisão registrada)
 
 ## Fase 5 — Consumidor SQS (§10)
 - [ ] Reutiliza o mesmo use case da entrada HTTP
@@ -80,8 +80,13 @@ Fase atual: **4 — API HTTP** (aguardando início)
 - [ ] Ao esgotar: `REJECTED` + evento publicado
 
 ## Fase 8 — Observabilidade (§12)
-- [ ] Logs JSON com `correlationId`, `messageId`, `transactionId`, `walletId`, `providerId`
-- [ ] Métricas: transações por status, duplicatas, retries, DLQ, conflitos de lock, outbox lag, latência
+- [x] Logs JSON com `correlationId`, `transactionId`, `walletId`, `providerId` (HTTP e use case)
+- [ ] `messageId` nos logs (Fase 5)
+- [x] Métricas: transações por status, duplicatas, conflitos de lock, latência e divergência de reconciliação
+- [x] Métricas de retries, DLQ e outbox lag declaradas no registry
+- [ ] Retries e DLQ incrementados (Fase 5)
+- [ ] Outbox lag medido (Fase 6)
+- [x] `correlationId` propagado até os eventos da outbox
 
 ## Fase 9 — Testes de integração e concorrência (§13)
 Integração:
@@ -149,20 +154,28 @@ Concorrência (paralelismo real):
 - Resultado do use case como união tipada com `status`; `Rejected` cobre REJECTED e FAILED (decidir por `status`) — §13
 - `causationId`: messageId da inbox ou idempotency key; no `WalletBalanceChanged`, o eventId do `WagerTransactionProcessed` — §13
 - Ids e textos limitados a 256 caracteres (`InvalidInput`) — §13
+- Status HTTP: 400/404/409/422/503/500, 503 só para transitório; `FAILED` → 422 — §16
+- Envelope de erro único `{ error: { code, message } }` via filtro global (inclui erros do Nest; sem mensagens do Postgres) — §16
+- Abertura de wallet como use case `OpenWallet`; OPENING por factory própria, grava `WalletBalanceChanged` (sem `WagerTransactionProcessed`) — §16
+- 409 de wallet duplicada devolve o `walletId` existente — §16
+- `providerId` `internal` e keys `opening:` reservados (400) — §16
+- Cursor do ledger = base64url de `v1:<seq>`; `limit` 50 / teto 200; `nextCursor` null na última página — §16
+- Reconciliação num statement, `difference = stored − calculated`, nunca corrige — §16
+- Autenticação não implementada; `AuthGuard` no-op + desenho com Keycloak client credentials registrado — §16
+- Logs pino JSON (inclusive logger do Nest); `X-Correlation-Id` aceito só se `^[A-Za-z0-9._:-]{1,128}$` — §17
+- Métricas em registry próprio; labels `status`, `kind` (enum ou `UNKNOWN`), `failure_code` — §17
 
 ## Pendências e bloqueios
 - `README.md` fica para a Fase 10; por ora os comandos estão só no CLAUDE.md, que é local (fora do git).
-- Fase 4: `OPENING` ainda não tem factory própria (`WagerTransaction.create` a rejeita); criar junto com `POST /wallets`.
 - Fase 7: definir limite de tentativas/TTL de `PENDING_REFERENCE` (o backoff já está no domínio).
 - Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor do lançamento = valor da transação, nem o encadeamento `balance_before` (ARCHITECTURE §11). O use case garante, e `expectLedgerConsistent` verifica nos testes; a reconciliação da Fase 4 cobre em produção.
-- Fase 4: amarrar `payload.providerId` ao provider autenticado (sem isso, outro provider poderia pedir replay de uma transação alheia e ver o saldo observado).
-- Fase 4: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. Decidir se é intencional.
-- Lock da wallet antes da checagem de dono: resolvido na Fase 3 (`FOR UPDATE ... AND player_id`); rate limit por provider/wallet na borda continua recomendado (Fase 4).
-- Fase 4: `InvalidInput` só tem motivo em texto; definir códigos por campo junto com o mapeamento HTTP.
+- Decisão pendente: amarrar `payload.providerId` ao provider autenticado e escopar as consultas por provider (desenho em ARCHITECTURE §16). Sem isso, qualquer cliente submete em nome de qualquer provider e lê transações e saldos alheios.
+- Decisão pendente: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. Decidir se é intencional.
+- Lock da wallet antes da checagem de dono: resolvido na Fase 3 (`FOR UPDATE ... AND player_id`); rate limit por provider/wallet na borda continua recomendado.
+- `InvalidInput` tem código único (`INVALID_INPUT`) e motivo em texto; códigos por campo ficam para quando um consumidor precisar.
 - Fase 5: o `payloadHash` da inbox vem do consumidor; reutilizar `wagerPayloadHash` ou documentar o que ele cobre.
-- Fase 8: o contador de conflitos de lock é em memória por processo (provisório); trocar por métrica exportável.
+- Fase 5: a montagem do `InstrumentedProcessWagerTransaction` está no `WageringModule` (HTTP); mover para um módulo compartilhado com o consumidor SQS.
 - Limitação conhecida: REFUND de BET que já tem WIN PROCESSED é aceito (ARCHITECTURE §15).
-- Fase 4: cursor do ledger usa `seq` (não mapeado no registro; ler na consulta paginada).
 - Deploy: usuário da aplicação sem permissão de TRUNCATE.
 
 ## Registro de sessões
@@ -172,3 +185,6 @@ Concorrência (paralelismo real):
 - 2026-11-07 — Fase 1 concluída: Money (bigint), Wallet, WagerTransaction, WalletLedgerEntry, Inbox/Outbox, 4 eventos de integração, FailureCode; ARCHITECTURE §7–9. 160 testes unitários passando (116 do domínio). — Próximo: Fase 2 (schema), aguardando plano.
 - 2026-11-07 — Fase 2 concluída: migration com 5 tabelas, CHECKs, UNIQUEs, FKs compostas deferidas, índices parciais, triggers de imutabilidade/append-only e constraint trigger saldo × ledger; mapeamento EntitySchema + mappers; ARCHITECTURE §10–11. 248 testes passando (162 unit, 86 integração). — Próximo: Fase 3 (use case), aguardando plano.
 - 2026-11-07 — Fase 3 concluída: use case `ProcessWagerTransaction` (lock pessimista por wallet, idempotência sob lock, regras §7, outbox/inbox na mesma transação), 3 migrations novas (uma reversão no total, idempotência por provider, `BALANCE_LIMIT_EXCEEDED`); revisão com 6 revisores (5 médios + lows corrigidos); ARCHITECTURE §12–15. 370 testes passando (210 unit, 156 integração, 4 concorrência — este 5x seguidas sem falha). — Próximo: Fase 4 (API HTTP), aguardando plano.
+- 2026-11-07 — Fase 4 concluída: API HTTP de wallets, transações, consultas, ledger paginado, reconciliação e AuthGuard no-op; status HTTP documentados em ARCHITECTURE §16. Typecheck e testes HTTP de integração passando. — Próximo: Fase 5 (SQS), aguardando plano.
+- 2026-11-07 — Fase 8 parcial concluída: logs JSON com correlação HTTP, métricas Prometheus em registry próprio e wrapper compartilhado do use case; retries/DLQ/outbox lag apenas declaradas para as Fases 5–7. — Próximo: Fase 5 (SQS), aguardando plano.
+- 2026-11-07 — Validação das Fases 4 e 8 (implementadas pelo Copilot; revisores correctness + interface): 14 achados corrigidos (erros do banco viravam 400, id não-UUID dava 500, FAILED em 503, label `kind` sem limite, reconciliação sem métrica, OPENING sem evento, envelope de erro, nomes reservados, cursor, correlationId, wrapper, convenções Prometheus, 202/409). Novo use case `OpenWallet`, factory `WagerTransaction.opening`, filtro global; ARCHITECTURE §16–17 reescritos. 437 testes passando (240 unit, 193 integração, 4 concorrência). — Próximo: Fase 5 (SQS), aguardando plano.
