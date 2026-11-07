@@ -6,6 +6,7 @@ import {
   type SQSClient,
 } from '@aws-sdk/client-sqs';
 import type { MikroORM } from '@mikro-orm/postgresql';
+import pino, { type Logger } from 'pino';
 import { randomUUID } from 'node:crypto';
 import type { Clock } from '../../../src/application/ports/clock';
 import type { OutboxMessage } from '../../../src/domain/outbox-message';
@@ -180,16 +181,21 @@ export function buildPublisher(
     options?: Partial<OutboxPublisherOptions>;
     store?: OutboxStore;
     wrapEvents?: (real: OutboxEventsClient) => Events;
+    logger?: Logger;
   } = {},
 ): PublisherFixture {
   const store = overrides.store ?? new OutboxStore(orm.em, 15_000);
   const real = new OutboxEventsClient(sqs, queueName);
   const events = overrides.wrapEvents ? overrides.wrapEvents(real) : real;
   const metrics = new ObservabilityMetrics();
-  const publisher = new OutboxPublisher(store, events, overrides.clock ?? systemClock, metrics, {
-    ...TEST_PUBLISHER_OPTIONS,
-    ...overrides.options,
-  });
+  const publisher = new OutboxPublisher(
+    store,
+    events,
+    overrides.clock ?? systemClock,
+    metrics,
+    { ...TEST_PUBLISHER_OPTIONS, ...overrides.options },
+    overrides.logger,
+  );
   return { publisher, store, events, metrics };
 }
 
@@ -231,4 +237,53 @@ export async function eventually(check: () => Promise<void> | void, timeoutMs = 
       await Bun.sleep(50);
     }
   }
+}
+
+/** Logger pino que guarda cada linha (já parseada) para o teste conferir. */
+export function captureLogger(): { logger: Logger; lines: Array<Record<string, unknown>> } {
+  const lines: Array<Record<string, unknown>> = [];
+  const logger = pino({ level: 'info' }, { write: (line: string) => lines.push(JSON.parse(line) as Record<string, unknown>) });
+  return { logger, lines };
+}
+
+/**
+ * Põe no payload um caractere que o SQS recusa (U+FFFF). O LocalStack devolve, para essa
+ * entrada, um `Failed` real (`InvalidMessageContents`) e aceita as outras do lote.
+ */
+export async function poison(orm: MikroORM, eventId: string): Promise<void> {
+  await orm.em
+    .fork()
+    .execute(`update outbox_messages set payload = jsonb_set(payload, '{data,poison}', to_jsonb(?::text)) where id = ?`, [
+      '￿',
+      eventId,
+    ]);
+}
+
+/** Encerra (como uma morte do processo) a sessão do publisher que segura o lock do claim. */
+export async function killClaimSession(orm: MikroORM): Promise<number> {
+  const rows = await orm.em.fork().execute<Array<{ killed: boolean }>>(
+    `select pg_terminate_backend(pid) as killed from pg_stat_activity
+     where datname = current_database() and pid <> pg_backend_pid()
+       and state = 'idle in transaction' and query ilike '%skip locked%'`,
+  );
+  return rows.filter((row) => row.killed).length;
+}
+
+/** Tenta travar o evento sem esperar: true quando ninguém mais segura o lock. */
+export async function canLock(orm: MikroORM, eventId: string): Promise<boolean> {
+  try {
+    await orm.em.fork().transactional(async (em) => {
+      await em.execute('select id from outbox_messages where id = ? for update nowait', [eventId]);
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Promessa controlada pelo teste. */
+export function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => (resolve = r));
+  return { promise, resolve };
 }

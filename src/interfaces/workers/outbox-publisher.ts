@@ -1,3 +1,4 @@
+import type { Logger } from 'pino';
 import type { Clock } from '../../application/ports/clock';
 import type { OutboxMessage } from '../../domain/outbox-message';
 import { rootLogger } from '../../infrastructure/observability/logger';
@@ -29,7 +30,6 @@ export function errorPauseMs(consecutiveFailures: number): number {
  * Decisões no ARCHITECTURE.md §19.
  */
 export class OutboxPublisher {
-  private readonly logger = rootLogger.child({ name: 'OutboxPublisher' });
   private running = false;
   private loop: Promise<void> | undefined;
   private wakeUp: (() => void) | undefined;
@@ -41,6 +41,7 @@ export class OutboxPublisher {
     private readonly clock: Clock,
     private readonly metrics: ObservabilityMetrics,
     private readonly options: OutboxPublisherOptions,
+    private readonly logger: Logger = rootLogger.child({ name: 'OutboxPublisher' }),
   ) {}
 
   start(): void {
@@ -118,25 +119,49 @@ export class OutboxPublisher {
     }
   }
 
-  /** A chamada inteira falhou (rede, timeout): todos do lote vão para retry. Por entrada: só os recusados. */
+  /**
+   * A chamada inteira falhou (rede, timeout): todos do lote vão para retry. Por entrada: só os
+   * recusados. Se a chamada inteira foi recusada por erro do cliente (4xx), uma entrada pode ser a
+   * causa: reenvia uma a uma, para não prender os outros agregados do lote junto com ela.
+   * Um único prazo (`sqsTimeoutMs`) vale para tudo, abaixo do idle timeout da transação.
+   */
   private async publish(messages: readonly OutboxMessage[]): Promise<PublishResult | undefined> {
+    const signal = AbortSignal.timeout(this.options.sqsTimeoutMs);
+    let result: PublishResult;
     try {
-      const result = await this.events.publish(messages, AbortSignal.timeout(this.options.sqsTimeoutMs));
-      if (result.failed.size > 0) {
-        this.metrics.outboxPublishFailures.inc({ scope: 'entry' }, result.failed.size);
-        for (const [eventId, code] of result.failed) {
-          this.logger.warn({ event: 'outbox_entry_failed', eventId, code }, 'outbox entry rejected by broker');
-        }
-      }
-      return result;
+      result = await this.events.publish(messages, signal);
     } catch (error) {
       this.metrics.outboxPublishFailures.inc({ scope: 'batch' });
+      const isolate = messages.length > 1 && isClientFault(error) && !signal.aborted;
       this.logger.warn(
-        { event: 'outbox_publish_failed', errorName: errorName(error), batch: messages.length },
+        { event: 'outbox_publish_failed', errorName: errorName(error), batch: messages.length, isolate },
         'outbox publish failed',
       );
-      return undefined;
+      if (!isolate) return undefined;
+      result = await this.publishOneByOne(messages, signal);
     }
+    if (result.failed.size > 0) {
+      this.metrics.outboxPublishFailures.inc({ scope: 'entry' }, result.failed.size);
+      for (const [eventId, code] of result.failed) {
+        this.logger.warn({ event: 'outbox_entry_failed', eventId, code }, 'outbox entry rejected by broker');
+      }
+    }
+    return result;
+  }
+
+  private async publishOneByOne(messages: readonly OutboxMessage[], signal: AbortSignal): Promise<PublishResult> {
+    const published = new Set<string>();
+    const failed = new Map<string, string>();
+    for (const message of messages) {
+      try {
+        const single = await this.events.publish([message], signal);
+        for (const id of single.published) published.add(id);
+        for (const [id, code] of single.failed) failed.set(id, code);
+      } catch (error) {
+        failed.set(message.id, errorName(error));
+      }
+    }
+    return { published, failed };
   }
 
   /** Lag e travados: a cada ciclo vazio, ou no máximo uma vez por intervalo sob carga. */
@@ -182,6 +207,11 @@ export class OutboxPublisher {
       };
     });
   }
+}
+
+/** Erro do AWS SDK atribuído ao chamador (4xx): `$fault === 'client'`. */
+function isClientFault(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { $fault?: unknown }).$fault === 'client';
 }
 
 function errorName(error: unknown): string {

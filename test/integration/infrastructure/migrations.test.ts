@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
 import { MikroORM } from '@mikro-orm/postgresql';
+import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
 import { buildMikroOrmConfig } from '../../../src/infrastructure/persistence/mikro-orm.config';
 
@@ -124,6 +125,48 @@ describe('migrations', () => {
 
     await migrator.up();
     expect(await outboxSchema()).toEqual(['ix_outbox_pending_aggregate', 'seq']);
+  });
+
+  it('up da Fase 6 numera linhas existentes por (occurred_at, id), não pela ordem física, e a sequência continua', async () => {
+    const migrator = orm.getMigrator();
+    await migrator.up();
+    await migrator.down(); // sem seq
+    const knex = orm.em.getKnex();
+    await knex.raw('truncate outbox_messages');
+    const aggregate = randomUUID();
+    const at = (second: number) => new Date(Date.UTC(2026, 10, 7, 12, 0, second));
+    // Inseridos fora de ordem: a ordem física (heap) é 3, 1, 2.
+    const rows = [3, 1, 2].map((second) => ({
+      id: randomUUID(),
+      aggregate_id: aggregate,
+      event_type: 'WalletBalanceChanged',
+      payload: JSON.stringify({ second }),
+      occurred_at: at(second),
+      attempts: 0,
+    }));
+    for (const row of rows) await knex.insert(row).into('outbox_messages');
+
+    await migrator.up();
+    const numbered = await orm.em
+      .getConnection()
+      .execute<Array<{ seq: string; second: number }>>(
+        `select seq::text, (payload->>'second')::int as second from outbox_messages order by seq`,
+      );
+    expect(numbered).toEqual([
+      { seq: '1', second: 1 },
+      { seq: '2', second: 2 },
+      { seq: '3', second: 3 },
+    ]);
+
+    // A sequência continua do maior valor.
+    await knex
+      .insert({ ...rows[0], id: randomUUID(), payload: JSON.stringify({ second: 4 }) })
+      .into('outbox_messages');
+    const [last] = await orm.em
+      .getConnection()
+      .execute<Array<{ seq: string }>>('select max(seq)::text as seq from outbox_messages');
+    expect(last?.seq).toBe('4');
+    await knex.raw('truncate outbox_messages');
   });
 
   it('up é idempotente', async () => {

@@ -126,10 +126,13 @@ describe('loadConfig', () => {
     expect(problemsOf({ ...validEnv, SQS_WAGER_EVENTS_QUEUE_NAME: 'eventos' })).toEqual([
       'SQS_WAGER_EVENTS_QUEUE_NAME deve terminar em ".fifo"',
     ]);
-    // O lock do claim é segurado durante o envio: o timeout do SQS precisa ser menor.
+    // O lock do claim é segurado durante o envio: o timeout do SQS + 2s de folga cabe no idle timeout.
+    const margin = ['OUTBOX_SQS_TIMEOUT_MS + 2000 deve ser menor ou igual a OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS'];
+    expect(problemsOf({ ...validEnv, OUTBOX_SQS_TIMEOUT_MS: '13001', OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS: '15000' })).toEqual(margin);
+    expect(problemsOf({ ...validEnv, OUTBOX_SQS_TIMEOUT_MS: '14900', OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS: '15000' })).toEqual(margin);
     expect(
-      problemsOf({ ...validEnv, OUTBOX_SQS_TIMEOUT_MS: '15000', OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS: '15000' }),
-    ).toEqual(['OUTBOX_SQS_TIMEOUT_MS deve ser menor que OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS']);
+      loadConfig({ ...validEnv, OUTBOX_SQS_TIMEOUT_MS: '13000', OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS: '15000' }).outboxPublisher.sqsTimeoutMs,
+    ).toBe(13_000);
   });
 
   it('exige as duas credenciais AWS juntas', () => {

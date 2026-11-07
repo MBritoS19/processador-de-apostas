@@ -25,7 +25,7 @@ export interface AppConfig {
     readonly batchSize: number;
     /** Espera só quando o claim volta vazio. */
     readonly pollIntervalMs: number;
-    /** Timeout do SendMessageBatch; sempre menor que `idleInTransactionTimeoutMs`. */
+    /** Timeout do SendMessageBatch (sem retries do SDK); `+ 2s` ≤ `idleInTransactionTimeoutMs`. */
     readonly sqsTimeoutMs: number;
     /** `idle_in_transaction_session_timeout` da transação do claim (o lock é segurado durante o envio). */
     readonly idleInTransactionTimeoutMs: number;
@@ -56,6 +56,9 @@ export class InvalidConfigError extends Error {
     this.name = 'InvalidConfigError';
   }
 }
+
+/** Folga mínima entre o timeout do SQS e o idle timeout da transação do claim. */
+export const OUTBOX_TIMEOUT_MARGIN_MS = 2_000;
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -178,9 +181,12 @@ export function loadConfig(env: Env = process.env): AppConfig {
     problems.push('SQS_RETRY_MAX_SECONDS deve ser maior ou igual a SQS_RETRY_BASE_SECONDS');
   }
 
-  if (config.outboxPublisher.sqsTimeoutMs >= config.outboxPublisher.idleInTransactionTimeoutMs) {
-    // O lock do claim é segurado durante o envio: um SQS lento não pode segurá-lo além do timeout da transação.
-    problems.push('OUTBOX_SQS_TIMEOUT_MS deve ser menor que OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS');
+  if (config.outboxPublisher.sqsTimeoutMs + OUTBOX_TIMEOUT_MARGIN_MS > config.outboxPublisher.idleInTransactionTimeoutMs) {
+    // O lock do claim é segurado durante o envio: um SQS lento não pode segurá-lo além do timeout da
+    // transação. A folga cobre o save e o commit depois do envio.
+    problems.push(
+      `OUTBOX_SQS_TIMEOUT_MS + ${OUTBOX_TIMEOUT_MARGIN_MS} deve ser menor ou igual a OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS`,
+    );
   }
 
   if (problems.length > 0) throw new InvalidConfigError(problems);

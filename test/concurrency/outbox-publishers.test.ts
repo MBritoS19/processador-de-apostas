@@ -46,7 +46,10 @@ describe('publishers concorrentes sobre a mesma outbox', () => {
     const aggregates = Array.from({ length: 30 }, () => randomUUID());
     const events = await insertEvents(orms[0]!, aggregates, 10);
     expect(events).toHaveLength(300);
-    const fixtures = orms.map((orm) => buildPublisher(orm, sqs, queue.name, { wrapEvents: (real) => new SpyEvents(real) }));
+    // Lote de 2: o trabalho não cabe na vantagem de quem começa primeiro, então os dois publicam.
+    const fixtures = orms.map((orm) =>
+      buildPublisher(orm, sqs, queue.name, { options: { batchSize: 2 }, wrapEvents: (real) => new SpyEvents(real) }),
+    );
 
     for (const { publisher } of fixtures) publisher.start();
     await eventually(async () => expect(await pendingCount(orms[0]!)).toBe(0), 60_000);
@@ -109,9 +112,10 @@ describe('publishers concorrentes sobre a mesma outbox', () => {
     await Promise.all(fixtures.map(({ publisher }) => publisher.stop()));
 
     expect(refusals).toBe(2);
-    // O 2º nunca foi nem enviado antes de o 1º ser aceito.
-    const sentOrder = spies.flatMap((spy) => spy.calls.flat());
-    expect(sentOrder.filter((id) => id === second.id)).toHaveLength(1);
+    // O 2º foi enviado uma única vez (não houve tentativa fora de ordem que falhasse). A prova de
+    // ordem vem do published_at e da ordem na fila, abaixo.
+    const sent = spies.flatMap((spy) => spy.calls.flat());
+    expect(sent.filter((id) => id === second.id)).toHaveLength(1);
     const rows = await outboxRows(orms[0]!);
     const firstRow = rows.find((r) => r.id === first.id)!;
     const secondRow = rows.find((r) => r.id === second.id)!;

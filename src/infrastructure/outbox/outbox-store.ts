@@ -19,14 +19,15 @@ const CLAIM_SQL = `
   limit ?
   for update of o skip locked`;
 
+/** O driver (type parser do MikroORM) devolve timestamptz como texto; a conversão é explícita em `toMessage`. */
 interface OutboxRow {
   id: string;
   aggregate_id: string;
   event_type: string;
   payload: Record<string, unknown>;
-  occurred_at: Date;
+  occurred_at: string;
   attempts: number;
-  next_attempt_at: Date | null;
+  next_attempt_at: string | null;
 }
 
 export interface OutboxBacklog {
@@ -103,8 +104,8 @@ function toMessage(row: OutboxRow): OutboxMessage {
     aggregateId: row.aggregate_id,
     eventType: row.event_type,
     payload: row.payload,
-    occurredAt: row.occurred_at,
+    occurredAt: new Date(row.occurred_at),
     attempts: row.attempts,
-    nextAttemptAt: row.next_attempt_at ?? undefined,
+    nextAttemptAt: row.next_attempt_at === null ? undefined : new Date(row.next_attempt_at),
   });
 }
