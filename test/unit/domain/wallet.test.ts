@@ -22,10 +22,10 @@ function open(initial = '100.00') {
   });
 }
 
-const movement = (amount: string, money = brl(amount)) => ({
+const movement = (amount: string) => ({
   entryId: 'entry-2',
   transactionId: 'tx-2',
-  money,
+  money: brl(amount),
   at: T1,
 });
 
@@ -90,9 +90,9 @@ describe('Wallet.debit / credit', () => {
 
   test('moeda diferente da wallet lança CurrencyMismatchError sem alterar estado', () => {
     const { wallet } = open();
-    const usd = Money.from({ amount: '1.00', currency: 'USD' });
-    expect(() => wallet.debit(movement('', usd))).toThrow(CurrencyMismatchError);
-    expect(() => wallet.credit(movement('', usd))).toThrow(CurrencyMismatchError);
+    const usdMovement = { ...movement('1.00'), money: Money.from({ amount: '1.00', currency: 'USD' }) };
+    expect(() => wallet.debit(usdMovement)).toThrow(CurrencyMismatchError);
+    expect(() => wallet.credit(usdMovement)).toThrow(CurrencyMismatchError);
     expect(wallet.balance.amount).toBe('100.00');
     expect(wallet.version).toBe(1);
   });
