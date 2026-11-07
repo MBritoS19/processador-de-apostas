@@ -135,6 +135,26 @@ describe('loadConfig', () => {
     ).toBe(13_000);
   });
 
+  it('referências pendentes: defaults, valores informados e validação', () => {
+    expect(loadConfig({ DATABASE_URL: validEnv.DATABASE_URL }).pendingReferences).toEqual({
+      workerEnabled: true,
+      batchSize: 10,
+      pollIntervalMs: 1_000,
+      gaugeIntervalMs: 10_000,
+      ttlMs: 3_600_000,
+      shutdownTimeoutMs: 25_000,
+    });
+    const config = loadConfig({ ...validEnv, PENDING_REFERENCE_WORKER_ENABLED: 'false', PENDING_REFERENCE_TTL_MS: '60000' });
+    expect(config.pendingReferences.workerEnabled).toBe(false);
+    expect(config.pendingReferences.ttlMs).toBe(60_000);
+    expect(problemsOf({ ...validEnv, PENDING_REFERENCE_TTL_MS: '999' })).toEqual([
+      'PENDING_REFERENCE_TTL_MS deve ser um inteiro entre 1000 e 604800000 (recebido: "999")',
+    ]);
+    expect(problemsOf({ ...validEnv, PENDING_REFERENCE_BATCH_SIZE: '0' })).toEqual([
+      'PENDING_REFERENCE_BATCH_SIZE deve ser um inteiro entre 1 e 100 (recebido: "0")',
+    ]);
+  });
+
   it('exige as duas credenciais AWS juntas', () => {
     const message = 'AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY devem ser informadas juntas';
     expect(problemsOf({ ...validEnv, AWS_ACCESS_KEY_ID: 'test' })).toEqual([message]);

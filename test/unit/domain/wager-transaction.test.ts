@@ -106,6 +106,16 @@ describe('WagerTransaction — transições válidas', () => {
     expect(tx.nextReferenceCheckAt).toEqual(new Date(T0.getTime() + REFERENCE_RETRY_MAX_MS));
   });
 
+  test('com deadline, a próxima checagem nunca passa dele; sem efeito quando o backoff cabe', () => {
+    const tx = withRef(Kind.Rollback);
+    tx.markPendingReference(T0, new Date(T0.getTime() + 60_000));
+    expect(tx.nextReferenceCheckAt).toEqual(new Date(T0.getTime() + REFERENCE_RETRY_BASE_MS));
+    const deadline = new Date(T0.getTime() + 7_000);
+    tx.markPendingReference(T0, deadline);
+    expect(tx.referenceAttempts).toBe(2);
+    expect(tx.nextReferenceCheckAt).toEqual(deadline);
+  });
+
   test('PENDING_REFERENCE → PROCESSED guarda a referência interna e limpa o agendamento', () => {
     const tx = withRef(Kind.Rollback);
     tx.markPendingReference(T0);

@@ -28,10 +28,35 @@ export interface WagerProcessingRepository {
   insertLedgerEntry(entry: WalletLedgerEntry): Promise<void>;
   insertOutbox(messages: readonly OutboxMessage[]): Promise<void>;
   insertInbox(message: InboxMessage): Promise<void>;
+  /**
+   * `SELECT ... FOR UPDATE SKIP LOCKED` da wallet (worker de pendentes): `undefined` quando outra
+   * transação segura o lock (as pendentes sempre têm wallet do player, garantido pela FK).
+   */
+  tryLockWallet(walletId: string, playerId: string): Promise<Wallet | undefined>;
+  /** `SELECT ... FOR UPDATE` da transação. Só depois do lock da wallet (ordem de locks, ARCHITECTURE §20). */
+  lockTransaction(id: string): Promise<WagerTransaction | undefined>;
+  /** Grava o novo estado de uma PENDING_REFERENCE. Lança se a linha não estiver mais pendente (bug: o chamador segura o lock). */
+  updatePendingTransaction(tx: WagerTransaction): Promise<void>;
+  /** PENDING_REFERENCE vencidas (`next_reference_check_at <= now`), as mais antigas primeiro. Sem lock. */
+  findDuePendingReferences(now: Date, limit: number): Promise<PendingReferenceCandidate[]>;
+  countPendingReferences(): Promise<number>;
+  /**
+   * Caminho rápido: antecipa para `now` a próxima checagem das PENDING_REFERENCE da mesma wallet
+   * que referenciam `(providerId, externalTransactionId)`. Devolve quantas mudaram.
+   */
+  expediteAwaitingReference(providerId: string, externalTransactionId: string, walletId: string, now: Date): Promise<number>;
+  /** eventId do WagerTransactionPendingReference da transação, se houver. */
+  findPendingReferenceEventId(transactionId: string): Promise<string | undefined>;
   /** Abertura de wallet (POST /wallets). Viola `uq_wallets_player_currency` se o player já tem wallet na moeda. */
   insertWallet(wallet: Wallet): Promise<void>;
   /** Wallet do player na moeda, para devolver o id no conflito de abertura. */
   findWalletIdByPlayer(playerId: string, currency: string): Promise<string | undefined>;
+}
+
+export interface PendingReferenceCandidate {
+  id: string;
+  walletId: string;
+  playerId: string;
 }
 
 /**

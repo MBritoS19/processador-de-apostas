@@ -95,6 +95,7 @@ export class OpenWallet {
           idempotencyKey: key,
           payloadHash: wagerPayloadHash(fields),
           createdAt: at,
+          correlationId: command.correlationId,
         });
         await repository.insertTransaction(opening);
         await repository.insertLedgerEntry(openingEntry);

@@ -178,6 +178,7 @@ export class ProcessWagerTransaction {
         idempotencyKey,
         payloadHash: wagerPayloadHash(fields),
         createdAt: this.clock.now(),
+        correlationId: command.correlationId,
       });
     } catch (error) {
       if (error instanceof InvalidMoneyError || error instanceof InvalidWagerTransactionError) return error.message;
@@ -211,7 +212,7 @@ export class ProcessWagerTransaction {
       correlationId: command.correlationId,
       // A mensagem de entrada (inbox) ou a requisição (idempotency key).
       causationId: command.inbox?.messageId ?? command.idempotencyKey,
-    });
+    }, 'insert');
     if (command.inbox) await repository.insertInbox(this.inboxMessage(command.inbox));
 
     return resultOf(tx, false);

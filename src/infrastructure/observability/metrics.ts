@@ -81,4 +81,33 @@ export class ObservabilityMetrics {
     help: 'Eventos pendentes com tentativas acima do limite (OUTBOX_STUCK_ATTEMPTS); bloqueiam o agregado.',
     registers: [this.registry],
   });
+
+  // Worker de referências pendentes (Fase 7).
+  readonly pendingReferences = new Gauge({
+    name: 'wagering_pending_references',
+    help: 'Transações em PENDING_REFERENCE (medido em intervalo fixo pelo worker).',
+    registers: [this.registry],
+  });
+  readonly pendingReferenceResolved = new Counter({
+    name: 'wagering_pending_reference_resolved_total',
+    help: 'Pendentes resolvidas com a referência encontrada, por status final (PROCESSED ou REJECTED).',
+    labelNames: ['status'] as const,
+    registers: [this.registry],
+  });
+  readonly pendingReferenceExpired = new Counter({
+    name: 'wagering_pending_reference_expired_total',
+    help: 'Pendentes rejeitadas com REFERENCE_NOT_FOUND por prazo esgotado.',
+    registers: [this.registry],
+  });
+  readonly pendingReferenceRescheduled = new Counter({
+    name: 'wagering_pending_reference_rescheduled_total',
+    help: 'Novas tentativas agendadas (referência ainda ausente ou não resolvida).',
+    registers: [this.registry],
+  });
+  readonly pendingReferenceSkipped = new Counter({
+    name: 'wagering_pending_reference_skipped_total',
+    help: 'Candidatas puladas: wallet_busy, not_due (tratada por outra instância), transient ou error.',
+    labelNames: ['reason'] as const,
+    registers: [this.registry],
+  });
 }

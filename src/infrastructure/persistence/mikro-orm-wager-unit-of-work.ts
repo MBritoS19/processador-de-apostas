@@ -4,6 +4,7 @@ import {
   TransientPersistenceError,
   UniqueViolationError,
   WalletVersionConflictError,
+  type PendingReferenceCandidate,
   type UniqueViolationKind,
   type WagerProcessingRepository,
   type WagerUnitOfWork,
@@ -145,6 +146,76 @@ class MikroOrmWagerProcessingRepository implements WagerProcessingRepository {
 
   async insertInbox(message: InboxMessage): Promise<void> {
     await this.em.insert(InboxMessageRecord, toInboxMessageRecord(message));
+  }
+
+  async tryLockWallet(walletId: string, playerId: string): Promise<Wallet | undefined> {
+    const record = await this.em.findOne(
+      WalletRecord,
+      { id: walletId, playerId },
+      { lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE },
+    );
+    return record ? toWallet(record) : undefined;
+  }
+
+  async lockTransaction(id: string): Promise<WagerTransaction | undefined> {
+    const record = await this.em.findOne(WagerTransactionRecord, { id }, { lockMode: LockMode.PESSIMISTIC_WRITE });
+    return record ? toWagerTransaction(record) : undefined;
+  }
+
+  async updatePendingTransaction(tx: WagerTransaction): Promise<void> {
+    const { status, referenceTransactionId, failureCode, processedAt, observedBalance, referenceAttempts, nextReferenceCheckAt } =
+      toWagerTransactionRecord(tx);
+    const affected = await this.em.nativeUpdate(
+      WagerTransactionRecord,
+      { id: tx.id, status: WagerTransactionStatus.PendingReference },
+      { status, referenceTransactionId, failureCode, processedAt, observedBalance, referenceAttempts, nextReferenceCheckAt },
+    );
+    if (affected !== 1) throw new Error(`transação ${tx.id} não está mais em PENDING_REFERENCE`);
+  }
+
+  async findDuePendingReferences(now: Date, limit: number): Promise<PendingReferenceCandidate[]> {
+    // Servida pelo índice parcial ix_wager_tx_reference_check_due.
+    const rows = await this.em.execute<Array<{ id: string; wallet_id: string; player_id: string }>>(
+      `select id, wallet_id, player_id from wager_transactions
+       where status = 'PENDING_REFERENCE' and next_reference_check_at <= ?
+       order by next_reference_check_at
+       limit ?`,
+      [now, limit],
+    );
+    return rows.map((row) => ({ id: row.id, walletId: row.wallet_id, playerId: row.player_id }));
+  }
+
+  async countPendingReferences(): Promise<number> {
+    return this.em.count(WagerTransactionRecord, { status: WagerTransactionStatus.PendingReference });
+  }
+
+  async expediteAwaitingReference(
+    providerId: string,
+    externalTransactionId: string,
+    walletId: string,
+    now: Date,
+  ): Promise<number> {
+    // Servida pelo índice parcial ix_wager_tx_awaiting_reference. Só linhas da wallet já travada.
+    return this.em.nativeUpdate(
+      WagerTransactionRecord,
+      {
+        status: WagerTransactionStatus.PendingReference,
+        providerId,
+        referenceExternalTransactionId: externalTransactionId,
+        walletId,
+        nextReferenceCheckAt: { $gt: now },
+      },
+      { nextReferenceCheckAt: now },
+    );
+  }
+
+  async findPendingReferenceEventId(transactionId: string): Promise<string | undefined> {
+    const rows = await this.em.execute<Array<{ id: string }>>(
+      `select id from outbox_messages where aggregate_id = ? and event_type = 'WagerTransactionPendingReference'
+       order by seq limit 1`,
+      [transactionId],
+    );
+    return rows[0]?.id;
   }
 
   async insertWallet(wallet: Wallet): Promise<void> {

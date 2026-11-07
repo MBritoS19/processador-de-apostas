@@ -6,6 +6,7 @@ import { WagerTransactionRejected } from '../../domain/events/wager-transaction-
 import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed';
 import { FailureCode } from '../../domain/failure-code';
 import { OutboxMessage } from '../../domain/outbox-message';
+import { addMs } from '../../domain/backoff';
 import { WagerTransactionStatus, type WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
 import { LedgerDirection, type WalletLedgerEntry } from '../../domain/wallet-ledger-entry';
@@ -20,6 +21,23 @@ export interface SettlementContext {
   causationId: string;
 }
 
+/**
+ * Prazo para a referência aparecer, contado do `createdAt` da transação dependente. Esgotado:
+ * REJECTED com REFERENCE_NOT_FOUND (justificativa no ARCHITECTURE §20).
+ */
+export const PENDING_REFERENCE_TTL_MS = 60 * 60_000;
+
+/**
+ * `insert`: transação nova (entrada HTTP/SQS). `update`: reprocessamento de uma PENDING_REFERENCE
+ * já gravada (worker); nova tentativa sem resolução não gera evento.
+ */
+export type SettlementMode = 'insert' | 'update';
+
+/** `expired`: a tentativa esgotou o prazo da referência (REJECTED com REFERENCE_NOT_FOUND). */
+export interface SettlementOutcome {
+  expired: boolean;
+}
+
 type ReferenceCheck = { type: 'ok'; reference: WagerTransaction } | { type: 'pending' } | { type: 'reject'; code: FailureCode };
 
 /**
@@ -27,24 +45,41 @@ type ReferenceCheck = { type: 'ok'; reference: WagerTransaction } | { type: 'pen
  * da transação SQL do chamador, que já segura o lock da wallet. Fonte única das regras.
  */
 export class WagerSettlement {
-  constructor(private readonly ids: IdGenerator) {}
+  constructor(
+    private readonly ids: IdGenerator,
+    private readonly referenceTtlMs: number = PENDING_REFERENCE_TTL_MS,
+  ) {
+    if (!Number.isInteger(referenceTtlMs) || referenceTtlMs <= 0) {
+      throw new RangeError('referenceTtlMs deve ser um inteiro positivo');
+    }
+  }
 
-  /** Aplica as regras a uma transação nova (PENDING) e grava tudo. `tx` sai no estado final da tentativa. */
+  /**
+   * Aplica as regras e grava tudo. `tx` sai no estado final da tentativa. Se `tx` virou terminal,
+   * antecipa as pendentes da mesma wallet que a referenciam (caminho rápido; quem resolve é o worker).
+   */
   async settle(
     repository: WagerProcessingRepository,
     tx: WagerTransaction,
     wallet: Wallet | undefined,
     context: SettlementContext,
-  ): Promise<void> {
+    mode: SettlementMode,
+  ): Promise<SettlementOutcome> {
     const expectedVersion = wallet?.version;
     const entry = await this.apply(repository, tx, wallet, context.now);
 
-    await repository.insertTransaction(tx);
+    if (mode === 'insert') await repository.insertTransaction(tx);
+    else await repository.updatePendingTransaction(tx);
     if (entry !== undefined && wallet !== undefined && expectedVersion !== undefined) {
       await repository.updateWallet(wallet, expectedVersion);
       await repository.insertLedgerEntry(entry);
     }
-    await repository.insertOutbox(this.events(tx, wallet, entry, context));
+    const retried = mode === 'update' && tx.status === WagerTransactionStatus.PendingReference;
+    if (!retried) await repository.insertOutbox(this.events(tx, wallet, entry, context));
+    if (tx.isTerminal()) {
+      await repository.expediteAwaitingReference(tx.providerId, tx.externalTransactionId, tx.walletId, context.now);
+    }
+    return { expired: tx.failureCode === FailureCode.ReferenceNotFound };
   }
 
   /** Aplica as regras de negócio, mudando `tx` (e `wallet`, se houver lançamento). */
@@ -65,7 +100,12 @@ export class WagerSettlement {
     if (tx.referenceExternalTransactionId !== undefined) {
       const found = await repository.findByExternalId(tx.providerId, tx.referenceExternalTransactionId);
       const check = checkReference(tx, found);
-      if (check.type === 'pending') return void tx.markPendingReference(now);
+      if (check.type === 'pending') {
+        // Ausente ou ainda não resolvida: aguarda até o prazo; esgotado, REFERENCE_NOT_FOUND nos dois casos.
+        const deadline = addMs(tx.createdAt, this.referenceTtlMs);
+        if (now >= deadline) return void tx.reject(FailureCode.ReferenceNotFound, wallet.balance);
+        return void tx.markPendingReference(now, deadline);
+      }
       if (check.type === 'reject') return void tx.reject(check.code, wallet.balance);
       reference = check.reference;
       // Vale para reversões (uma no total) e para WIN/LOSS: liquidar uma BET já estornada creditaria duas vezes.

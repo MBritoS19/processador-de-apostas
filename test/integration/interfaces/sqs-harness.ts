@@ -164,6 +164,8 @@ type Process = Pick<InstrumentedProcessWagerTransaction, 'execute'>;
 export interface ConsumerAppOptions {
   queues: TestQueues;
   consumer?: Partial<AppConfig['sqsConsumer']>;
+  /** Worker de referências pendentes (desligado por padrão no .env.test). */
+  pendingReferences?: Partial<AppConfig['pendingReferences']>;
   /** Embrulha o use case real (instrumentado) — só para injetar falha/atraso no teste. */
   wrapProcess?: (real: Process) => Process;
   /** Substitui o cliente da fila — só para injetar falha no teste. */
@@ -188,6 +190,7 @@ export async function startConsumerApp(options: ConsumerAppOptions): Promise<INe
       shutdownTimeoutMs: 5_000,
       ...options.consumer,
     },
+    pendingReferences: { ...base.pendingReferences, ...options.pendingReferences },
   };
   let builder = Test.createTestingModule({ imports: [AppModule.register(config)] });
   if (options.wrapProcess) {

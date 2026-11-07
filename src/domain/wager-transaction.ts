@@ -27,7 +27,7 @@ export const INTERNAL_PROVIDER_ID = 'internal';
 /** Prefixo da idempotency key (e do id externo) da OPENING. Reservado para providers externos. */
 export const OPENING_KEY_PREFIX = 'opening:';
 
-/** Backoff entre tentativas de resolver a referência (o limite de tentativas é da Fase 7). */
+/** Backoff entre tentativas de resolver a referência. O prazo (TTL) é do settlement (ARCHITECTURE §20). */
 export const REFERENCE_RETRY_BASE_MS = 5_000;
 export const REFERENCE_RETRY_MAX_MS = 10 * 60_000;
 
@@ -67,6 +67,8 @@ export interface CreateWagerTransactionProps {
   /** id no provedor — não o id interno. */
   referenceExternalTransactionId?: string | undefined;
   createdAt: Date;
+  /** Correlação da requisição de entrada; reaproveitada nos eventos de um reprocessamento. */
+  correlationId?: string | undefined;
 }
 
 export interface WagerTransactionState extends CreateWagerTransactionProps {
@@ -100,6 +102,7 @@ export class WagerTransaction {
   readonly money: Money;
   readonly referenceExternalTransactionId: string | undefined;
   readonly createdAt: Date;
+  readonly correlationId: string | undefined;
   private _status: WagerTransactionStatus;
   private _referenceTransactionId: string | undefined;
   private _failureCode: FailureCode | undefined;
@@ -122,6 +125,7 @@ export class WagerTransaction {
     this.money = state.money;
     this.referenceExternalTransactionId = state.referenceExternalTransactionId;
     this.createdAt = new Date(state.createdAt);
+    this.correlationId = state.correlationId;
     this._status = state.status;
     this._referenceTransactionId = state.referenceTransactionId;
     this._failureCode = state.failureCode;
@@ -222,18 +226,17 @@ export class WagerTransaction {
   /**
    * Entra em PENDING_REFERENCE (vindo de PENDING) ou registra mais uma tentativa
    * (PENDING_REFERENCE → PENDING_REFERENCE). Incrementa as tentativas e agenda a próxima.
+   * Com `deadline`, a próxima checagem nunca passa dele (a última tentativa cai no prazo).
    */
-  markPendingReference(now: Date): void {
+  markPendingReference(now: Date, deadline?: Date): void {
     this.assertNotTerminal(WagerTransactionStatus.PendingReference);
     if (this.referenceExternalTransactionId === undefined) {
       throw new InvalidWagerTransactionError('transação sem referência não pode aguardar referência');
     }
     this._status = WagerTransactionStatus.PendingReference;
     this._referenceAttempts += 1;
-    this._nextReferenceCheckAt = addMs(
-      now,
-      exponentialBackoffMs(this._referenceAttempts, REFERENCE_RETRY_BASE_MS, REFERENCE_RETRY_MAX_MS),
-    );
+    const next = addMs(now, exponentialBackoffMs(this._referenceAttempts, REFERENCE_RETRY_BASE_MS, REFERENCE_RETRY_MAX_MS));
+    this._nextReferenceCheckAt = deadline !== undefined && deadline < next ? new Date(deadline) : next;
   }
 
   /** `observedBalance` só quando há wallet na moeda da transação (ausente em WALLET_NOT_FOUND, por ex.). */

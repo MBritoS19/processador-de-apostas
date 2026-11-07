@@ -74,6 +74,9 @@ describe('migrations', () => {
     expect(await existingSchemaObjects()).toEqual(SCHEMA_OBJECTS);
   });
 
+  /** Reverte a da Fase 6 e as posteriores (`to` é inclusivo). */
+  const PHASE6_OUTBOX_SEQ = 'Migration20261107400000_outbox_seq';
+
   it('down das migrations da Fase 3 restaura os índices e constraints da Fase 2', async () => {
     const migrator = orm.getMigrator();
     await migrator.up();
@@ -93,8 +96,8 @@ describe('migrations', () => {
     );
     expect(phase3.ck_wager_tx_failure_code).toContain('BALANCE_LIMIT_EXCEEDED');
 
-    // Fase 6 (outbox_seq) + as 3 da Fase 3.
-    for (let i = 0; i < 4; i++) await migrator.down();
+    // As 3 da Fase 3 e tudo depois delas (`to` é inclusivo).
+    await migrator.down({ to: 'Migration20261107200000_one_reversal_per_reference' });
     const phase2 = await schemaObjects();
     expect(phase2).toHaveProperty('ux_wager_tx_one_reversal_per_kind');
     expect(phase2).toHaveProperty('uq_wager_tx_idempotency_key');
@@ -120,7 +123,7 @@ describe('migrations', () => {
     };
     expect(await outboxSchema()).toEqual(['ix_outbox_pending_aggregate', 'seq']);
 
-    await migrator.down();
+    await migrator.down({ to: PHASE6_OUTBOX_SEQ });
     expect(await outboxSchema()).toEqual([]);
 
     await migrator.up();
@@ -130,7 +133,7 @@ describe('migrations', () => {
   it('up da Fase 6 numera linhas existentes por (occurred_at, id), não pela ordem física, e a sequência continua', async () => {
     const migrator = orm.getMigrator();
     await migrator.up();
-    await migrator.down(); // sem seq
+    await migrator.down({ to: PHASE6_OUTBOX_SEQ }); // sem seq
     const knex = orm.em.getKnex();
     await knex.raw('truncate outbox_messages');
     const aggregate = randomUUID();

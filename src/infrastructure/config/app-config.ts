@@ -47,6 +47,18 @@ export interface AppConfig {
     readonly maxAttempts: number;
     readonly shutdownTimeoutMs: number;
   };
+  /** Worker de referências pendentes (Fase 7). Números justificados no ARCHITECTURE.md §20. */
+  readonly pendingReferences: {
+    readonly workerEnabled: boolean;
+    readonly batchSize: number;
+    /** Espera só quando a busca de candidatas volta vazia ou nenhuma avançou. */
+    readonly pollIntervalMs: number;
+    /** Intervalo de atualização do gauge de pendentes. */
+    readonly gaugeIntervalMs: number;
+    /** Prazo da referência a partir do createdAt (vale também para o use case). */
+    readonly ttlMs: number;
+    readonly shutdownTimeoutMs: number;
+  };
   readonly healthCheckTimeoutMs: number;
 }
 
@@ -173,6 +185,14 @@ export function loadConfig(env: Env = process.env): AppConfig {
       retryMaxSeconds: intInRange('SQS_RETRY_MAX_SECONDS', 300, 0, 43_200),
       maxAttempts: intInRange('SQS_CONSUMER_MAX_ATTEMPTS', 5, 1, 1000),
       shutdownTimeoutMs: intInRange('SQS_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
+    },
+    pendingReferences: {
+      workerEnabled: bool('PENDING_REFERENCE_WORKER_ENABLED', true),
+      batchSize: intInRange('PENDING_REFERENCE_BATCH_SIZE', 10, 1, 100),
+      pollIntervalMs: intInRange('PENDING_REFERENCE_POLL_INTERVAL_MS', 1_000, 1, 60_000),
+      gaugeIntervalMs: intInRange('PENDING_REFERENCE_GAUGE_INTERVAL_MS', 10_000, 1, 600_000),
+      ttlMs: intInRange('PENDING_REFERENCE_TTL_MS', 3_600_000, 1_000, 7 * 24 * 3_600_000),
+      shutdownTimeoutMs: intInRange('PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
     },
     healthCheckTimeoutMs: positiveInt('HEALTH_CHECK_TIMEOUT_MS', 2000, 60_000),
   };

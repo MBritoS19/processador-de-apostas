@@ -30,6 +30,7 @@ export class WagerTransactionRecord {
   referenceAttempts!: number;
   nextReferenceCheckAt!: Date | null;
   createdAt!: Date;
+  correlationId!: string | null;
 }
 
 const money = { type: 'decimal', precision: 20, scale: 2, runtimeType: 'string' } as const;
@@ -59,6 +60,7 @@ export const WagerTransactionSchema = new EntitySchema<WagerTransactionRecord>({
     referenceAttempts: { type: 'integer' },
     nextReferenceCheckAt: { type: 'Date', nullable: true },
     createdAt: { type: 'Date' },
+    correlationId: { type: 'text', nullable: true },
   },
 });
 
@@ -85,6 +87,7 @@ export function toWagerTransactionRecord(tx: WagerTransaction): WagerTransaction
     referenceAttempts: tx.referenceAttempts,
     nextReferenceCheckAt: tx.nextReferenceCheckAt ?? null,
     createdAt: tx.createdAt,
+    correlationId: tx.correlationId ?? null,
   });
 }
 
@@ -111,5 +114,6 @@ export function toWagerTransaction(record: WagerTransactionRecord): WagerTransac
     referenceAttempts: record.referenceAttempts,
     nextReferenceCheckAt: record.nextReferenceCheckAt ?? undefined,
     createdAt: record.createdAt,
+    correlationId: record.correlationId ?? undefined,
   });
 }
