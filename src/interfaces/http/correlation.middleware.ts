@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
+import { CORRELATION_ID_PATTERN } from '../../infrastructure/observability/correlation';
 import { rootLogger } from '../../infrastructure/observability/logger';
 
 const logger = rootLogger.child({ name: 'HTTP' });
-/** Aceito do cliente só se for curto e sem caracteres de controle; senão é gerado um novo. */
-const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /**
  * Lê `X-Correlation-Id` (ou gera um), grava na requisição e na resposta. Idempotente: também é

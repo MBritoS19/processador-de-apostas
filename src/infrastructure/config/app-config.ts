@@ -16,6 +16,18 @@ export interface AppConfig {
     readonly wagerQueueName: string;
     readonly wagerDlqName: string;
   };
+  /** Consumidor da fila de transações (Fase 5). Números justificados no ARCHITECTURE.md §18. */
+  readonly sqsConsumer: {
+    readonly enabled: boolean;
+    /** Chave da inbox: `(consumerName, messageId)`. */
+    readonly name: string;
+    readonly maxMessages: number;
+    readonly waitTimeSeconds: number;
+    readonly visibilityTimeoutSeconds: number;
+    readonly retryBaseSeconds: number;
+    readonly retryMaxSeconds: number;
+    readonly shutdownTimeoutMs: number;
+  };
   readonly healthCheckTimeoutMs: number;
 }
 
@@ -51,6 +63,27 @@ export function loadConfig(env: Env = process.env): AppConfig {
       return fallback;
     }
     return value;
+  };
+
+  const intInRange = (name: string, fallback: number, min: number, max: number): number => {
+    const raw = env[name]?.trim();
+    if (raw === undefined || raw === '') return fallback;
+    const value = Number(raw);
+    if (!/^\d+$/.test(raw) || value < min || value > max) {
+      problems.push(`${name} deve ser um inteiro entre ${min} e ${max} (recebido: "${raw}")`);
+      return fallback;
+    }
+    return value;
+  };
+
+  const bool = (name: string, fallback: boolean): boolean => {
+    const raw = env[name]?.trim();
+    if (raw === undefined || raw === '') return fallback;
+    if (raw !== 'true' && raw !== 'false') {
+      problems.push(`${name} deve ser "true" ou "false" (recebido: "${raw}")`);
+      return fallback;
+    }
+    return raw === 'true';
   };
 
   const url = (name: string, value: string | undefined, protocols: readonly string[]): void => {
@@ -98,8 +131,22 @@ export function loadConfig(env: Env = process.env): AppConfig {
       wagerQueueName: fifoQueue('SQS_WAGER_QUEUE_NAME', 'wager-transactions.fifo'),
       wagerDlqName: fifoQueue('SQS_WAGER_DLQ_NAME', 'wager-transactions-dlq.fifo'),
     },
+    sqsConsumer: {
+      enabled: bool('SQS_CONSUMER_ENABLED', true),
+      name: optional('SQS_CONSUMER_NAME') ?? 'wager-transactions-consumer',
+      maxMessages: intInRange('SQS_MAX_MESSAGES', 10, 1, 10),
+      waitTimeSeconds: intInRange('SQS_WAIT_TIME_SECONDS', 20, 0, 20),
+      visibilityTimeoutSeconds: intInRange('SQS_VISIBILITY_TIMEOUT_SECONDS', 60, 1, 43_200),
+      retryBaseSeconds: intInRange('SQS_RETRY_BASE_SECONDS', 30, 0, 43_200),
+      retryMaxSeconds: intInRange('SQS_RETRY_MAX_SECONDS', 300, 0, 43_200),
+      shutdownTimeoutMs: intInRange('SQS_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
+    },
     healthCheckTimeoutMs: positiveInt('HEALTH_CHECK_TIMEOUT_MS', 2000, 60_000),
   };
+  if (config.sqsConsumer.name.length > 256) problems.push('SQS_CONSUMER_NAME excede 256 caracteres');
+  if (config.sqsConsumer.retryMaxSeconds < config.sqsConsumer.retryBaseSeconds) {
+    problems.push('SQS_RETRY_MAX_SECONDS deve ser maior ou igual a SQS_RETRY_BASE_SECONDS');
+  }
 
   if (problems.length > 0) throw new InvalidConfigError(problems);
   return config;

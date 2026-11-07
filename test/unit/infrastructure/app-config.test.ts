@@ -42,6 +42,45 @@ describe('loadConfig', () => {
     expect(config.healthCheckTimeoutMs).toBe(500);
   });
 
+  it('consumidor SQS: defaults e valores informados', () => {
+    expect(loadConfig({ DATABASE_URL: validEnv.DATABASE_URL }).sqsConsumer).toEqual({
+      enabled: true,
+      name: 'wager-transactions-consumer',
+      maxMessages: 10,
+      waitTimeSeconds: 20,
+      visibilityTimeoutSeconds: 60,
+      retryBaseSeconds: 30,
+      retryMaxSeconds: 300,
+      shutdownTimeoutMs: 25_000,
+    });
+    const config = loadConfig({
+      ...validEnv,
+      SQS_CONSUMER_ENABLED: 'false',
+      SQS_WAIT_TIME_SECONDS: '0',
+      SQS_RETRY_BASE_SECONDS: '0',
+      SQS_SHUTDOWN_TIMEOUT_MS: '100',
+    });
+    expect(config.sqsConsumer.enabled).toBe(false);
+    expect(config.sqsConsumer.waitTimeSeconds).toBe(0);
+    expect(config.sqsConsumer.retryBaseSeconds).toBe(0);
+    expect(config.sqsConsumer.shutdownTimeoutMs).toBe(100);
+  });
+
+  it('consumidor SQS: rejeita valores fora da faixa', () => {
+    expect(problemsOf({ ...validEnv, SQS_CONSUMER_ENABLED: 'sim' })).toEqual([
+      'SQS_CONSUMER_ENABLED deve ser "true" ou "false" (recebido: "sim")',
+    ]);
+    expect(problemsOf({ ...validEnv, SQS_MAX_MESSAGES: '11' })).toEqual([
+      'SQS_MAX_MESSAGES deve ser um inteiro entre 1 e 10 (recebido: "11")',
+    ]);
+    expect(problemsOf({ ...validEnv, SQS_WAIT_TIME_SECONDS: '21' })).toEqual([
+      'SQS_WAIT_TIME_SECONDS deve ser um inteiro entre 0 e 20 (recebido: "21")',
+    ]);
+    expect(problemsOf({ ...validEnv, SQS_RETRY_BASE_SECONDS: '60', SQS_RETRY_MAX_SECONDS: '30' })).toEqual([
+      'SQS_RETRY_MAX_SECONDS deve ser maior ou igual a SQS_RETRY_BASE_SECONDS',
+    ]);
+  });
+
   it('exige DATABASE_URL', () => {
     expect(problemsOf({})).toContain('DATABASE_URL é obrigatória');
     expect(problemsOf({ DATABASE_URL: '   ' })).toContain('DATABASE_URL é obrigatória');

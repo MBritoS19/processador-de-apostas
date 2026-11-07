@@ -6,6 +6,7 @@ import { PersistenceModule } from './infrastructure/persistence/persistence.modu
 import { HealthModule } from './interfaces/http/health/health.module';
 import { WageringModule } from './interfaces/http/wagering.module';
 import { MetricsModule } from './interfaces/http/metrics.module';
+import { WagerConsumerModule } from './interfaces/sqs/wager-consumer.module';
 import { correlationMiddleware } from './interfaces/http/correlation.middleware';
 import { ApiExceptionFilter } from './interfaces/http/api-error';
 import { APP_FILTER } from '@nestjs/core';
@@ -27,6 +28,7 @@ export class AppModule implements NestModule {
         HealthModule.register(persistence),
         WageringModule,
         MetricsModule,
+        WagerConsumerModule,
       ],
       providers: [{ provide: APP_FILTER, useClass: ApiExceptionFilter }],
     };

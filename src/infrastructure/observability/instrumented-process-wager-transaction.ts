@@ -10,6 +10,11 @@ import type { ObservabilityMetrics } from './metrics';
 
 const KNOWN_KINDS = new Set<string>(Object.values(WagerTransactionKind));
 
+/** Label `kind` só com valor conhecido: o valor cru vem do cliente e explodiria a cardinalidade. */
+export function kindLabel(value: unknown): string {
+  return typeof value === 'string' && KNOWN_KINDS.has(value) ? value : 'UNKNOWN';
+}
+
 /**
  * Envolve o use case (não o controller): HTTP e o consumidor SQS passam pelas mesmas métricas
  * e pelo mesmo log. O log carrega só ids e o resultado, nunca o payload financeiro.
@@ -26,10 +31,10 @@ export class InstrumentedProcessWagerTransaction {
     const startedAt = performance.now();
     // O payload ainda não foi validado (pode até ser null vindo da fila).
     const payload: Partial<WagerTransactionPayload> = command.payload ?? {};
-    // Label só com kind conhecido: o valor cru vem do cliente e explodiria a cardinalidade.
-    const kind = typeof payload.kind === 'string' && KNOWN_KINDS.has(payload.kind) ? payload.kind : 'UNKNOWN';
+    const kind = kindLabel(payload.kind);
     const ids = {
       correlationId: command.correlationId,
+      ...(command.inbox ? { messageId: command.inbox.messageId } : {}),
       providerId: textValue(payload.providerId),
       walletId: textValue(payload.walletId),
     };
