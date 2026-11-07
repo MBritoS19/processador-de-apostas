@@ -64,6 +64,13 @@ describe('ProcessWagerTransaction — validação antes de qualquer gravação',
     expect(unitOfWork.calls).toBe(0);
   });
 
+  it('providerId "internal" e key com prefixo "opening:" são reservados → InvalidInput', async () => {
+    const { useCase, unitOfWork } = setup();
+    expect((await useCase.execute(cmd({ providerId: 'internal' }))).type).toBe('InvalidInput');
+    expect((await useCase.execute({ ...cmd(), idempotencyKey: `opening:${walletId}` })).type).toBe('InvalidInput');
+    expect(unitOfWork.calls).toBe(0);
+  });
+
   it('idempotencyKey vazia → InvalidInput', async () => {
     const { useCase, unitOfWork } = setup();
     expect((await useCase.execute({ ...cmd(), idempotencyKey: '' })).type).toBe('InvalidInput');

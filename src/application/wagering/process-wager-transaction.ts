@@ -9,6 +9,8 @@ import { InboxMessage } from '../../domain/inbox-message';
 import { Money, type MoneyProps } from '../../domain/money';
 import { OutboxMessage } from '../../domain/outbox-message';
 import {
+  INTERNAL_PROVIDER_ID,
+  OPENING_KEY_PREFIX,
   WagerTransaction,
   WagerTransactionKind,
   WagerTransactionStatus,
@@ -108,7 +110,7 @@ const SUBMITTABLE_KINDS = new Set<string>([
 const TEXT_FIELDS = ['providerId', 'externalTransactionId', 'playerId', 'walletId', 'roundId', 'gameId'] as const;
 /** Limite dos ids e da key: cabe folgado nos índices btree (o Postgres recusa entradas de ~2.7 KB). */
 export const MAX_TEXT_LENGTH = 256;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type ReferenceCheck = { type: 'ok'; reference: WagerTransaction } | { type: 'pending' } | { type: 'reject'; code: FailureCode };
 
@@ -146,6 +148,8 @@ export class ProcessWagerTransaction {
       const problem = textProblem(field, payload[field]);
       if (problem) return problem;
     }
+    if (payload.providerId === INTERNAL_PROVIDER_ID) return `providerId "${INTERNAL_PROVIDER_ID}" é reservado`;
+    if (idempotencyKey.startsWith(OPENING_KEY_PREFIX)) return `Idempotency-Key com prefixo "${OPENING_KEY_PREFIX}" é reservada`;
     const reference = payload.referenceExternalTransactionId;
     const hasReference = reference !== undefined && reference !== null;
     if (hasReference) {
@@ -362,7 +366,7 @@ export class ProcessWagerTransaction {
 }
 
 /** Texto obrigatório, não vazio, até MAX_TEXT_LENGTH. Devolve o problema ou undefined. */
-function textProblem(field: string, value: unknown): string | undefined {
+export function textProblem(field: string, value: unknown): string | undefined {
   if (value === undefined || value === null) return `${field} é obrigatório`;
   if (typeof value !== 'string') return `${field} deve ser texto`;
   if (value.trim() === '') return `${field} não pode ser vazio`;

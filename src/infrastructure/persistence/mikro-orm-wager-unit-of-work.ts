@@ -17,7 +17,7 @@ import { isNetworkError } from '../network-errors';
 import { InboxMessageRecord, OutboxMessageRecord, toInboxMessageRecord, toOutboxMessageRecord } from './messages.persistence';
 import { WagerTransactionRecord, toWagerTransaction, toWagerTransactionRecord } from './wager-transaction.persistence';
 import { LedgerEntryRecord, toLedgerEntryRecord } from './wallet-ledger-entry.persistence';
-import { WalletRecord, toWallet } from './wallet.persistence';
+import { WalletRecord, toWallet, toWalletRecord } from './wallet.persistence';
 
 export const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 
@@ -60,6 +60,7 @@ const EXPECTED_UNIQUE_VIOLATIONS: Readonly<Record<string, UniqueViolationKind>> 
   uq_wager_tx_provider_idempotency_key: 'idempotency',
   uq_wager_tx_provider_external: 'idempotency',
   pk_inbox_messages: 'inbox',
+  uq_wallets_player_currency: 'wallet',
 };
 
 /** Traduz erros do driver/ORM para os erros da porta. Exportada para teste. */
@@ -144,5 +145,14 @@ class MikroOrmWagerProcessingRepository implements WagerProcessingRepository {
 
   async insertInbox(message: InboxMessage): Promise<void> {
     await this.em.insert(InboxMessageRecord, toInboxMessageRecord(message));
+  }
+
+  async insertWallet(wallet: Wallet): Promise<void> {
+    await this.em.insert(WalletRecord, toWalletRecord(wallet));
+  }
+
+  async findWalletIdByPlayer(playerId: string, currency: string): Promise<string | undefined> {
+    const record = await this.em.findOne(WalletRecord, { playerId, currency });
+    return record?.id;
   }
 }

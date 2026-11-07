@@ -3,6 +3,7 @@ import type {
   LockConflictReason,
   LockConflictTelemetry,
 } from '../../application/ports/lock-conflict-telemetry';
+import type { ObservabilityMetrics } from './metrics';
 
 /**
  * Log JSON de uma linha + contador em memória por motivo. Provisório: as métricas
@@ -11,10 +12,14 @@ import type {
 export class LoggingLockConflictTelemetry implements LockConflictTelemetry {
   private readonly counts = new Map<LockConflictReason, number>();
 
-  constructor(private readonly write: (line: string) => void = (line) => console.warn(line)) {}
+  constructor(
+    private readonly write: (line: string) => void = (line) => console.warn(line),
+    private readonly metrics?: ObservabilityMetrics,
+  ) {}
 
   lockConflict(conflict: LockConflict): void {
     this.counts.set(conflict.reason, this.count(conflict.reason) + 1);
+    this.metrics?.lockConflicts.inc();
     this.write(
       JSON.stringify({
         level: 'warn',

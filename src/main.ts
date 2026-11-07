@@ -3,10 +3,11 @@ import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { loadConfig } from './infrastructure/config/app-config';
+import { PinoNestLogger } from './infrastructure/observability/logger';
 
 async function bootstrap(): Promise<void> {
   const config = loadConfig();
-  const app = await NestFactory.create(AppModule.register(config));
+  const app = await NestFactory.create(AppModule.register(config), { logger: new PinoNestLogger() });
 
   // SIGTERM/SIGINT disparam onModuleDestroy/onApplicationShutdown (pool do ORM, consumidores).
   app.enableShutdownHooks();

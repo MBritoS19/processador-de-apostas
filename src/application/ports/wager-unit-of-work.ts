@@ -28,6 +28,10 @@ export interface WagerProcessingRepository {
   insertLedgerEntry(entry: WalletLedgerEntry): Promise<void>;
   insertOutbox(messages: readonly OutboxMessage[]): Promise<void>;
   insertInbox(message: InboxMessage): Promise<void>;
+  /** Abertura de wallet (POST /wallets). Viola `uq_wallets_player_currency` se o player já tem wallet na moeda. */
+  insertWallet(wallet: Wallet): Promise<void>;
+  /** Wallet do player na moeda, para devolver o id no conflito de abertura. */
+  findWalletIdByPlayer(playerId: string, currency: string): Promise<string | undefined>;
 }
 
 /**
@@ -47,10 +51,11 @@ export class WalletVersionConflictError extends Error {
 }
 
 /**
- * Qual unicidade foi violada: `idempotency` (key ou externalTransactionId do provider) ou
- * `inbox` (mesma mensagem do mesmo consumidor). Outras violações não são traduzidas: são bug.
+ * Qual unicidade foi violada: `idempotency` (key ou externalTransactionId do provider),
+ * `inbox` (mesma mensagem do mesmo consumidor) ou `wallet` (player já tem wallet na moeda).
+ * Outras violações não são traduzidas: são bug.
  */
-export type UniqueViolationKind = 'idempotency' | 'inbox';
+export type UniqueViolationKind = 'idempotency' | 'inbox' | 'wallet';
 
 /** Violação de unicidade (SQLSTATE 23505) esperada sob concorrência. A transação já sofreu rollback. */
 export class UniqueViolationError extends Error {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { InvalidTransactionStateError, InvalidWagerTransactionError } from '../../../src/domain/errors';
 import { FailureCode } from '../../../src/domain/failure-code';
 import {
+  INTERNAL_PROVIDER_ID,
   REFERENCE_RETRY_BASE_MS,
   REFERENCE_RETRY_MAX_MS,
   WagerTransaction,
@@ -237,5 +238,38 @@ describe('WagerTransaction.rehydrate', () => {
     expect(tx.status).toBe(Status.Processed);
     expect(tx.ledgerDirectionFor()).toBe(LedgerDirection.Credit);
     expect(() => tx.reject(FailureCode.AmountMismatch)).toThrow(InvalidTransactionStateError);
+  });
+});
+
+describe('WagerTransaction.opening', () => {
+  const props = () => ({
+    id: 'opening-1',
+    providerId: INTERNAL_PROVIDER_ID,
+    externalTransactionId: 'opening:w1',
+    idempotencyKey: 'opening:w1',
+    payloadHash: 'hash',
+    walletId: 'w1',
+    playerId: 'p1',
+    roundId: 'opening',
+    gameId: 'system',
+    kind: Kind.Opening,
+    money: brl('100.00'),
+    createdAt: T0,
+  });
+
+  test('nasce PROCESSED em createdAt, com o saldo inicial como saldo observado', () => {
+    const tx = WagerTransaction.opening(props());
+    expect(tx.status).toBe(Status.Processed);
+    expect(tx.processedAt).toEqual(T0);
+    expect(tx.observedBalance?.equals(brl('100.00'))).toBe(true);
+  });
+
+  test.each([
+    ['kind diferente de OPENING', { kind: Kind.Bet }],
+    ['provider externo', { providerId: 'provider-a' }],
+    ['valor zero', { money: brl('0.00') }],
+    ['com referência', { referenceExternalTransactionId: 'x' }],
+  ])('%s → InvalidWagerTransactionError', (_name, override) => {
+    expect(() => WagerTransaction.opening({ ...props(), ...override })).toThrow(InvalidWagerTransactionError);
   });
 });

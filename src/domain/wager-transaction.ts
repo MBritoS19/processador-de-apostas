@@ -22,6 +22,11 @@ export enum WagerTransactionStatus {
   Failed = 'FAILED',
 }
 
+/** Provider das transações internas (OPENING). Reservado: nenhum provider externo pode usá-lo. */
+export const INTERNAL_PROVIDER_ID = 'internal';
+/** Prefixo da idempotency key (e do id externo) da OPENING. Reservado para providers externos. */
+export const OPENING_KEY_PREFIX = 'opening:';
+
 /** Backoff entre tentativas de resolver a referência (o limite de tentativas é da Fase 7). */
 export const REFERENCE_RETRY_BASE_MS = 5_000;
 export const REFERENCE_RETRY_MAX_MS = 10 * 60_000;
@@ -139,6 +144,32 @@ export class WagerTransaction {
       throw new InvalidWagerTransactionError(`valor inválido para ${kind}`);
     }
     return new WagerTransaction({ ...props, status: WagerTransactionStatus.Pending, referenceAttempts: 0 });
+  }
+
+  /**
+   * OPENING interno da abertura de wallet: nasce PROCESSED em `createdAt`, com o saldo inicial
+   * como saldo observado. Só para o provider interno e com valor positivo (saldo zero não abre OPENING).
+   */
+  static opening(props: CreateWagerTransactionProps): WagerTransaction {
+    if (props.kind !== WagerTransactionKind.Opening) {
+      throw new InvalidWagerTransactionError('opening só cria transações OPENING');
+    }
+    if (props.providerId !== INTERNAL_PROVIDER_ID) {
+      throw new InvalidWagerTransactionError('OPENING pertence ao provider interno');
+    }
+    if (props.referenceExternalTransactionId !== undefined) {
+      throw new InvalidWagerTransactionError('OPENING não referencia outra transação');
+    }
+    if (!props.money.isPositive()) {
+      throw new InvalidWagerTransactionError('OPENING exige valor positivo');
+    }
+    return new WagerTransaction({
+      ...props,
+      status: WagerTransactionStatus.Processed,
+      referenceAttempts: 0,
+      processedAt: props.createdAt,
+      observedBalance: props.money,
+    });
   }
 
   /** Reconstrução a partir da persistência — não revalida transições. */
