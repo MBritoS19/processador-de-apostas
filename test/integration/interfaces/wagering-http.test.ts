@@ -5,7 +5,7 @@ import { NestFactory } from '@nestjs/core';
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { AppModule } from '../../../src/app.module';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
-import { openOrm, truncateAll } from '../persistence/db';
+import { expectLedgerConsistent, openOrm, truncateAll } from '../persistence/db';
 
 type Json = Record<string, any>;
 
@@ -165,6 +165,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
       const replay = await submit(wager(wallet, 'e-ok'));
       expect(replay.status).toBe(200);
       expect(replay.body).toEqual({ ...first.body, idempotentReplay: true });
+      await expectLedgerConsistent(orm, wallet.id);
     });
 
     it('Rejected → 422 com failureCode; o replay também é 422', async () => {
@@ -176,6 +177,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
       const replay = await submit(payload);
       expect(replay.status).toBe(422);
       expect(replay.body).toEqual({ ...first.body, idempotentReplay: true });
+      await expectLedgerConsistent(orm, wallet.id);
     });
 
     it('PendingReference → 202 com nextReferenceCheckAt; replay também 202', async () => {
@@ -222,6 +224,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
       expect(response.headers.get('x-correlation-id')).toBe('corr-bet-1');
       const events = await knex()('outbox_messages').whereRaw(`payload->>'correlationId' = ?`, ['corr-bet-1']);
       expect(events.map((row) => row.event_type).sort()).toEqual(['WagerTransactionProcessed', 'WalletBalanceChanged']);
+      await expectLedgerConsistent(orm, wallet.id);
     });
   });
 
@@ -236,6 +239,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
       expect(byId.body).toMatchObject({ kind: 'BET', status: 'PROCESSED', failureCode: null, referenceExternalTransactionId: null, nextReferenceCheckAt: null });
       const byExternal = await call('GET', '/providers/provider-a/wagering/transactions/e-get');
       expect(byExternal.body).toEqual(byId.body);
+      await expectLedgerConsistent(orm, wallet.id);
     });
 
     it('404 NOT_FOUND quando não existe', async () => {
@@ -370,6 +374,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
         consistent: true,
         checkedEntries: 2,
       });
+      await expectLedgerConsistent(orm, wallet.id);
     });
 
     it('divergente: sinaliza, conta na métrica e não corrige o saldo', async () => {

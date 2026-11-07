@@ -33,6 +33,7 @@
     "test:unit": "bun test ./test/unit",
     "test:integration": "bun test ./test/integration",
     "test:concurrency": "bun test ./test/concurrency",
+    "test:multi": "bun test ./test/multi",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

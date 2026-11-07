@@ -1,3 +1,4 @@
+import type { FaultInjection } from '../../infrastructure/config/app-config';
 import { TransientPersistenceError } from '../../application/ports/wager-unit-of-work';
 import type { ProcessWagerTransactionResult } from '../../application/wagering/process-wager-transaction';
 import {
@@ -19,6 +20,8 @@ export interface WagerConsumerOptions {
   retryMaxSeconds: number;
   maxAttempts: number;
   shutdownTimeoutMs: number;
+  /** Só testes (Fase 9): ver `FaultInjection`. Ausente = desligado. */
+  faultInjection?: FaultInjection;
 }
 
 /** Pausa do polling quando o banco (ou o SQS) está fora: 1s·2^(n−1), até 30s. */
@@ -269,6 +272,11 @@ export class WagerConsumer {
         };
         if (decision.warn) this.logger.warn(fields, 'sqs message acked with conflict');
         else this.logger.info(fields, 'sqs message acked');
+        if (this.options.faultInjection === 'exit_after_commit_before_ack' && decision.outcome === 'PROCESSED') {
+          // Só testes: o commit já aconteceu e o ack não. A reentrega cai na inbox.
+          this.logger.warn({ ...context, event: 'fault_injection_sigkill' }, 'fault injection: SIGKILL before ack');
+          process.kill(process.pid, 'SIGKILL');
+        }
         try {
           await this.queue.delete(message);
         } catch (error) {

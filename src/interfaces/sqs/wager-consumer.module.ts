@@ -44,7 +44,11 @@ import { WagerConsumer } from './wager-consumer';
         config: AppConfig,
       ) => {
         const { name, ...options } = config.sqsConsumer;
-        return new WagerConsumer(queue, inbox, process, metrics, { consumerName: name, ...options });
+        return new WagerConsumer(queue, inbox, process, metrics, {
+          consumerName: name,
+          ...options,
+          faultInjection: config.faultInjection,
+        });
       },
     },
   ],

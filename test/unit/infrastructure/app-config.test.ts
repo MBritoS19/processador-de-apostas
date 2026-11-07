@@ -17,6 +17,18 @@ function problemsOf(env: Record<string, string | undefined>): readonly string[] 
 }
 
 describe('loadConfig', () => {
+  it('FAULT_INJECTION: desligada por padrão; valor desconhecido e NODE_ENV=production são recusados', () => {
+    expect(loadConfig(validEnv).faultInjection).toBe('none');
+    expect(loadConfig({ ...validEnv, FAULT_INJECTION: 'exit_after_commit_before_ack' }).faultInjection).toBe(
+      'exit_after_commit_before_ack',
+    );
+    expect(problemsOf({ ...validEnv, FAULT_INJECTION: 'boom' }).join()).toContain('FAULT_INJECTION');
+    expect(
+      problemsOf({ ...validEnv, NODE_ENV: 'production', FAULT_INJECTION: 'exit_after_commit_before_ack' }).join(),
+    ).toContain('recusada com NODE_ENV=production');
+    expect(loadConfig({ ...validEnv, NODE_ENV: 'production' }).faultInjection).toBe('none');
+  });
+
   it('aplica defaults quando só o obrigatório é informado', () => {
     const config = loadConfig({ DATABASE_URL: validEnv.DATABASE_URL });
 

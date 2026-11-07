@@ -60,7 +60,16 @@ export interface AppConfig {
     readonly shutdownTimeoutMs: number;
   };
   readonly healthCheckTimeoutMs: number;
+  /**
+   * Injeção de falha SÓ para testes (Fase 9). Desligada por padrão e recusada com
+   * `NODE_ENV=production`. Documentada no ARCHITECTURE.md (estratégia de testes).
+   */
+  readonly faultInjection: FaultInjection;
 }
+
+/** `exit_after_commit_before_ack`: o consumidor se mata com SIGKILL depois do commit e antes do `DeleteMessage`. */
+export const FAULT_INJECTIONS = ['none', 'exit_after_commit_before_ack'] as const;
+export type FaultInjection = (typeof FAULT_INJECTIONS)[number];
 
 export class InvalidConfigError extends Error {
   constructor(readonly problems: readonly string[]) {
@@ -138,6 +147,16 @@ export function loadConfig(env: Env = process.env): AppConfig {
     return value;
   };
 
+  const faultInjection = (): FaultInjection => {
+    const raw = env['FAULT_INJECTION']?.trim();
+    if (raw === undefined || raw === '') return 'none';
+    if (!(FAULT_INJECTIONS as readonly string[]).includes(raw)) {
+      problems.push(`FAULT_INJECTION deve ser um de: ${FAULT_INJECTIONS.join(', ')} (recebido: "${raw}")`);
+      return 'none';
+    }
+    return raw as FaultInjection;
+  };
+
   const databaseUrl = required('DATABASE_URL');
   url('DATABASE_URL', databaseUrl, ['postgres:', 'postgresql:']);
 
@@ -195,7 +214,11 @@ export function loadConfig(env: Env = process.env): AppConfig {
       shutdownTimeoutMs: intInRange('PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
     },
     healthCheckTimeoutMs: positiveInt('HEALTH_CHECK_TIMEOUT_MS', 2000, 60_000),
+    faultInjection: faultInjection(),
   };
+  if (config.faultInjection !== 'none' && config.nodeEnv === 'production') {
+    problems.push('FAULT_INJECTION é recusada com NODE_ENV=production');
+  }
   if (config.sqsConsumer.name.length > 256) problems.push('SQS_CONSUMER_NAME excede 256 caracteres');
   if (config.sqsConsumer.retryMaxSeconds < config.sqsConsumer.retryBaseSeconds) {
     problems.push('SQS_RETRY_MAX_SECONDS deve ser maior ou igual a SQS_RETRY_BASE_SECONDS');

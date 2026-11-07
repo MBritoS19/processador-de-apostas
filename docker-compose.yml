@@ -38,5 +38,54 @@ services:
       timeout: 3s
       retries: 60
 
+  # Profile `multi` (3 réplicas da aplicação sobre o mesmo Postgres e LocalStack):
+  #   docker compose --profile multi up -d --build --wait
+  # Fora da suíte de testes; o `bun run test:multi` sobe processos locais, não estes containers.
+  migrate:
+    profiles: ["multi"]
+    build: .
+    command: ["bun", "src/infrastructure/persistence/migrate.ts", "up"]
+    restart: "no"
+    environment:
+      DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    profiles: ["multi"]
+    build: .
+    deploy:
+      replicas: 3
+    # Acima do SQS_SHUTDOWN_TIMEOUT_MS / OUTBOX_SHUTDOWN_TIMEOUT_MS (25s): o SIGTERM termina de forma
+    # graciosa antes do SIGKILL do Docker.
+    stop_grace_period: 30s
+    environment:
+      NODE_ENV: production
+      HTTP_PORT: "3000"
+      DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_WAGER_QUEUE_NAME: ${SQS_WAGER_QUEUE_NAME:-wager-transactions.fifo}
+      SQS_WAGER_DLQ_NAME: ${SQS_WAGER_DLQ_NAME:-wager-transactions-dlq.fifo}
+      SQS_WAGER_EVENTS_QUEUE_NAME: ${SQS_WAGER_EVENTS_QUEUE_NAME:-wager-events.fifo}
+    # Uma porta de host por réplica (3000-3002), só em loopback.
+    ports:
+      - "127.0.0.1:3000-3002:3000"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://localhost:3000/health/ready'); process.exit(r.ok ? 0 : 1)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   postgres-data:
