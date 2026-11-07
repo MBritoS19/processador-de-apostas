@@ -58,6 +58,8 @@ export interface WagerTransactionState extends CreateWagerTransactionProps {
   processedAt?: Date | undefined;
   referenceAttempts: number;
   nextReferenceCheckAt?: Date | undefined;
+  /** Saldo da wallet observado no processamento (na moeda da transação), devolvido no replay. */
+  observedBalance?: Money | undefined;
 }
 
 /**
@@ -86,6 +88,7 @@ export class WagerTransaction {
   private _processedAt: Date | undefined;
   private _referenceAttempts: number;
   private _nextReferenceCheckAt: Date | undefined;
+  private _observedBalance: Money | undefined;
 
   private constructor(state: WagerTransactionState) {
     this.id = state.id;
@@ -107,6 +110,7 @@ export class WagerTransaction {
     this._processedAt = state.processedAt && new Date(state.processedAt);
     this._referenceAttempts = state.referenceAttempts;
     this._nextReferenceCheckAt = state.nextReferenceCheckAt && new Date(state.nextReferenceCheckAt);
+    this._observedBalance = state.observedBalance;
   }
 
   /** Nasce em PENDING. Rejeita OPENING e valida a exigência de referência e de valor por kind. */
@@ -153,12 +157,19 @@ export class WagerTransaction {
     return this._nextReferenceCheckAt;
   }
 
-  markProcessed(referenceTransactionId: string | undefined, at: Date): void {
+  get observedBalance(): Money | undefined {
+    return this._observedBalance;
+  }
+
+  /** `observedBalance`: saldo da wallet depois de aplicar a transação (o atual, em LOSS). */
+  markProcessed(referenceTransactionId: string | undefined, at: Date, observedBalance: Money): void {
     this.assertNotTerminal(WagerTransactionStatus.Processed);
     if (this.requiresReference() && referenceTransactionId === undefined) {
       throw new InvalidWagerTransactionError(`${this.kind} só é processada com a referência resolvida`);
     }
+    this.assertTransactionCurrency(observedBalance);
     this._status = WagerTransactionStatus.Processed;
+    this._observedBalance = observedBalance;
     this._referenceTransactionId = referenceTransactionId;
     this._processedAt = at;
     this._nextReferenceCheckAt = undefined;
@@ -181,10 +192,13 @@ export class WagerTransaction {
     );
   }
 
-  reject(code: FailureCode): void {
+  /** `observedBalance` só quando há wallet na moeda da transação (ausente em WALLET_NOT_FOUND, por ex.). */
+  reject(code: FailureCode, observedBalance?: Money): void {
     this.assertNotTerminal(WagerTransactionStatus.Rejected);
+    if (observedBalance !== undefined) this.assertTransactionCurrency(observedBalance);
     this._status = WagerTransactionStatus.Rejected;
     this._failureCode = code;
+    this._observedBalance = observedBalance;
     this._nextReferenceCheckAt = undefined;
   }
 
@@ -230,6 +244,12 @@ export class WagerTransaction {
         return reference.ledgerDirectionFor() === LedgerDirection.Debit
           ? LedgerDirection.Credit
           : LedgerDirection.Debit;
+    }
+  }
+
+  private assertTransactionCurrency(balance: Money): void {
+    if (balance.currency !== this.money.currency) {
+      throw new InvalidWagerTransactionError('o saldo observado deve estar na moeda da transação');
     }
   }
 

@@ -14,6 +14,29 @@ describe('migrations', () => {
     return rows.map((row) => row.name);
   };
 
+  /** Tabelas e funções criadas pelas migrations, em ordem alfabética. */
+  const SCHEMA_OBJECTS = [
+    'inbox_messages',
+    'outbox_messages',
+    'wager_transactions',
+    'wager_transactions_guard',
+    'wallet_balance_matches_ledger',
+    'wallet_ledger_entries',
+    'wallet_ledger_entries_append_only',
+    'wallets',
+  ];
+
+  const existingSchemaObjects = async (): Promise<string[]> => {
+    const rows = await orm.em.getConnection().execute<{ name: string }[]>(
+      `select table_name as name from information_schema.tables
+         where table_schema = 'public' and table_name <> 'mikro_orm_migrations'
+       union
+       select routine_name from information_schema.routines where routine_schema = 'public'
+       order by name`,
+    );
+    return rows.map((row) => row.name);
+  };
+
   beforeAll(async () => {
     const config = loadConfig();
     expect(config.databaseUrl).toEndWith('/wagering_test');
@@ -43,9 +66,11 @@ describe('migrations', () => {
 
     await migrator.down({ to: 0 });
     expect(await appliedNames()).toEqual([]);
+    expect(await existingSchemaObjects()).toEqual([]);
 
     await migrator.up();
     expect(await migrator.getPendingMigrations()).toEqual([]);
+    expect(await existingSchemaObjects()).toEqual(SCHEMA_OBJECTS);
   });
 
   it('up é idempotente', async () => {

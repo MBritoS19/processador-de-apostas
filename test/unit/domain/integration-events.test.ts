@@ -23,7 +23,7 @@ function walletWithBet() {
   });
   const tx = newTransaction({ money: brl('25.5') });
   const entry = wallet.debit({ entryId: 'entry-1', transactionId: tx.id, money: tx.money, at: T1 });
-  tx.markProcessed(undefined, T1);
+  tx.markProcessed(undefined, T1, wallet.balance);
   return { wallet, tx, entry };
 }
 

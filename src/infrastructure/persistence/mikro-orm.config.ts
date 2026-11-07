@@ -2,6 +2,10 @@ import { defineConfig } from '@mikro-orm/postgresql';
 import { Migrator } from '@mikro-orm/migrations';
 import { fileURLToPath } from 'node:url';
 import type { AppConfig } from '../config/app-config';
+import { InboxMessageSchema, OutboxMessageSchema } from './messages.persistence';
+import { WagerTransactionSchema } from './wager-transaction.persistence';
+import { LedgerEntrySchema } from './wallet-ledger-entry.persistence';
+import { WalletSchema } from './wallet.persistence';
 
 const migrationsPath = fileURLToPath(new URL('./migrations', import.meta.url));
 
@@ -12,8 +16,7 @@ const migrationsPath = fileURLToPath(new URL('./migrations', import.meta.url));
 export function buildMikroOrmConfig(config: Pick<AppConfig, 'databaseUrl'>) {
   return defineConfig({
     clientUrl: config.databaseUrl,
-    entities: [],
-    discovery: { warnWhenNoEntities: false },
+    entities: [WalletSchema, WagerTransactionSchema, LedgerEntrySchema, InboxMessageSchema, OutboxMessageSchema],
     extensions: [Migrator],
     // Proíbe usar o EntityManager global (identity map compartilhado): exige contexto
     // explícito via em.fork() / em.transactional().

@@ -8,6 +8,7 @@ import {
   WagerTransactionKind as Kind,
   WagerTransactionStatus as Status,
 } from '../../../src/domain/wager-transaction';
+import { Money } from '../../../src/domain/money';
 import { LedgerDirection } from '../../../src/domain/wallet-ledger-entry';
 import { T0, brl, newTransaction } from './fixtures';
 
@@ -51,9 +52,10 @@ describe('WagerTransaction.create', () => {
 describe('WagerTransaction — transições válidas', () => {
   test('PENDING → PROCESSED', () => {
     const tx = newTransaction();
-    tx.markProcessed(undefined, T1);
+    tx.markProcessed(undefined, T1, brl('90.00'));
     expect(tx.status).toBe(Status.Processed);
     expect(tx.processedAt).toEqual(T1);
+    expect(tx.observedBalance).toEqual(brl('90.00'));
     expect(tx.isTerminal()).toBe(true);
   });
 
@@ -63,6 +65,21 @@ describe('WagerTransaction — transições válidas', () => {
     expect(tx.status).toBe(Status.Rejected);
     expect(tx.failureCode).toBe(FailureCode.InsufficientBalance);
     expect(tx.processedAt).toBeUndefined();
+    expect(tx.observedBalance).toBeUndefined();
+  });
+
+  test('REJECTED guarda o saldo observado, quando informado', () => {
+    const tx = newTransaction();
+    tx.reject(FailureCode.InsufficientBalance, brl('5.00'));
+    expect(tx.observedBalance).toEqual(brl('5.00'));
+  });
+
+  test('saldo observado em outra moeda é inválido e não muda o estado', () => {
+    const usd = Money.from({ amount: '5.00', currency: 'USD' });
+    const tx = newTransaction();
+    expect(() => tx.markProcessed(undefined, T1, usd)).toThrow(InvalidWagerTransactionError);
+    expect(() => tx.reject(FailureCode.InsufficientBalance, usd)).toThrow(InvalidWagerTransactionError);
+    expect(tx.status).toBe(Status.Pending);
   });
 
   test('PENDING → FAILED com failureCode', () => {
@@ -91,7 +108,7 @@ describe('WagerTransaction — transições válidas', () => {
   test('PENDING_REFERENCE → PROCESSED guarda a referência interna e limpa o agendamento', () => {
     const tx = withRef(Kind.Rollback);
     tx.markPendingReference(T0);
-    tx.markProcessed('tx-ref', T1);
+    tx.markProcessed('tx-ref', T1, brl('90.00'));
     expect(tx.status).toBe(Status.Processed);
     expect(tx.referenceTransactionId).toBe('tx-ref');
     expect(tx.nextReferenceCheckAt).toBeUndefined();
@@ -108,12 +125,12 @@ describe('WagerTransaction — transições válidas', () => {
 
 describe('WagerTransaction — transições inválidas', () => {
   const terminals: Array<[string, (tx: WagerTransaction) => void]> = [
-    ['PROCESSED', (tx) => tx.markProcessed('tx-ref', T1)],
+    ['PROCESSED', (tx) => tx.markProcessed('tx-ref', T1, brl('90.00'))],
     ['REJECTED', (tx) => tx.reject(FailureCode.AmountMismatch)],
     ['FAILED', (tx) => tx.fail(FailureCode.InfrastructureFailure)],
   ];
   const attempts: Array<[string, (tx: WagerTransaction) => void]> = [
-    ['markProcessed', (tx) => tx.markProcessed('tx-ref', T1)],
+    ['markProcessed', (tx) => tx.markProcessed('tx-ref', T1, brl('90.00'))],
     ['markPendingReference', (tx) => tx.markPendingReference(T1)],
     ['reject', (tx) => tx.reject(FailureCode.AmountMismatch)],
     ['fail', (tx) => tx.fail(FailureCode.InfrastructureFailure)],
@@ -132,7 +149,7 @@ describe('WagerTransaction — transições inválidas', () => {
   }
 
   test('REFUND/ROLLBACK não são processados sem a referência interna', () => {
-    expect(() => withRef(Kind.Refund).markProcessed(undefined, T1)).toThrow(InvalidWagerTransactionError);
+    expect(() => withRef(Kind.Refund).markProcessed(undefined, T1, brl('90.00'))).toThrow(InvalidWagerTransactionError);
   });
 
   test('transação sem referência não vai para PENDING_REFERENCE', () => {
