@@ -1,13 +1,7 @@
-import { InsufficientBalanceError, InvalidMoneyError, InvalidWagerTransactionError } from '../../domain/errors';
-import type { EventContext } from '../../domain/events/integration-event';
-import { WagerTransactionPendingReference } from '../../domain/events/wager-transaction-pending-reference';
-import { WagerTransactionProcessed } from '../../domain/events/wager-transaction-processed';
-import { WagerTransactionRejected } from '../../domain/events/wager-transaction-rejected';
-import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed';
-import { FailureCode } from '../../domain/failure-code';
+import { InvalidMoneyError, InvalidWagerTransactionError } from '../../domain/errors';
+import type { FailureCode } from '../../domain/failure-code';
 import { InboxMessage } from '../../domain/inbox-message';
 import { Money, type MoneyProps } from '../../domain/money';
-import { OutboxMessage } from '../../domain/outbox-message';
 import {
   INTERNAL_PROVIDER_ID,
   OPENING_KEY_PREFIX,
@@ -15,8 +9,6 @@ import {
   WagerTransactionKind,
   WagerTransactionStatus,
 } from '../../domain/wager-transaction';
-import type { Wallet } from '../../domain/wallet';
-import { LedgerDirection, type WalletLedgerEntry } from '../../domain/wallet-ledger-entry';
 import type { Clock } from '../ports/clock';
 import type { IdGenerator } from '../ports/id-generator';
 import type { LockConflictTelemetry } from '../ports/lock-conflict-telemetry';
@@ -30,6 +22,7 @@ import {
   type WagerUnitOfWork,
 } from '../ports/wager-unit-of-work';
 import { wagerPayloadHash } from './payload-hash';
+import { WagerSettlement } from './wager-settlement';
 
 /** Payload de negócio como chega da borda (HTTP/SQS): ainda não validado. */
 export interface WagerTransactionPayload {
@@ -112,8 +105,6 @@ const TEXT_FIELDS = ['providerId', 'externalTransactionId', 'playerId', 'walletI
 export const MAX_TEXT_LENGTH = 256;
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-type ReferenceCheck = { type: 'ok'; reference: WagerTransaction } | { type: 'pending' } | { type: 'reject'; code: FailureCode };
-
 /**
  * Processa uma transação de aposta (BET, WIN, LOSS, REFUND, ROLLBACK) com idempotência
  * persistida e lock pessimista por wallet. Usado pela entrada HTTP (Fase 4) e SQS (Fase 5).
@@ -125,6 +116,7 @@ export class ProcessWagerTransaction {
     private readonly clock: Clock,
     private readonly ids: IdGenerator,
     private readonly telemetry: LockConflictTelemetry,
+    private readonly settlement: WagerSettlement = new WagerSettlement(ids),
   ) {}
 
   async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
@@ -214,105 +206,15 @@ export class ProcessWagerTransaction {
       return decided;
     }
 
-    const now = this.clock.now();
-    const expectedVersion = wallet?.version;
-    const entry = await this.apply(repository, tx, wallet, now);
-
-    await repository.insertTransaction(tx);
-    if (entry !== undefined && wallet !== undefined && expectedVersion !== undefined) {
-      await repository.updateWallet(wallet, expectedVersion);
-      await repository.insertLedgerEntry(entry);
-    }
-    await repository.insertOutbox(this.events(tx, wallet, entry, command, now));
+    await this.settlement.settle(repository, tx, wallet, {
+      now: this.clock.now(),
+      correlationId: command.correlationId,
+      // A mensagem de entrada (inbox) ou a requisição (idempotency key).
+      causationId: command.inbox?.messageId ?? command.idempotencyKey,
+    });
     if (command.inbox) await repository.insertInbox(this.inboxMessage(command.inbox));
 
     return resultOf(tx, false);
-  }
-
-  /** Aplica as regras de negócio, mudando `tx` (e `wallet`, se houver lançamento). */
-  private async apply(
-    repository: WagerProcessingRepository,
-    tx: WagerTransaction,
-    wallet: Wallet | undefined,
-    now: Date,
-  ): Promise<WalletLedgerEntry | undefined> {
-    // Rejeições no nível da wallet não devolvem saldo: a wallet pode não ser do player.
-    if (wallet === undefined) {
-      const exists = await repository.walletExists(tx.walletId);
-      return void tx.reject(exists ? FailureCode.WalletPlayerMismatch : FailureCode.WalletNotFound);
-    }
-    if (wallet.currency !== tx.money.currency) return void tx.reject(FailureCode.CurrencyMismatch);
-
-    let reference: WagerTransaction | undefined;
-    if (tx.referenceExternalTransactionId !== undefined) {
-      const found = await repository.findByExternalId(tx.providerId, tx.referenceExternalTransactionId);
-      const check = checkReference(tx, found);
-      if (check.type === 'pending') return void tx.markPendingReference(now);
-      if (check.type === 'reject') return void tx.reject(check.code, wallet.balance);
-      reference = check.reference;
-      // Vale para reversões (uma no total) e para WIN/LOSS: liquidar uma BET já estornada creditaria duas vezes.
-      if (await repository.hasProcessedReversal(reference.id)) {
-        return void tx.reject(FailureCode.ReferenceAlreadyReversed, wallet.balance);
-      }
-    }
-
-    if (!tx.affectsBalance()) return void tx.markProcessed(reference?.id, now, wallet.balance);
-
-    const movement = { entryId: this.ids.uuid(), transactionId: tx.id, money: tx.money, at: now };
-    let entry: WalletLedgerEntry;
-    try {
-      entry =
-        tx.ledgerDirectionFor(reference) === LedgerDirection.Debit ? wallet.debit(movement) : wallet.credit(movement);
-    } catch (error) {
-      if (error instanceof InsufficientBalanceError) {
-        const code = tx.isReversal() ? FailureCode.ReversalWouldOverdraw : FailureCode.InsufficientBalance;
-        return void tx.reject(code, wallet.balance);
-      }
-      // Só o crédito pode passar do limite do numeric(20,2); a wallet fica intacta (Wallet.apply).
-      if (error instanceof InvalidMoneyError) return void tx.reject(FailureCode.BalanceLimitExceeded, wallet.balance);
-      throw error;
-    }
-    tx.markProcessed(reference?.id, now, wallet.balance);
-    return entry;
-  }
-
-  /**
-   * Um evento de estado por transação + WalletBalanceChanged quando há lançamento.
-   * causationId: a mensagem de entrada (inbox) ou a requisição (idempotency key); o
-   * WalletBalanceChanged é causado pelo WagerTransactionProcessed.
-   */
-  private events(
-    tx: WagerTransaction,
-    wallet: Wallet | undefined,
-    entry: WalletLedgerEntry | undefined,
-    command: ProcessWagerTransactionCommand,
-    now: Date,
-  ): OutboxMessage[] {
-    const context = (causationId: string): EventContext => ({
-      eventId: this.ids.uuid(),
-      correlationId: command.correlationId,
-      causationId,
-      occurredAt: now,
-    });
-    const cause = command.inbox?.messageId ?? command.idempotencyKey;
-
-    switch (tx.status) {
-      case WagerTransactionStatus.Processed: {
-        if (wallet === undefined) throw new InvalidWagerTransactionError('transação processada sem wallet');
-        const processed = WagerTransactionProcessed.from(tx, wallet, context(cause));
-        const messages = [OutboxMessage.enqueue(processed)];
-        if (entry !== undefined) {
-          messages.push(OutboxMessage.enqueue(WalletBalanceChanged.from(wallet, entry, context(processed.eventId))));
-        }
-        return messages;
-      }
-      case WagerTransactionStatus.Rejected:
-        return [OutboxMessage.enqueue(WagerTransactionRejected.from(tx, context(cause)))];
-      case WagerTransactionStatus.PendingReference:
-        return [OutboxMessage.enqueue(WagerTransactionPendingReference.from(tx, context(cause)))];
-      default:
-        throw new InvalidWagerTransactionError(`estado inesperado após o processamento: ${tx.status}`);
-    }
   }
 
   private inboxMessage(inbox: InboxContext): InboxMessage {
@@ -390,24 +292,6 @@ function decideIdempotency(
     return resultOf(byKey, true);
   }
   return { type: 'IdempotencyConflict', existingTransactionId: (byKey ?? first).id };
-}
-
-/** Ordem: kind → wallet → player → rodada → moeda → status da referência → valor (reversões). */
-function checkReference(tx: WagerTransaction, reference: WagerTransaction | undefined): ReferenceCheck {
-  if (reference === undefined) return { type: 'pending' };
-  const reject = (code: FailureCode): ReferenceCheck => ({ type: 'reject', code });
-
-  if (!tx.canReference(reference)) return reject(FailureCode.InvalidReferenceKind);
-  if (reference.walletId !== tx.walletId) return reject(FailureCode.ReferenceWalletMismatch);
-  if (reference.playerId !== tx.playerId) return reject(FailureCode.ReferencePlayerMismatch);
-  if (reference.roundId !== tx.roundId) return reject(FailureCode.ReferenceRoundMismatch);
-  if (reference.money.currency !== tx.money.currency) return reject(FailureCode.CurrencyMismatch);
-  if (reference.status === WagerTransactionStatus.Pending || reference.status === WagerTransactionStatus.PendingReference) {
-    return { type: 'pending' };
-  }
-  if (reference.status !== WagerTransactionStatus.Processed) return reject(FailureCode.ReferenceNotProcessed);
-  if (tx.isReversal() && !reference.money.equals(tx.money)) return reject(FailureCode.AmountMismatch);
-  return { type: 'ok', reference };
 }
 
 /** Resultado a partir do estado persistido: o replay devolve exatamente o original. */

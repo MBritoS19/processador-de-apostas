@@ -262,7 +262,7 @@ export async function poison(orm: MikroORM, eventId: string): Promise<void> {
 /** Encerra (como uma morte do processo) a sessão do publisher que segura o lock do claim. */
 export async function killClaimSession(orm: MikroORM): Promise<number> {
   const rows = await orm.em.fork().execute<Array<{ killed: boolean }>>(
-    `select pg_terminate_backend(pid) as killed from pg_stat_activity
+    `select pg_terminate_backend(pid, 5000) as killed from pg_stat_activity
      where datname = current_database() and pid <> pg_backend_pid()
        and state = 'idle in transaction' and query ilike '%skip locked%'`,
   );
