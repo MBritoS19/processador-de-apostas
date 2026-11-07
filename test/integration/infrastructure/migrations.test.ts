@@ -3,6 +3,7 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
 import { buildMikroOrmConfig } from '../../../src/infrastructure/persistence/mikro-orm.config';
+import { PG, T0, expectPgError, seedWallet, transactionRow } from '../persistence/db';
 
 /** Postgres real (docker compose), banco wagering_test via .env.test. */
 describe('migrations', () => {
@@ -128,6 +129,39 @@ describe('migrations', () => {
 
     await migrator.up();
     expect(await outboxSchema()).toEqual(['ix_outbox_pending_aggregate', 'seq']);
+  });
+
+  it('down da migration da Fase 7 remove correlation_id e devolve o guard sem ela; up volta a proteger a coluna', async () => {
+    const migrator = orm.getMigrator();
+    await migrator.up();
+    const knex = orm.em.getKnex();
+    const hasColumn = async () =>
+      (await knex.raw<{ rows: unknown[] }>(
+        `select 1 from information_schema.columns where table_name = 'wager_transactions' and column_name = 'correlation_id'`,
+      )).rows.length === 1;
+    const wallet = await seedWallet(orm, '100.00');
+    const pending = transactionRow({
+      wallet_id: wallet.walletId,
+      player_id: wallet.playerId,
+      kind: 'ROLLBACK',
+      reference_external_transaction_id: 'bet-x',
+      status: 'PENDING_REFERENCE',
+      reference_attempts: 1,
+      next_reference_check_at: T0,
+    });
+    await knex('wager_transactions').insert(pending);
+
+    await migrator.down({ to: 'Migration20261107500000_correlation_id' });
+    expect(await hasColumn()).toBe(false);
+    // O guard restaurado funciona sem a coluna: UPDATE permitido passa, identidade continua imutável.
+    await knex('wager_transactions').where({ id: pending.id }).update({ reference_attempts: 2 });
+    await expectPgError(knex('wager_transactions').where({ id: pending.id }).update({ round_id: 'outra' }), PG.restrictViolation);
+
+    await migrator.up();
+    expect(await hasColumn()).toBe(true);
+    await knex('wager_transactions').where({ id: pending.id }).update({ reference_attempts: 3 });
+    await expectPgError(knex('wager_transactions').where({ id: pending.id }).update({ correlation_id: 'x' }), PG.restrictViolation);
+    await knex.raw('truncate wallets, wager_transactions, wallet_ledger_entries, inbox_messages, outbox_messages cascade');
   });
 
   it('up da Fase 6 numera linhas existentes por (occurred_at, id), não pela ordem física, e a sequência continua', async () => {

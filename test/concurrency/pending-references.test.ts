@@ -72,6 +72,12 @@ describe('worker de referências pendentes — concorrência', () => {
       const resolved =
         (await counterTotal(a.metrics.pendingReferenceResolved)) + (await counterTotal(b.metrics.pendingReferenceResolved));
       expect(resolved).toBe(rollbacks.length);
+      const skipped = async (reason: string) =>
+        (await counterTotal(a.metrics.pendingReferenceSkipped, { reason })) +
+        (await counterTotal(b.metrics.pendingReferenceSkipped, { reason }));
+      // Nenhum erro inesperado escondido pela corrida, e houve disputa de fato entre as instâncias.
+      expect(await skipped('error')).toBe(0);
+      expect((await skipped('wallet_busy')) + (await skipped('not_due'))).toBeGreaterThan(0);
       for (const wallet of wallets) {
         expect(await walletBalance(orm, wallet.walletId)).toBe('100.00');
         await expectLedgerConsistent(orm, wallet.walletId);
@@ -121,6 +127,7 @@ describe('worker de referências pendentes — concorrência', () => {
       // Deadlock apareceria como TransientFailure no use case (telemetria) ou transient no worker.
       expect(entry.telemetry.count('deadlock') + other.telemetry.count('deadlock')).toBe(0);
       expect(await counterTotal(workerInstance.metrics.pendingReferenceSkipped, { reason: 'transient' })).toBe(0);
+      expect(await counterTotal(workerInstance.metrics.pendingReferenceSkipped, { reason: 'error' })).toBe(0);
       expect(await walletBalance(orm, wallet.walletId)).toBe('1000.00');
       await expectLedgerConsistent(orm, wallet.walletId);
     },

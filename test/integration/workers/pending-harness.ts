@@ -25,10 +25,10 @@ export const TEST_WORKER_OPTIONS: PendingReferenceWorkerOptions = {
 export function buildPendingFixture(
   orm: MikroORM,
   clock: Clock,
-  overrides: { ttlMs?: number; options?: Partial<PendingReferenceWorkerOptions>; logger?: Logger } = {},
+  overrides: { ttlMs?: number; lockTimeoutMs?: number; options?: Partial<PendingReferenceWorkerOptions>; logger?: Logger } = {},
 ) {
   const settlement = new WagerSettlement(randomIdGenerator, overrides.ttlMs);
-  const unitOfWork = new MikroOrmWagerUnitOfWork(orm.em);
+  const unitOfWork = new MikroOrmWagerUnitOfWork(orm.em, overrides.lockTimeoutMs);
   const telemetry = new LoggingLockConflictTelemetry(() => undefined);
   const useCase = new ProcessWagerTransaction(unitOfWork, clock, randomIdGenerator, telemetry, settlement);
   const resolver = new ResolvePendingReferences(unitOfWork, clock, settlement);
@@ -100,4 +100,19 @@ export async function counterTotal(
   return values
     .filter((v) => Object.entries(labels).every(([key, value]) => v.labels[key] === value))
     .reduce((sum, v) => sum + v.value, 0);
+}
+
+/** Espera alguma sessão do banco de teste ficar bloqueada esperando lock (sem sleep fixo). */
+export async function waitForLockWaiter(orm: MikroORM, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const [row] = await orm.em
+      .fork()
+      .execute<Array<{ n: string }>>(
+        `select count(*)::text as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`,
+      );
+    if (Number(row?.n) > 0) return;
+    if (Date.now() > deadline) throw new Error('nenhuma sessão esperando lock');
+    await Bun.sleep(10);
+  }
 }

@@ -264,7 +264,7 @@ export async function killClaimSession(orm: MikroORM): Promise<number> {
   const rows = await orm.em.fork().execute<Array<{ killed: boolean }>>(
     `select pg_terminate_backend(pid, 5000) as killed from pg_stat_activity
      where datname = current_database() and pid <> pg_backend_pid()
-       and state = 'idle in transaction' and query ilike '%skip locked%'`,
+       and state = 'idle in transaction' and query ilike '%from outbox_messages%skip locked%'`,
   );
   return rows.filter((row) => row.killed).length;
 }

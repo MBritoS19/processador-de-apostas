@@ -104,6 +104,11 @@ export class ObservabilityMetrics {
     help: 'Novas tentativas agendadas (referência ainda ausente ou não resolvida).',
     registers: [this.registry],
   });
+  readonly pendingReferenceFailed = new Counter({
+    name: 'wagering_pending_reference_failed_total',
+    help: 'Pendentes encerradas como FAILED (INFRASTRUCTURE_FAILURE) após erros inesperados seguidos.',
+    registers: [this.registry],
+  });
   readonly pendingReferenceSkipped = new Counter({
     name: 'wagering_pending_reference_skipped_total',
     help: 'Candidatas puladas: wallet_busy, not_due (tratada por outra instância), transient ou error.',

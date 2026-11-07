@@ -8,13 +8,17 @@ export interface WagerTransactionRejectedData extends WagerTransactionData {
   failureCode: FailureCode;
 }
 
-/** Transação rejeitada por regra de negócio. */
+/**
+ * Transação rejeitada por regra de negócio (REJECTED) ou que falhou de forma permanente (FAILED,
+ * ex.: pendente com erro inesperado repetido no worker). O `failureCode` distingue os casos.
+ */
 export class WagerTransactionRejected extends IntegrationEvent<WagerTransactionRejectedData> {
   override readonly eventType = 'WagerTransactionRejected';
   override readonly version = 1;
 
   static from(tx: WagerTransaction, ctx: EventContext): WagerTransactionRejected {
-    const common = wagerTransactionData(tx, WagerTransactionStatus.Rejected, 'WagerTransactionRejected');
+    const expected = tx.status === WagerTransactionStatus.Failed ? WagerTransactionStatus.Failed : WagerTransactionStatus.Rejected;
+    const common = wagerTransactionData(tx, expected, 'WagerTransactionRejected');
     if (tx.failureCode === undefined) {
       throw new InvalidWagerTransactionError('transação rejeitada sem failureCode');
     }

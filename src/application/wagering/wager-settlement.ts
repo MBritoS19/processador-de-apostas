@@ -76,10 +76,34 @@ export class WagerSettlement {
     }
     const retried = mode === 'update' && tx.status === WagerTransactionStatus.PendingReference;
     if (!retried) await repository.insertOutbox(this.events(tx, wallet, entry, context));
-    if (tx.isTerminal()) {
-      await repository.expediteAwaitingReference(tx.providerId, tx.externalTransactionId, tx.walletId, context.now);
-    }
+    // Só com a wallet travada: o UPDATE toca apenas pendentes dessa wallet (ordem de locks). Uma
+    // rejeição sem wallet do player nunca serve de referência, então não há o que antecipar.
+    if (tx.isTerminal() && wallet !== undefined) await this.expedite(repository, tx, context.now);
     return { expired: tx.failureCode === FailureCode.ReferenceNotFound };
+  }
+
+  /**
+   * Encerra uma PENDING_REFERENCE como FAILED com INFRASTRUCTURE_FAILURE (erro inesperado repetido
+   * no worker), com WagerTransactionRejected na outbox. O chamador segura o lock da wallet e da transação.
+   */
+  async fail(repository: WagerProcessingRepository, tx: WagerTransaction, context: SettlementContext): Promise<void> {
+    tx.fail(FailureCode.InfrastructureFailure);
+    await repository.updatePendingTransaction(tx);
+    await repository.insertOutbox([
+      OutboxMessage.enqueue(
+        WagerTransactionRejected.from(tx, {
+          eventId: this.ids.uuid(),
+          correlationId: context.correlationId,
+          causationId: context.causationId,
+          occurredAt: context.now,
+        }),
+      ),
+    ]);
+    await this.expedite(repository, tx, context.now);
+  }
+
+  private async expedite(repository: WagerProcessingRepository, tx: WagerTransaction, now: Date): Promise<void> {
+    await repository.expediteAwaitingReference(tx.providerId, tx.externalTransactionId, tx.walletId, now);
   }
 
   /** Aplica as regras de negócio, mudando `tx` (e `wallet`, se houver lançamento). */
