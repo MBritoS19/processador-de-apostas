@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **5 — Consumidor SQS** (aguardando plano)
+Fase atual: **6 — Outbox publisher** (aguardando plano)
 
 ---
 
@@ -61,12 +61,12 @@ Fase atual: **5 — Consumidor SQS** (aguardando plano)
 - [x] Ponto de extensão de autenticação (decisão registrada)
 
 ## Fase 5 — Consumidor SQS (§10)
-- [ ] Reutiliza o mesmo use case da entrada HTTP
-- [ ] Dedup via inbox persistente
-- [ ] Ack somente após o commit
-- [ ] Classificação de erros: negócio (ack), transitório (retry), permanente (DLQ)
-- [ ] Limite de tentativas antes da DLQ
-- [ ] Shutdown gracioso no `SIGTERM`
+- [x] Reutiliza o mesmo use case da entrada HTTP
+- [x] Dedup via inbox persistente
+- [x] Ack somente após o commit
+- [x] Classificação de erros: negócio (ack), transitório (retry), permanente (DLQ)
+- [x] Limite de tentativas antes da DLQ
+- [x] Shutdown gracioso no `SIGTERM`
 
 ## Fase 6 — Outbox publisher (§11)
 - [ ] Worker com `FOR UPDATE SKIP LOCKED` (ou equivalente)
@@ -81,10 +81,10 @@ Fase atual: **5 — Consumidor SQS** (aguardando plano)
 
 ## Fase 8 — Observabilidade (§12)
 - [x] Logs JSON com `correlationId`, `transactionId`, `walletId`, `providerId` (HTTP e use case)
-- [ ] `messageId` nos logs (Fase 5)
+- [x] `messageId` nos logs (Fase 5)
 - [x] Métricas: transações por status, duplicatas, conflitos de lock, latência e divergência de reconciliação
 - [x] Métricas de retries, DLQ e outbox lag declaradas no registry
-- [ ] Retries e DLQ incrementados (Fase 5)
+- [x] Retries e DLQ incrementados (Fase 5)
 - [ ] Outbox lag medido (Fase 6)
 - [x] `correlationId` propagado até os eventos da outbox
 
@@ -122,7 +122,7 @@ Concorrência (paralelismo real):
 - MikroORM 6 com `EntitySchema` em infrastructure (domínio sem ORM) — ARCHITECTURE §2
 - Migrations em SQL escrito à mão, CLI próprio via `getMigrator()` — §3
 - LocalStack fixado em 4.9.2 (sem auth token); MiniStack como alternativa — §4
-- Filas FIFO sem dedup por conteúdo; redrive para DLQ com `maxReceiveCount=5` (revisar na Fase 5) — §5
+- Filas FIFO sem dedup por conteúdo; redrive para DLQ com `maxReceiveCount=10` (rede de segurança; revisto na Fase 5) — §5, §18
 - Liveness não toca dependências; readiness com porta `ReadinessCheck`, 503 e `reason` fechado (timeout|unreachable|error) — §6
 - Contexto do ORM explícito em todas as entradas (`allowGlobalContext:false`, `registerRequestContext:false`) — §2
 - Conexão preguiçosa no app: sobe com o Postgres fora e reporta not_ready (sem crash loop) — §2
@@ -164,6 +164,12 @@ Concorrência (paralelismo real):
 - Autenticação não implementada; `AuthGuard` no-op + desenho com Keycloak client credentials registrado — §16
 - Logs pino JSON (inclusive logger do Nest); `X-Correlation-Id` aceito só se `^[A-Za-z0-9._:-]{1,128}$` — §17
 - Métricas em registry próprio; labels `status`, `kind` (enum ou `UNKNOWN`), `failure_code` — §17
+- Consumidor SQS reutiliza o use case instrumentado (`WageringCoreModule`, compartilhado com o HTTP); ligado por `SQS_CONSUMER_ENABLED` — §18
+- Hash da inbox = SHA-256 do JSON canônico de `{ type, data }` (sem messageId/occurredAt); pré-checagem da inbox + releitura no conflito — §18
+- Classificação: negócio → ack; transitório/bug → retry; envelope/payload inválido e inbox divergente → DLQ com `dlqReason` — §18
+- Limite 5 no consumidor, redrive 10 na fila; backoff 30/60/120/240 (teto 300s); visibilidade 60s; long polling 20s; pausa do polling até 30s com banco fora — §18
+- Ordem do grupo preservada sem depender do broker (as seguintes recebem a mesma visibilidade da que falhou) — §18
+- Shutdown em `beforeApplicationShutdown`, timeout 25s, devolve visibilidade 0 do que não terminou — §18
 
 ## Pendências e bloqueios
 - `README.md` fica para a Fase 10; por ora os comandos estão só no CLAUDE.md, que é local (fora do git).
@@ -173,10 +179,11 @@ Concorrência (paralelismo real):
 - Decisão pendente: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. Decidir se é intencional.
 - Lock da wallet antes da checagem de dono: resolvido na Fase 3 (`FOR UPDATE ... AND player_id`); rate limit por provider/wallet na borda continua recomendado.
 - `InvalidInput` tem código único (`INVALID_INPUT`) e motivo em texto; códigos por campo ficam para quando um consumidor precisar.
-- Fase 5: o `payloadHash` da inbox vem do consumidor; reutilizar `wagerPayloadHash` ou documentar o que ele cobre.
-- Fase 5: a montagem do `InstrumentedProcessWagerTransaction` está no `WageringModule` (HTTP); mover para um módulo compartilhado com o consumidor SQS.
 - Limitação conhecida: REFUND de BET que já tem WIN PROCESSED é aceito (ARCHITECTURE §15).
 - Deploy: usuário da aplicação sem permissão de TRUNCATE.
+- Pendente: `stop_grace_period: 30s` (acima do `SQS_SHUTDOWN_TIMEOUT_MS` de 25s) no serviço da aplicação do compose, inclusive no profile `multi`. O compose ainda não tem serviço da aplicação nem Dockerfile; entra quando forem criados (Fase 9, item 4).
+- Limitação (C4a, ARCHITECTURE §18): se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, a inbox não é gravada; o mesmo `messageId` com outro payload válido depois é processado. Fechar exige mudar o use case.
+- O vínculo `SIGTERM` → shutdown hooks (`enableShutdownHooks`) não tem teste automatizado; os testes usam `app.close()`.
 
 ## Registro de sessões
 <!-- Data — o que foi feito — próximo passo -->
@@ -188,3 +195,4 @@ Concorrência (paralelismo real):
 - 2026-11-07 — Fase 4 concluída: API HTTP de wallets, transações, consultas, ledger paginado, reconciliação e AuthGuard no-op; status HTTP documentados em ARCHITECTURE §16. Typecheck e testes HTTP de integração passando. — Próximo: Fase 5 (SQS), aguardando plano.
 - 2026-11-07 — Fase 8 parcial concluída: logs JSON com correlação HTTP, métricas Prometheus em registry próprio e wrapper compartilhado do use case; retries/DLQ/outbox lag apenas declaradas para as Fases 5–7. — Próximo: Fase 5 (SQS), aguardando plano.
 - 2026-11-07 — Validação das Fases 4 e 8 (implementadas pelo Copilot; revisores correctness + interface): 14 achados corrigidos (erros do banco viravam 400, id não-UUID dava 500, FAILED em 503, label `kind` sem limite, reconciliação sem métrica, OPENING sem evento, envelope de erro, nomes reservados, cursor, correlationId, wrapper, convenções Prometheus, 202/409). Novo use case `OpenWallet`, factory `WagerTransaction.opening`, filtro global; ARCHITECTURE §16–17 reescritos. 437 testes passando (240 unit, 193 integração, 4 concorrência). — Próximo: Fase 5 (SQS), aguardando plano.
+- 2026-11-07 — Fase 5 concluída: consumidor SQS (inbox, ack após commit, retry com backoff, DLQ com motivo, FIFO por grupo, pausa do polling com banco fora, shutdown gracioso), `WageringCoreModule` compartilhado; revisão (correctness + test-evidence): 6 achados de código e 10 de testes corrigidos (redrive 10 / limite 5, ordem do grupo sem depender do broker, releitura da inbox, envelope ilegível → DLQ, loop único). ARCHITECTURE §18. 483 testes passando (259 unit, 220 integração, 4 concorrência). — Próximo: Fase 6 (outbox publisher), aguardando plano.

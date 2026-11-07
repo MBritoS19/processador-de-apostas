@@ -78,14 +78,14 @@ Cada seção indica a fase em que foi tomada; seções futuras serão adicionada
 | Fila | Atributos |
 |---|---|
 | `wager-transactions-dlq.fifo` | FIFO, `ContentBasedDeduplication=false`, retenção de 14 dias |
-| `wager-transactions.fifo` | FIFO, `ContentBasedDeduplication=false`, `VisibilityTimeout=30s`, `RedrivePolicy` → DLQ com `maxReceiveCount=5` |
+| `wager-transactions.fifo` | FIFO, `ContentBasedDeduplication=false`, `VisibilityTimeout=30s`, `RedrivePolicy` → DLQ com `maxReceiveCount=10` |
 
 - **Nomes:** `SQS_WAGER_QUEUE_NAME` / `SQS_WAGER_DLQ_NAME`, lidos pela aplicação **e** repassados pelo compose ao script de init, com os mesmos defaults (os nomes do CHALLENGE §10). Uma única fonte evita a aplicação procurar uma fila que o init nunca criou.
 - **Sem dedup por conteúdo:** o produtor informa `MessageDeduplicationId` explícito. De qualquer forma, a dedup do broker é **otimização**; a garantia é a inbox persistente no Postgres (CHALLENGE §8).
   - *Trade-off:* todo produtor precisa gerar o dedup id; em troca, dois payloads idênticos legítimos não são descartados pelo broker por coincidência de conteúdo.
-- **`maxReceiveCount=5`:** valor inicial, configurável por `SQS_MAX_RECEIVE_COUNT` (lido pelo compose; mudar exige recriar o container do LocalStack). Será revisto na Fase 5, junto com a classificação de erros (negócio / transitório / permanente).
+- **`maxReceiveCount=10`** (era 5 na Fase 0; revisto na Fase 5): rede de segurança acima do limite do consumidor (5). Motivo em §18. Configurável por `SQS_MAX_RECEIVE_COUNT` (lido pelo compose; mudar exige recriar o container do LocalStack).
   - *Trade-off:* baixo demais manda para a DLQ mensagens que sobreviveriam a uma indisponibilidade curta; alto demais atrasa a ida à DLQ de mensagens permanentemente inválidas.
-- **`VisibilityTimeout=30s`:** folga ampla para uma transação curta no banco. A Fase 5 decide se o consumidor estende a visibilidade em processamento longo.
+- **`VisibilityTimeout=30s`:** default da fila. O consumidor pede 60s em cada `ReceiveMessage` (§18) e não estende a visibilidade durante o processamento.
 - Criação via script de init (`docker/localstack/init/ready.d/01-create-queues.sh`) que valida nomes e `maxReceiveCount` antes de usá-los. É idempotente para os mesmos atributos; com atributos diferentes numa fila existente, a criação falha (o compose atual não persiste o estado do LocalStack, então isso não ocorre hoje).
 
 ## 6. Health checks (Fase 0)
@@ -414,7 +414,7 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 
 - JSON (pino), uma linha por evento, a partir de um logger raiz (`infrastructure/observability/logger.ts`). O logger do Nest (boot, erros do framework) usa o mesmo JSON, via `PinoNestLogger`.
 - `correlationId`: lido de `X-Correlation-Id` quando casa com `^[A-Za-z0-9._:-]{1,128}$`; caso contrário, é gerado um UUID. É sempre devolvido no header da resposta, inclusive em erros que acontecem antes do middleware (como JSON malformado), e propagado até o `correlationId` dos eventos da outbox.
-- Campos: `correlationId`, `providerId`, `walletId` e `transactionId` quando existem; `messageId` entra com o SQS (Fase 5). O log de requisição usa o template da rota (`/wallets/:id`), não a URL.
+- Campos: `correlationId`, `providerId`, `walletId` e `transactionId` quando existem; `messageId` (e `sqsMessageId`) nas entradas por SQS (§18). O log de requisição usa o template da rota (`/wallets/:id`), não a URL.
 - Nunca entram nos logs: payload financeiro completo, valores, mensagens do Postgres.
 
 ### Métricas
@@ -431,9 +431,85 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | `wagering_idempotency_conflicts_total` | counter | kind | 8 |
 | `wagering_lock_conflicts_total` | counter | — | 3/8 |
 | `wagering_reconciliation_divergences_total` | counter | — | 4/8 |
-| `wagering_retries_total` | counter | — | declarada; incrementa na 5 |
-| `wagering_dlq_messages_total` | counter | — | declarada; incrementa na 5 |
+| `wagering_retries_total` | counter | — | 5: cada `ChangeMessageVisibility` de retry no consumidor |
+| `wagering_dlq_messages_total` | counter | — | 5: cada mensagem enviada à DLQ pelo consumidor (não conta o redrive nativo) |
 | `wagering_outbox_lag_seconds` | gauge | — | declarada; idade do evento pendente mais antigo, Fase 6 |
 
 - `GET /metrics` é aberto, como os health checks. Em produção ficaria numa porta interna ou atrás da rede do scraper.
 - **Limitação:** os contadores são por instância (o Prometheus soma). O contador em memória do `LoggingLockConflictTelemetry` fica só para os testes.
+
+## 18. Consumidor SQS (Fase 5)
+
+`src/interfaces/sqs/wager-consumer.ts`, ligado por `SQS_CONSUMER_ENABLED` (default `true`; `false` no `.env.test`). Cliente da fila em `src/infrastructure/sqs/`.
+
+### Fluxo por mensagem
+
+1. **Receive** com long polling: `WaitTimeSeconds=20`, `MaxNumberOfMessages=10`, `VisibilityTimeout=60`. Pede `ApproximateReceiveCount` e `MessageGroupId`.
+2. **Envelope** (`wager-envelope.ts`): JSON, `messageId` (texto até 256), `type = WagerTransactionRequested`, `occurredAt` ISO 8601 com fuso, `data` objeto, `data.idempotencyKey` obrigatório. Usa o mesmo `textProblem` do use case. Os campos de negócio de `data` são validados pelo próprio use case, o mesmo validador da entrada HTTP. Por isso `kind=OPENING` e `providerId=internal` são `InvalidInput`.
+3. **`payloadHash` da inbox:** SHA-256 hex do JSON canônico (§14) de `{ type, data }`. Ficam fora `messageId`, `occurredAt`, `correlationId` e outros metadados. É diferente do `payloadHash` da transação, que só cobre os campos de negócio normalizados: o da inbox identifica a **mensagem** (inclui a `idempotencyKey` e não normaliza `"25"` × `"25.00"`).
+4. **Pré-checagem da inbox** `(consumerName, messageId)`, fora da transação. Se já existe: mesmo hash → ack sem chamar o use case (conta como replay); hash diferente → DLQ. É só o caminho rápido. A garantia é a PK da inbox, gravada **na mesma transação** do efeito.
+5. **Use case** via `InstrumentedProcessWagerTransaction` (mesmas métricas do HTTP), com `inbox = { consumerName, messageId, payloadHash }` e `correlationId` = o do envelope, se válido (§17), senão o `messageId`.
+6. **Ação** conforme a tabela abaixo. O ack (`DeleteMessage`) só acontece depois que o use case retorna, ou seja, depois do commit. Se o `DeleteMessage` falhar, a reentrega cai na pré-checagem da inbox e é confirmada sem efeito novo (testado).
+
+### Classificação
+
+| Resultado / erro | Ação |
+|---|---|
+| `Processed`, `Rejected` (REJECTED e FAILED), `PendingReference`, inclusive replay | ack |
+| Inbox com a mesma mensagem e o mesmo hash (pré-checagem ou releitura) | ack, `wagering_idempotent_replays_total` |
+| `IdempotencyConflict` com `existingTransactionId` e sem linha na inbox | ack + log `warn` (`wagering_idempotency_conflicts_total`, no wrapper) |
+| `IdempotencyConflict` sem id (corrida na PK da inbox) | relê a inbox: mesmo hash → ack; outro hash → DLQ `INBOX_PAYLOAD_MISMATCH`; sem linha → retry |
+| Inbox com o mesmo `messageId` e outro hash | DLQ `INBOX_PAYLOAD_MISMATCH` |
+| Corpo não-JSON, envelope inválido ou ilegível | DLQ `INVALID_ENVELOPE` |
+| `InvalidInput` | DLQ `INVALID_PAYLOAD` (motivo em `dlqDetail`) |
+| `TransientFailure`, `TransientPersistenceError` da pré-checagem, exceção inesperada (bug) | retry: `ChangeMessageVisibility` com backoff + `wagering_retries_total`; na 5ª tentativa → DLQ `MAX_ATTEMPTS_EXCEEDED` |
+
+- **DLQ:** primeiro `SendMessage` na `wager-transactions-dlq.fifo`, depois `DeleteMessage` na principal. Atributos: `dlqReason` (um dos 4 códigos acima), `dlqDetail` (até 256 caracteres, sem valores do payload), `sourceMessageId` e `receiveCount`. O `MessageGroupId` é o original. O `MessageDeduplicationId` é o MessageId do SQS: se o delete falhar, a reentrega reenvia para a DLQ e o broker deduplica (testado). Conta em `wagering_dlq_messages_total`.
+- **Erro inesperado** é tratado como transitório até o limite: um bug não descarta a mensagem na primeira falha, e ela acaba na DLQ com motivo, para análise.
+
+### Números
+
+| Parâmetro | Valor | Motivo |
+|---|---|---|
+| Limite do consumidor (`SQS_CONSUMER_MAX_ATTEMPTS`) | 5 | DLQ com motivo e métrica, decidida pelo consumidor |
+| `maxReceiveCount` da fila | 10 | rede de segurança; ver abaixo |
+| Backoff do retry | `30s·2^(n−1)`, teto 300s: 30/60/120/240 | `n` = `ApproximateReceiveCount` |
+| `VisibilityTimeout` no receive | 60s | pior caso de um lote: 10 mensagens do mesmo grupo em sequência × ~5s (`lock_timeout` 2s + releitura) |
+| `WaitTimeSeconds` | 20 | long polling: menos chamadas vazias |
+| Pausa do polling (banco/SQS fora) | `1s·2^(n−1)`, até 30s | não drenar a fila contra um banco fora do ar |
+| `SQS_SHUTDOWN_TIMEOUT_MS` | 25s | abaixo do `stop_grace_period` de 30s previsto para o serviço da aplicação (pendência: o compose ainda não tem esse serviço) |
+
+**Tolerância a falha transitória:** uma mensagem tem 5 tentativas separadas por 30+60+120+240 = 450s. Isso dá **~7,5 min** desde o primeiro recebimento até a DLQ. Quando a falha é `unavailable` (banco fora, pool esgotado) ou o próprio SQS falha, o loop também pausa o polling (1s, 2s, 4s… até 30s, e zera no primeiro lote sem falha de conexão). Assim a instância não sai recebendo e queimando tentativas de mensagens novas enquanto o banco está fora. Mensagens já recebidas seguem o backoff normal. Depois da DLQ, a recuperação é o redrive manual da DLQ para a fila principal (é seguro: a inbox e a idempotência impedem efeito duplicado).
+
+**Por que 5 no consumidor e 10 na fila:** o SQS incrementa o `ApproximateReceiveCount` a cada **recebimento**, mesmo quando a mensagem não é processada. As mensagens que esperam atrás de uma que falhou no mesmo grupo são recebidas de novo a cada ciclo, sem processar, e a contagem delas sobe junto (o mesmo vale para mensagens devolvidas no shutdown). Com redrive em 5, a fila mandaria essas mensagens válidas, nunca tentadas, para a DLQ sem motivo nem métrica. Com o limite em 5 no consumidor e 10 na fila:
+- a mensagem que falha vai para a DLQ pelo consumidor, com motivo, na 5ª tentativa, e as seguintes do grupo são processadas em seguida, no mesmo lote (testado);
+- o redrive nativo só age se o consumidor não conseguir decidir (por exemplo, falhas repetidas do próprio SQS).
+
+**Efeito colateral aceito:** uma mensagem seguinte cuja contagem já subiu (por exemplo, 5) e que então falha de forma transitória vai direto para a DLQ com `MAX_ATTEMPTS_EXCEEDED`, sem as próprias 5 tentativas. Fica na DLQ com motivo e pode ser reprocessada por redrive manual. Contar tentativas reais exigiria estado por mensagem fora do SQS.
+
+### FIFO é otimização, não garantia
+
+- `MessageGroupId = walletId` e `MessageDeduplicationId = messageId` vêm do produtor. A dedup do broker só vale por 5 minutos e só para o mesmo dedup id. A ordem por grupo não protege contra reentrega, outro produtor, redrive manual ou várias instâncias. A correção vem do banco: inbox por `(consumerName, messageId)`, idempotência por `(provider_id, idempotency_key)` e lock por wallet (§12–13). O CHALLENGE §5.3 proíbe depender só do FIFO.
+- Mesmo assim, o consumidor preserva a ordem do grupo, porque ela reduz `PENDING_REFERENCE` (ROLLBACK antes da BET):
+  - grupos diferentes do lote rodam em paralelo; o mesmo grupo, em sequência;
+  - se uma mensagem vai para retry, as seguintes do grupo recebem **a mesma visibilidade** e voltam junto, atrás dela. Não se depende de o broker bloquear o grupo enquanto há mensagem em voo: o LocalStack não bloqueia, e um teste com BET + ROLLBACK falhava ao liberar as seguintes com visibilidade 0;
+  - se a própria ação no SQS falhar (`ChangeMessageVisibility`, envio à DLQ), o grupo para e as seguintes ficam em voo até expirar, junto com a que falhou.
+
+### Shutdown (`SIGTERM`)
+
+`WagerConsumerModule.beforeApplicationShutdown`, que roda antes de o ORM e o cliente SQS fecharem (`onApplicationShutdown`), executa:
+1. para de buscar e acorda uma pausa em andamento;
+2. espera o lote atual até `SQS_SHUTDOWN_TIMEOUT_MS`;
+3. no timeout, `ChangeMessageVisibility 0` em tudo o que não terminou.
+
+O processamento abandonado pode ainda commitar. A outra instância que pegar a mensagem cai na inbox ou na idempotência, e o resultado é um único efeito (testado). Um `start()` não abre um segundo loop enquanto o anterior não terminou. Os testes usam `app.close()`, que dispara os mesmos hooks. O vínculo sinal → hooks vem de `enableShutdownHooks()` em `main.ts` e não tem teste automatizado.
+
+### Logs
+
+`sqs_message_acked`, `sqs_message_retry`, `sqs_message_dead_lettered`, `sqs_ack_failed`, `sqs_polling_paused`, entre outros. Todos com `sqsMessageId`, `receiveCount`, `messageId`, `correlationId` e, quando houver, `transactionId`, `outcome` ou `reason`. O log do use case também recebe o `messageId`. Nunca entram `data`, valores nem o `dlqDetail`.
+
+### Limitações
+
+- **C4a (mensagem não registrada na inbox):** o use case só grava a inbox quando a mensagem é processada (inclusive replay). Se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, nenhuma linha é gravada. Uma mensagem posterior com o **mesmo** `messageId` e outro payload válido não é reconhecida como divergente e é processada normalmente (com a própria idempotency key, sem duplicar efeito de nenhuma transação). Fechar isso exige gravar a inbox também nesses desfechos, o que muda o use case. Fica registrado.
+- A corrida entre a pré-checagem e o commit é resolvida pela PK da inbox e pela releitura. A pré-checagem nunca é a garantia.
+- O processamento de um lote não estende a visibilidade (não há heartbeat). Um lote acima de 60s pode ser reentregue em paralelo, o que é seguro, mas desperdiça trabalho.
