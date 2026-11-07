@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **3 — Use case de processamento** (aguardando início)
+Fase atual: **4 — API HTTP** (aguardando início)
 
 ---
 
@@ -39,16 +39,16 @@ Fase atual: **3 — Use case de processamento** (aguardando início)
 - [x] Testes de integração das migrations e das constraints
 
 ## Fase 3 — Use case de processamento (§7, §8)
-- [ ] `payloadHash` com JSON canônico (algoritmo documentado)
-- [ ] Replay idempotente devolve a resposta original, incluindo o saldo daquele momento
-- [ ] Mesma key com payload diferente gera conflito
-- [ ] Regras de BET, WIN, LOSS, REFUND e ROLLBACK
-- [ ] Validação da referência (mesmo provider, player, wallet, moeda e rodada)
-- [ ] Reversão que deixaria saldo negativo é rejeitada com `failureCode` próprio
-- [ ] Referência ausente vira `PENDING_REFERENCE`
-- [ ] Estratégia de concorrência por wallet implementada e documentada
-- [ ] Eventos gravados na outbox na mesma transação
-- [ ] Cenário obrigatório: saldo 100, duas apostas de 80 → uma PROCESSED, uma REJECTED, saldo 20, um débito
+- [x] `payloadHash` com JSON canônico (algoritmo documentado)
+- [x] Replay idempotente devolve a resposta original, incluindo o saldo daquele momento
+- [x] Mesma key com payload diferente gera conflito
+- [x] Regras de BET, WIN, LOSS, REFUND e ROLLBACK
+- [x] Validação da referência (mesmo provider, player, wallet, moeda e rodada)
+- [x] Reversão que deixaria saldo negativo é rejeitada com `failureCode` próprio
+- [x] Referência ausente vira `PENDING_REFERENCE`
+- [x] Estratégia de concorrência por wallet implementada e documentada
+- [x] Eventos gravados na outbox na mesma transação
+- [x] Cenário obrigatório: saldo 100, duas apostas de 80 → uma PROCESSED, uma REJECTED, saldo 20, um débito
 
 ## Fase 4 — API HTTP (§9)
 - [ ] `POST /wallets` com transação `OPENING` + lançamento CREDIT na mesma transação
@@ -138,14 +138,30 @@ Concorrência (paralelismo real):
 - Constraint trigger deferido saldo × último lançamento, nos dois sentidos — §11
 - Triggers: transação nunca é apagada, terminal não muda, identidade/payload imutáveis; ledger append-only (SQLSTATE 23001) — §11
 - TRUNCATE não bloqueado (administrativo; testes usam) — §10
+- Lock pessimista por wallet (`FOR UPDATE` filtrando também `player_id`), `SET LOCAL lock_timeout` 2s, `version` no UPDATE como segunda barreira; timeout, deadlock e version → `TransientFailure` com log e contador — §12
+- Idempotência checada sob o lock; `23505` só das constraints esperadas (idempotência, inbox) é relido como replay/conflito; o resto é bug — §13
+- Idempotency key única por `(provider_id, idempotency_key)` (migration nova) — §13
+- `payloadHash`: SHA-256 hex do JSON canônico só com campos de negócio; amount normalizado, walletId minúsculo, referência ausente = `null` — §14
+- Uma reversão no total por transação (índice `ux_wager_tx_one_reversal`); WIN/LOSS sobre BET estornada → `REFERENCE_ALREADY_REVERSED` — §15
+- WIN/LOSS podem referenciar a BET (mesmas validações, sem valor igual); auto-referência e BET com referência → `InvalidInput` — §15
+- Novo `FailureCode` `BALANCE_LIMIT_EXCEEDED` (crédito além do `numeric(20,2)`) — §9
+- Rejeições no nível da wallet não devolvem saldo — §9
+- Resultado do use case como união tipada com `status`; `Rejected` cobre REJECTED e FAILED (decidir por `status`) — §13
+- `causationId`: messageId da inbox ou idempotency key; no `WalletBalanceChanged`, o eventId do `WagerTransactionProcessed` — §13
+- Ids e textos limitados a 256 caracteres (`InvalidInput`) — §13
 
 ## Pendências e bloqueios
 - `README.md` fica para a Fase 10; por ora os comandos estão só no CLAUDE.md, que é local (fora do git).
-- Fase 9: remover `--pass-with-no-tests` do `test:concurrency` quando o primeiro teste de concorrência existir.
 - Fase 4: `OPENING` ainda não tem factory própria (`WagerTransaction.create` a rejeita); criar junto com `POST /wallets`.
 - Fase 7: definir limite de tentativas/TTL de `PENDING_REFERENCE` (o backoff já está no domínio).
-- Fase 3: repositórios aplicam o estado do domínio no registro gerenciado (o UoW não rastreia o objeto de domínio); traduzir `23505` de idempotência em replay/conflito.
-- Fase 3: o banco não garante que só transação PROCESSED tenha lançamento, nem valor do lançamento = valor da transação, nem o encadeamento `balance_before` do lançamento anterior (limitações em ARCHITECTURE §11).
+- Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor do lançamento = valor da transação, nem o encadeamento `balance_before` (ARCHITECTURE §11). O use case garante, e `expectLedgerConsistent` verifica nos testes; a reconciliação da Fase 4 cobre em produção.
+- Fase 4: amarrar `payload.providerId` ao provider autenticado (sem isso, outro provider poderia pedir replay de uma transação alheia e ver o saldo observado).
+- Fase 4: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. Decidir se é intencional.
+- Lock da wallet antes da checagem de dono: resolvido na Fase 3 (`FOR UPDATE ... AND player_id`); rate limit por provider/wallet na borda continua recomendado (Fase 4).
+- Fase 4: `InvalidInput` só tem motivo em texto; definir códigos por campo junto com o mapeamento HTTP.
+- Fase 5: o `payloadHash` da inbox vem do consumidor; reutilizar `wagerPayloadHash` ou documentar o que ele cobre.
+- Fase 8: o contador de conflitos de lock é em memória por processo (provisório); trocar por métrica exportável.
+- Limitação conhecida: REFUND de BET que já tem WIN PROCESSED é aceito (ARCHITECTURE §15).
 - Fase 4: cursor do ledger usa `seq` (não mapeado no registro; ler na consulta paginada).
 - Deploy: usuário da aplicação sem permissão de TRUNCATE.
 
@@ -155,3 +171,4 @@ Concorrência (paralelismo real):
 - 2026-11-07 — Revisão (6 revisores) da Fase 0: 2 médios + 13 baixos corrigidos (reason do readiness fechado e sem vazamento, nome de migration validado, CLI valida args antes de conectar, .env.test autossuficiente, portas em loopback, healthcheck do LocalStack checa falha de script, módulos Nest, boot tolerante a Postgres fora). 64 testes passando (44 unit, 20 integração). — Próximo: Fase 1.
 - 2026-11-07 — Fase 1 concluída: Money (bigint), Wallet, WagerTransaction, WalletLedgerEntry, Inbox/Outbox, 4 eventos de integração, FailureCode; ARCHITECTURE §7–9. 160 testes unitários passando (116 do domínio). — Próximo: Fase 2 (schema), aguardando plano.
 - 2026-11-07 — Fase 2 concluída: migration com 5 tabelas, CHECKs, UNIQUEs, FKs compostas deferidas, índices parciais, triggers de imutabilidade/append-only e constraint trigger saldo × ledger; mapeamento EntitySchema + mappers; ARCHITECTURE §10–11. 248 testes passando (162 unit, 86 integração). — Próximo: Fase 3 (use case), aguardando plano.
+- 2026-11-07 — Fase 3 concluída: use case `ProcessWagerTransaction` (lock pessimista por wallet, idempotência sob lock, regras §7, outbox/inbox na mesma transação), 3 migrations novas (uma reversão no total, idempotência por provider, `BALANCE_LIMIT_EXCEEDED`); revisão com 6 revisores (5 médios + lows corrigidos); ARCHITECTURE §12–15. 370 testes passando (210 unit, 156 integração, 4 concorrência — este 5x seguidas sem falha). — Próximo: Fase 4 (API HTTP), aguardando plano.

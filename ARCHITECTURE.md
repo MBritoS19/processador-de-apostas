@@ -170,16 +170,19 @@ Strings estáveis (contrato público: só se acrescenta; renomear é breaking ch
 | `CURRENCY_MISMATCH` | moeda da transação ≠ moeda da wallet ou da referência | corrigir o payload |
 | `REFERENCE_NOT_FOUND` | referência não apareceu até esgotar as tentativas de `PENDING_REFERENCE` | reenviar a referência e depois a reversão, como nova transação |
 | `REFERENCE_NOT_PROCESSED` | referência terminou `REJECTED` ou `FAILED` (se está `PENDING`/`PENDING_REFERENCE`, a reversão **aguarda**, não é rejeitada) | desistir: não há o que reverter |
-| `INVALID_REFERENCE_KIND` | `REFUND` sem ser de `BET`, ou `ROLLBACK` sem ser de `BET`/`WIN`/`REFUND` | corrigir o payload |
-| `REFERENCE_ALREADY_REVERSED` | a referência já foi revertida pelo mesmo tipo de operação | desistir (já aplicado) |
+| `INVALID_REFERENCE_KIND` | `REFUND`, `WIN` ou `LOSS` que não referencia `BET`, ou `ROLLBACK` que não referencia `BET`/`WIN`/`REFUND` | corrigir o payload |
+| `REFERENCE_ALREADY_REVERSED` | a referência já tem um `REFUND` ou `ROLLBACK` `PROCESSED` (uma reversão no total, §15); vale também para `WIN`/`LOSS` sobre `BET` estornada | desistir (já aplicado) |
 | `AMOUNT_MISMATCH` | valor da reversão ≠ valor da referência (não há reversão parcial) | corrigir o payload |
 | `REFERENCE_ROUND_MISMATCH` | referência de outra rodada | corrigir o payload |
 | `REFERENCE_PLAYER_MISMATCH` | referência de outro player | corrigir o payload |
 | `REFERENCE_WALLET_MISMATCH` | referência de outra wallet | corrigir o payload |
 | `INFRASTRUCTURE_FAILURE` | erro permanente de infraestrutura (status `FAILED`, auditável) | reenviar mais tarde com nova transação |
+| `BALANCE_LIMIT_EXCEEDED` | crédito que levaria o saldo além do limite do `numeric(20,2)` (18 dígitos inteiros) — Fase 3 | tratamento operacional/manual |
 
 - Não existe código de "referência de outro provider": a referência é resolvida por `(providerId, referenceExternalTransactionId)`, então outro provider resulta em `REFERENCE_NOT_FOUND`.
 - A mesma idempotency key com payload diferente **não** é `failureCode`: é um conflito de requisição (HTTP 409, Fase 4) e não cria transação.
+- Ordem de avaliação no use case (a primeira que falhar define o código): `WALLET_NOT_FOUND` → `WALLET_PLAYER_MISMATCH` → `CURRENCY_MISMATCH` → (se houver referência) ausente/pendente ⇒ `PENDING_REFERENCE` → `INVALID_REFERENCE_KIND` → `REFERENCE_WALLET_MISMATCH` → `REFERENCE_PLAYER_MISMATCH` → `REFERENCE_ROUND_MISMATCH` → `CURRENCY_MISMATCH` → `REFERENCE_NOT_PROCESSED` → `AMOUNT_MISMATCH` (só reversões) → `REFERENCE_ALREADY_REVERSED` → `INSUFFICIENT_BALANCE` / `REVERSAL_WOULD_OVERDRAW` / `BALANCE_LIMIT_EXCEEDED`.
+- Rejeições no nível da wallet (`WALLET_*`, `CURRENCY_MISMATCH` da wallet) **não** devolvem saldo: a wallet pode ser de outro jogador. As demais devolvem o saldo observado.
 - Os erros de domínio (`InsufficientBalanceError`, `CurrencyMismatchError`…) não carregam `failureCode`, porque o mesmo erro pode significar códigos diferentes (um débito sem saldo é `INSUFFICIENT_BALANCE` numa BET e `REVERSAL_WOULD_OVERDRAW` num ROLLBACK de WIN). O use case da Fase 3 faz o mapeamento.
 
 ## 10. Persistência e mapeamento (Fase 2)
@@ -207,7 +210,7 @@ Strings estáveis (contrato público: só se acrescenta; renomear é breaking ch
 
 ## 11. Garantia → constraint/trigger (Fase 2)
 
-Todas criadas em `Migration20261107100000_schema` e provadas uma a uma em `test/integration/persistence/schema-constraints.test.ts`. Duplicam de propósito as verificações do domínio.
+Todas criadas em `Migration20261107100000_schema` e provadas uma a uma em `test/integration/persistence/schema-constraints.test.ts`. Duplicam de propósito as verificações do domínio. A Fase 3 alterou três itens em migrations novas (a da Fase 2 não foi editada): `…200000_one_reversal_per_reference`, `…300000_idempotency_per_provider` e `…310000_balance_limit_failure_code` (novo valor no CHECK de `failure_code`). O `down` de cada uma restaura o estado anterior (testado em `migrations.test.ts`).
 
 | Garantia | Onde o banco aplica |
 |---|---|
@@ -216,7 +219,7 @@ Todas criadas em `Migration20261107100000_schema` e provadas uma a uma em `test/
 | `version >= 1` | `ck_wallets_version` |
 | Moeda ISO de 3 letras | `ck_wallets_currency`, `ck_wager_tx_currency` (e as FKs de moeda) |
 | Toda mudança de saldo tem lançamento, e vice-versa | constraint triggers deferidos `trg_wallets_balance_matches_ledger` e `trg_ledger_balance_matches_wallet`: no COMMIT, `wallets.balance` = `balance_after` do último lançamento (por `seq`), ou 0 sem lançamentos |
-| Idempotência por key | `uq_wager_tx_idempotency_key` |
+| Idempotência por key, escopada por provider (Fase 3) | `uq_wager_tx_provider_idempotency_key (provider_id, idempotency_key)` |
 | Uma transação por `(provider_id, external_transaction_id)` | `uq_wager_tx_provider_external` |
 | `kind`, `status`, `failure_code` nos valores do domínio | `ck_wager_tx_kind`, `ck_wager_tx_status`, `ck_wager_tx_failure_code` |
 | Valor ≥ 0, e > 0 nos kinds que movem saldo | `ck_wager_tx_amount` |
@@ -226,7 +229,7 @@ Todas criadas em `Migration20261107100000_schema` e provadas uma a uma em `test/
 | `PENDING_REFERENCE` tem referência e agendamento | `ck_wager_tx_pending_reference` |
 | Moeda da transação = moeda da wallet (exceto rejeitadas/falhas) | `fk_wager_tx_wallet_currency` sobre a coluna gerada `wallet_fk_currency` |
 | Referência interna existe e é da mesma wallet | `fk_wager_tx_reference` → `uq_wager_tx_id_wallet` |
-| Uma reversão `PROCESSED` por referência e por tipo | índice único parcial `ux_wager_tx_one_reversal_per_kind` |
+| Uma reversão `PROCESSED` por referência, no total (Fase 3, §15) | índice único parcial `ux_wager_tx_one_reversal (reference_transaction_id) WHERE status='PROCESSED' AND kind IN ('REFUND','ROLLBACK')` |
 | Transação terminal não muda; identidade/payload nunca mudam; transação nunca é apagada | trigger `trg_wager_transactions_guard` (BEFORE UPDATE OR DELETE) |
 | Ledger append-only | trigger `trg_ledger_append_only` (BEFORE UPDATE OR DELETE) |
 | Aritmética do lançamento | `ck_ledger_arithmetic`, `ck_ledger_amount_positive`, `ck_ledger_direction` |
@@ -241,4 +244,105 @@ Todas criadas em `Migration20261107100000_schema` e provadas uma a uma em `test/
 
 **Limitações conhecidas:**
 - Saldo × ledger compara com o **último** lançamento, não com a soma de todos (a soma completa é a reconciliação da Fase 4). O encadeamento `balance_before` = `balance_after` do lançamento anterior não é verificado pelo banco; quem o garante é o domínio (`Wallet.apply`) mais o lock por wallet da Fase 3.
-- O banco não verifica que só transação `PROCESSED` tenha lançamento, nem que o valor do lançamento seja igual ao da transação. Quem garante isso é o use case da Fase 3.
+- O banco não verifica que só transação `PROCESSED` tenha lançamento, nem que o valor do lançamento seja igual ao da transação. Quem garante isso é o use case da Fase 3 (e o helper `expectLedgerConsistent` verifica nos testes).
+
+## 12. Concorrência: lock pessimista por wallet (Fase 3)
+
+**Escolha:** `SELECT ... FOR UPDATE` na linha da wallet, dentro da transação do use case (`MikroOrmWagerUnitOfWork`), com `SET LOCAL lock_timeout = '2000ms'`. O `UPDATE` da wallet ainda confere a `version` como segunda barreira.
+
+**Por que pessimista, e não otimista com retry:**
+- O caso dominante é contenção na **mesma** wallet: rodadas rápidas, reentregas at-least-once, várias instâncias. Com lock otimista, cada conflito vira rollback e reexecução inteira. Com pessimista, a segunda transação espera alguns milissegundos e roda sobre o estado já commitado.
+- A checagem de idempotência fica **sob o lock**. A transação original, se existir, foi gravada por quem segurava o mesmo lock e já está visível (READ COMMITTED lê a cada statement). Assim "a mesma BET 50x em paralelo" vira 1 processamento + 49 replays, sem depender de violação de unicidade.
+- *Trade-off:* uma conexão fica ocupada esperando o lock. Por isso o `lock_timeout` curto: esgotado, a transação aborta (SQLSTATE `55P03`) e o resultado é `TransientFailure('lock_timeout')`. O provedor reenvia a mesma requisição, que é idempotente.
+
+**Granularidade:** só a linha da wallet é travada; wallets diferentes não se bloqueiam. Não há lock global, advisory lock nem tabela de controle. O lock usa `WHERE id = $wallet AND player_id = $player`: quem não é dono da wallet não segura nem espera o lock dela. Uma leitura sem lock distingue `WALLET_NOT_FOUND` de `WALLET_PLAYER_MISMATCH`.
+
+**Segunda barreira (version):** `UPDATE wallets SET balance, version = v+1, updated_at WHERE id = $w AND version = $v`. Com o `FOR UPDATE` ela nunca deveria falhar. Se falhar (bug, ou escrita fora do use case), a transação faz rollback e o resultado é `TransientFailure('version_conflict')`, com log estruturado `wallet_lock_conflict` e contador. Lock timeout e deadlock também são contados. O contador fica em memória, por processo, e é provisório: as métricas exportáveis entram na Fase 8.
+
+**Ausência de deadlock:** cada transação trava **uma única** linha de wallet, sempre antes de qualquer escrita, então não existe espera circular entre locks de linha. As outras esperas possíveis são de índices únicos (duas transações inserindo a mesma key em wallets diferentes). Como todas inserem nos mesmos índices e na mesma ordem, a espera é sempre num sentido só. Se ainda assim o Postgres detectar deadlock (`40P01`) ou falha de serialização (`40001`), o resultado é `TransientFailure`. Pool esgotado ou banco fora dão `TransientFailure('unavailable')`.
+
+**SQL dentro da transação (READ COMMITTED):**
+1. `BEGIN; SET LOCAL lock_timeout = '2000ms'`
+2. `SELECT * FROM wallets WHERE id = $w AND player_id = $p FOR UPDATE`
+3. `SELECT * FROM wager_transactions WHERE provider_id = $p AND (idempotency_key = $k OR external_transaction_id = $e)`. Se achar, é replay ou conflito e termina aqui (no replay só a inbox é gravada).
+4. Se a wallet não veio: `SELECT count(*) FROM wallets WHERE id = $w` (sem lock).
+5. Se há referência: `SELECT * FROM wager_transactions WHERE provider_id = $p AND external_transaction_id = $ref`, e depois `SELECT count(*) … WHERE reference_transaction_id = $id AND kind IN ('REFUND','ROLLBACK') AND status = 'PROCESSED'`.
+6. `INSERT wager_transactions`, já no status final (PROCESSED, REJECTED ou PENDING_REFERENCE).
+7. Se o saldo mudou: `UPDATE wallets … WHERE id = $w AND version = $v` e `INSERT wallet_ledger_entries`.
+8. `INSERT outbox_messages` (1 ou 2 eventos) e, com contexto de inbox, `INSERT inbox_messages`.
+9. `COMMIT`. As FKs deferidas e o trigger saldo × ledger são checados aqui.
+
+**Comprovação:** `test/concurrency/process-wager-transaction.test.ts` usa 3 instâncias de MikroORM (pools separados) com `Promise.all`:
+- 80+80 sobre saldo 100: uma PROCESSED, uma `INSUFFICIENT_BALANCE`, saldo 20, um débito;
+- a mesma BET 50x: 1 débito, 1 linha, 49 replays;
+- 30 BETs disputando o saldo;
+- a mesma key em wallets diferentes.
+
+Falhas transitórias são reenviadas idênticas, com backoff curto, como faria um provedor. O caminho `23505 → conflito` também tem um teste determinístico, em que uma transação externa segura o INSERT.
+
+## 13. Fluxo de idempotência (Fase 3)
+
+A garantia é o banco, nunca memória.
+
+1. **Antes da transação:** validação completa (`InvalidInput` não grava nada) e cálculo do `payloadHash` (§14).
+2. **Sob o lock da wallet:** busca por `(provider_id, idempotency_key)` **ou** `(provider_id, external_transaction_id)`.
+   - Mesma key **e** mesmo hash → **replay**. O resultado é reconstruído do estado persistido (`status`, `failure_code`, `observed_balance`) e é idêntico ao original, exceto por `idempotentReplay: true`. Vale para PROCESSED, REJECTED e PENDING_REFERENCE. Esta última devolve o estado atual, que pode já ter sido resolvido pelo worker da Fase 7.
+   - Hash diferente, ou o mesmo `externalTransactionId` sob outra key → **conflito** (`IdempotencyConflict` com o id existente). Nada é gravado.
+3. **Se o INSERT violar a unicidade mesmo assim** (por exemplo, a mesma key com outra `walletId`, que trava outra linha, ou a mesma mensagem SQS reentregue):
+   - o adaptador só traduz `23505` nas constraints esperadas: `uq_wager_tx_provider_idempotency_key` e `uq_wager_tx_provider_external` viram `idempotency`, e `pk_inbox_messages` vira `inbox`;
+   - depois do rollback, o use case relê numa transação nova e devolve replay ou conflito;
+   - uma mensagem de inbox já usada por **outra** transação devolve `IdempotencyConflict` sem id, e não deve ser reenviada;
+   - `23505` em qualquer outra constraint, ou de idempotência sem linha correspondente, é bug e é relançado.
+
+**Escopo por provider:** a idempotency key é única por `(provider_id, idempotency_key)`. Com unicidade global, um provider poderia gravar antes a key de outro e bloquear a transação legítima dele, recebendo ainda o id interno dela no conflito. A borda (Fase 4/5) precisa garantir que `payload.providerId` é o provider autenticado.
+
+**Resultado do use case:** é uma união tipada; o mapeamento para HTTP/SQS é da Fase 4/5.
+
+| Variante | Significado |
+|---|---|
+| `Processed` | aplicada; traz `status` e saldo |
+| `PendingReference` | aguardando a referência; traz `status` |
+| `Rejected` | `status` REJECTED = regra de negócio; FAILED = falha permanente de infra |
+| `IdempotencyConflict` | mesma key com outro payload, ou mensagem de inbox já usada |
+| `InvalidInput` | motivo em texto; códigos por campo ficam para a Fase 4 |
+| `TransientFailure` | `lock_timeout`, `deadlock`, `serialization`, `unavailable` ou `version_conflict`; sempre seguro reenviar a mesma requisição |
+
+Erros lançados fora da união são bugs (500 / sem ack).
+
+**Eventos** gravados na outbox na mesma transação: `WagerTransactionProcessed` (inclusive LOSS), `WalletBalanceChanged` (somente com lançamento), `WagerTransactionRejected` e `WagerTransactionPendingReference`.
+- `correlationId` vem da entrada.
+- `causationId` é o que originou o evento. Nos eventos de transação, é o `messageId` da inbox (SQS) ou a idempotency key (HTTP). No `WalletBalanceChanged`, é o `eventId` do `WagerTransactionProcessed` que o causou.
+
+## 14. Algoritmo do `payloadHash` (Fase 3)
+
+`payloadHash = hex(SHA-256(utf8(JSON canônico)))`, em `src/application/wagering/payload-hash.ts`.
+
+- **Campos (só de negócio):** `providerId`, `externalTransactionId`, `playerId`, `walletId`, `roundId`, `gameId`, `kind`, `money: { amount, currency }` e `referenceExternalTransactionId`. Ficam fora o header (`Idempotency-Key`), o `correlationId` e os metadados de transporte.
+- **Normalização:**
+  - `money.amount` passa pelo `Money` e sai sempre com 2 casas, então `"25"` e `"25.00"` são o mesmo payload;
+  - `walletId` vai em minúsculas (é UUID);
+  - referência ausente entra como `null`.
+- **Canônico:** chaves ordenadas por code unit, recursivamente, sem espaços, com strings escapadas como no `JSON.stringify`.
+
+Exemplo do JSON hasheado:
+
+```json
+{"externalTransactionId":"transaction-123","gameId":"fortune-chimp","kind":"BET","money":{"amount":"25.00","currency":"BRL"},"playerId":"player-1","providerId":"provider-a","referenceExternalTransactionId":null,"roundId":"round-987","walletId":"0192f291-27dd-7d3f-8071-5f8685deef37"}
+```
+
+Mudar campos, normalização ou ordenação muda os hashes já gravados e transforma replays legítimos em conflitos. É mudança de contrato, e o teste `payload-hash.test.ts` fixa o JSON exato.
+
+## 15. Interpretação das referências e reversões (Fase 3)
+
+O CHALLENGE §7.4 diz que "uma referência não pode ser revertida duas vezes **pelo mesmo tipo** de operação". Adotamos uma regra mais estrita, para nunca creditar duas vezes:
+
+- **Uma reversão no total por transação:** uma BET recebe no máximo um `REFUND` **ou** um `ROLLBACK` PROCESSED, não os dois. Sem isso, BET 10 → REFUND +10 → ROLLBACK da BET +10 devolveria a aposta duas vezes. O índice `ux_wager_tx_one_reversal` (migration `…200000`) garante isso no banco; o use case checa antes, sob o lock, e rejeita com `REFERENCE_ALREADY_REVERSED`.
+- **ROLLBACK de REFUND** continua permitido e reverte o estorno, debitando. Ele referencia o REFUND, não a BET, então não conta como segunda reversão da BET.
+- **WIN/LOSS sobre BET já estornada** → `REFERENCE_ALREADY_REVERSED`. Liquidar uma aposta cujo valor já voltou ao jogador pagaria prêmio sobre uma aposta que não existe mais.
+- **WIN e LOSS podem referenciar a BET** da rodada (é opcional). Quando referenciam, valem as mesmas validações da reversão, exceto valor igual: kind = BET, mesma wallet, player, rodada e moeda, status PROCESSED. Referência inexistente ou ainda pendente → `PENDING_REFERENCE`.
+- **Valor:** reversões exigem valor igual ao da referência (`AMOUNT_MISMATCH`). Não há reversão parcial.
+- **Auto-referência:** uma transação não referencia a si mesma (`InvalidInput`), e BET não referencia nada.
+- **Saldo insuficiente na reversão** (por exemplo, ROLLBACK de um WIN já gasto) → `REVERSAL_WOULD_OVERDRAW`. É distinto do `INSUFFICIENT_BALANCE` da BET e fica auditável.
+- **Crédito além do limite do `numeric(20,2)`** → `BALANCE_LIMIT_EXCEEDED`, com a wallet intacta.
+
+**Limitação conhecida:** um `REFUND` de uma BET que já tem `WIN` PROCESSED é aceito. A spec não proíbe, e o provedor pode estornar uma rodada cancelada depois de liquidada. O jogador fica com o prêmio e com o valor da aposta. Barrar isso exige definir a prioridade entre liquidação e estorno, o que é decisão de negócio.
