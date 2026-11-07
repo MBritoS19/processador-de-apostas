@@ -1,0 +1,26 @@
+# Instruções locais do agente
+CLAUDE.md
+.claude/settings.local.json
+
+# Dependências e build
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# Ambiente
+.env
+.env.*
+!.env.example
+
+# Logs e cobertura
+logs/
+*.log
+coverage/
+
+# SO / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
