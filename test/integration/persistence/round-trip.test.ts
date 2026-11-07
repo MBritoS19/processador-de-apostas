@@ -129,7 +129,7 @@ describe('persistência — round-trip pelo MikroORM', () => {
 
     const betTx = toWagerTransaction(await em.findOneOrFail(WagerTransactionRecord, { id: saved.betTx.id }));
     expect(betTx).toEqual(saved.betTx);
-    expect(betTx.money.amount).toBe(Money.from({ amount: bet, currency: 'BRL' }).amount);
+    expect(betTx.money.amount).toBe(brl(bet).amount);
     expect(betTx.observedBalance?.amount).toBe(expected);
     expect(toWagerTransaction(await em.findOneOrFail(WagerTransactionRecord, { id: saved.opening.id }))).toEqual(
       saved.opening,

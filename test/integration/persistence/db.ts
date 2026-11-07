@@ -97,12 +97,13 @@ export async function seedWallet(orm: MikroORM, balance: string): Promise<{ wall
   const wallet = walletRow({ balance });
   const walletId = wallet.id as string;
   const opening = processed({ wallet_id: walletId, kind: 'OPENING', amount: balance, observed_balance: balance });
+  const openingId = opening.id as string;
   await orm.em.getKnex().transaction(async (trx) => {
     await trx('wallets').insert(wallet);
     await trx('wager_transactions').insert(opening);
     await trx('wallet_ledger_entries').insert(
-      ledgerRow({ wallet_id: walletId, transaction_id: opening.id as string, amount: balance, balance_after: balance }),
+      ledgerRow({ wallet_id: walletId, transaction_id: openingId, amount: balance, balance_after: balance }),
     );
   });
-  return { walletId, openingId: opening.id as string };
+  return { walletId, openingId };
 }
