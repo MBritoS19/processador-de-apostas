@@ -79,6 +79,7 @@ Cada seção indica a fase em que foi tomada; seções futuras serão adicionada
 |---|---|
 | `wager-transactions-dlq.fifo` | FIFO, `ContentBasedDeduplication=false`, retenção de 14 dias |
 | `wager-transactions.fifo` | FIFO, `ContentBasedDeduplication=false`, `VisibilityTimeout=30s`, `RedrivePolicy` → DLQ com `maxReceiveCount=10` |
+| `wager-events.fifo` (Fase 6) | FIFO, `ContentBasedDeduplication=false`, retenção de 14 dias, **sem DLQ**: destino do outbox publisher (§19) |
 
 - **Nomes:** `SQS_WAGER_QUEUE_NAME` / `SQS_WAGER_DLQ_NAME`, lidos pela aplicação **e** repassados pelo compose ao script de init, com os mesmos defaults (os nomes do CHALLENGE §10). Uma única fonte evita a aplicação procurar uma fila que o init nunca criou.
 - **Sem dedup por conteúdo:** o produtor informa `MessageDeduplicationId` explícito. De qualquer forma, a dedup do broker é **otimização**; a garantia é a inbox persistente no Postgres (CHALLENGE §8).
@@ -240,7 +241,7 @@ Todas criadas em `Migration20261107100000_schema` e provadas uma a uma em `test/
 | Inbox única por consumidor e mensagem | `pk_inbox_messages (consumer_name, message_id)` |
 | Outbox: tentativas ≥ 0 | `ck_outbox_attempts` |
 
-Índices para os workers: `ix_wager_tx_reference_check_due (next_reference_check_at) WHERE status='PENDING_REFERENCE'` (Fase 7), `ix_wager_tx_awaiting_reference (provider_id, reference_external_transaction_id) WHERE status='PENDING_REFERENCE'` (destravar pendentes quando a referência chega) e `ix_outbox_pending (next_attempt_at) WHERE published_at IS NULL` (Fase 6).
+Índices para os workers: `ix_wager_tx_reference_check_due (next_reference_check_at) WHERE status='PENDING_REFERENCE'` (Fase 7), `ix_wager_tx_awaiting_reference (provider_id, reference_external_transaction_id) WHERE status='PENDING_REFERENCE'` (destravar pendentes quando a referência chega) e `ix_outbox_pending (next_attempt_at) WHERE published_at IS NULL`. A Fase 6 acrescentou `seq` (identity, `uq_outbox_seq`) e `ix_outbox_pending_aggregate (aggregate_id, seq) WHERE published_at IS NULL`, em `…400000_outbox_seq` (§19).
 
 **Limitações conhecidas:**
 - Saldo × ledger compara com o **último** lançamento, não com a soma de todos (a soma completa é a reconciliação da Fase 4). O encadeamento `balance_before` = `balance_after` do lançamento anterior não é verificado pelo banco; quem o garante é o domínio (`Wallet.apply`) mais o lock por wallet da Fase 3.
@@ -433,7 +434,11 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | `wagering_reconciliation_divergences_total` | counter | — | 4/8 |
 | `wagering_retries_total` | counter | — | 5: cada `ChangeMessageVisibility` de retry no consumidor |
 | `wagering_dlq_messages_total` | counter | — | 5: cada mensagem enviada à DLQ pelo consumidor (não conta o redrive nativo) |
-| `wagering_outbox_lag_seconds` | gauge | — | declarada; idade do evento pendente mais antigo, Fase 6 |
+| `wagering_outbox_lag_seconds` | gauge | — | 6: agora − `occurred_at` do pendente mais antigo (§19) |
+| `wagering_outbox_published_total` | counter | — | 6: eventos publicados e commitados |
+| `wagering_outbox_publish_failures_total` | counter | scope (`batch`, `entry`) | 6: chamada inteira falhou × entrada recusada |
+| `wagering_outbox_retries_total` | counter | — | 6: eventos reagendados com backoff |
+| `wagering_outbox_stuck_events` | gauge | — | 6: pendentes com `attempts >= OUTBOX_STUCK_ATTEMPTS` |
 
 - `GET /metrics` é aberto, como os health checks. Em produção ficaria numa porta interna ou atrás da rede do scraper.
 - **Limitação:** os contadores são por instância (o Prometheus soma). O contador em memória do `LoggingLockConflictTelemetry` fica só para os testes.
@@ -513,3 +518,135 @@ O processamento abandonado pode ainda commitar. A outra instância que pegar a m
 - **C4a (mensagem não registrada na inbox):** o use case só grava a inbox quando a mensagem é processada (inclusive replay). Se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, nenhuma linha é gravada. Uma mensagem posterior com o **mesmo** `messageId` e outro payload válido não é reconhecida como divergente e é processada normalmente (com a própria idempotency key, sem duplicar efeito de nenhuma transação). Fechar isso exige gravar a inbox também nesses desfechos, o que muda o use case. Fica registrado.
 - A corrida entre a pré-checagem e o commit é resolvida pela PK da inbox e pela releitura. A pré-checagem nunca é a garantia.
 - O processamento de um lote não estende a visibilidade (não há heartbeat). Um lote acima de 60s pode ser reentregue em paralelo, o que é seguro, mas desperdiça trabalho.
+
+## 19. Outbox publisher (Fase 6)
+
+`src/interfaces/workers/outbox-publisher.ts`, ligado por `OUTBOX_PUBLISHER_ENABLED` (default `true`; `false` no `.env.test`). SQL em `src/infrastructure/outbox/outbox-store.ts` e envio em `outbox-events.client.ts`. O destino é `wager-events.fifo` (§5).
+
+### Claim: `SKIP LOCKED`, publicando ainda com o lock
+
+Cada ciclo é **uma transação curta**:
+
+```sql
+BEGIN;
+SET LOCAL statement_timeout = '5000ms';
+SET LOCAL idle_in_transaction_session_timeout = '15000ms';   -- OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS
+select o.* from outbox_messages o
+where o.published_at is null
+  and (o.next_attempt_at is null or o.next_attempt_at <= $now)
+  and not exists (select 1 from outbox_messages p
+                  where p.aggregate_id = o.aggregate_id and p.published_at is null and p.seq < o.seq)
+order by o.seq limit $batch            -- OUTBOX_BATCH_SIZE, até 10 (limite do SendMessageBatch)
+for update of o skip locked;
+-- SendMessageBatch, ainda com o lock
+update outbox_messages set published_at = ?, attempts = ?, next_attempt_at = ?
+  where id = ? and published_at is null;                     -- por evento
+COMMIT;
+```
+
+- **Várias instâncias:** com `SKIP LOCKED`, cada publisher pega linhas diferentes, sem fila de espera e sem lock global. O Postgres aplica o `LIMIT` depois dos locks, então linhas puladas não ocupam vaga no lote.
+- **Por que publicar com o lock, e não marcar "em andamento" e soltar:** não é preciso coluna de lease nem lógica de expiração. Se o processo morre, a conexão cai, o Postgres faz rollback e o lock some sozinho.
+  - *Trade-off:* uma conexão do pool fica presa durante o envio. Por isso o lote é pequeno e a chamada tem prazo.
+- **`$now` vem do `Clock` injetado**, não do `now()` do banco. Assim os testes avançam o tempo e conferem o backoff pelos valores gravados.
+- **O `update` exige `published_at is null`** e confere `affectedRows = 1`. Sob o lock isso nunca falha; se falhar, é bug, e o lote inteiro sofre rollback (testado).
+
+### Garantia at-least-once e contrato de dedup
+
+- O evento só é marcado publicado **no mesmo commit** em que o envio foi aceito. Se o processo morre entre o envio e o commit, o evento continua pendente e é republicado por esta ou outra instância, **com o mesmo `eventId`**. Testado com exceção e com `pg_terminate_backend`.
+- Nunca acontece o contrário: um evento marcado sem ter sido aceito pelo broker.
+- **Contrato para quem consome `wager-events.fifo`:**
+  - o corpo é exatamente o `toJSON()` gravado em `outbox_messages.payload` (CHALLENGE §11);
+  - `MessageGroupId = aggregateId` e `MessageDeduplicationId = eventId`;
+  - **o consumidor deve deduplicar por `eventId`, de forma persistente** (por exemplo, uma inbox como a da §18).
+- A dedup do broker (5 min, mesmo dedup id) é só otimização: some numa republicação depois da janela ou num redrive.
+- Não existe consumidor de `wager-events` neste sistema, então o lado do consumidor não tem teste aqui. O que está testado é a metade do publisher: a republicação reusa o `eventId`.
+
+### Ordem por agregado
+
+- `seq bigint generated always as identity` é atribuído no INSERT. Os eventos de uma wallet são inseridos **sob o lock da wallet** (§12), então, dentro de um agregado, ordem de `seq` = ordem de commit.
+- **Regra:** só é elegível o pendente de **menor `seq`** do agregado (o `not exists` do claim, servido por `ix_outbox_pending_aggregate`).
+  - Um evento anterior bloqueia os seguintes do agregado quando está travado por outro publisher, em backoff ou falhando.
+  - Por isso dois publishers nunca publicam o mesmo agregado fora de ordem (testado com falha no 1º evento e dois publishers).
+  - Uma leitura defasada do `not exists` só erra para o lado seguro: um evento publicado nunca volta a pendente, então o snapshot antigo só pode excluir um evento a mais, nunca liberá-lo cedo.
+- **`aggregateId` dos eventos** (mantido como estava):
+  - `WalletBalanceChanged` usa `wallet.id`. A **ordem do saldo** é garantida por ele, que ainda carrega `walletVersion`: o consumidor pode descartar versões menores ou iguais à última aplicada.
+  - `WagerTransactionProcessed`/`Rejected`/`PendingReference` usam `tx.id`. Ficam ordenados **por transação** (ex.: PendingReference → Processed na Fase 7), não entre transações da mesma wallet.
+- **Backfill na migration:**
+  - com `add column … generated as identity`, as linhas existentes seriam numeradas na ordem física do heap;
+  - por isso a migration numera por `(occurred_at, id)`, depois transforma a coluna em identity e ajusta a sequência (testado);
+  - empates de `occurred_at` no mesmo agregado ficam na ordem do `id`. Isso só importa para eventos que estejam pendentes no momento do deploy.
+
+**Limite de vazão por agregado:** no máximo **um evento por agregado por ciclo**, porque o 2º só fica elegível depois do commit do 1º.
+- Lotes com agregados diferentes saem juntos.
+- Uma wallet com uma rajada de eventos publica um evento por round-trip (claim + SendMessageBatch + commit), alguns ms em ambiente local.
+- O teste com 50 `WalletBalanceChanged` de uma mesma wallet confere a ordem e que não há espera de intervalo entre eles.
+- *Trade-off:* aceito em troca de ordem garantida sem coordenação entre publishers.
+
+### Falha: backoff sem descarte
+
+| Situação | Ação |
+|---|---|
+| Entrada recusada no `SendMessageBatch` (`Failed`) | só ela vai para `scheduleRetry` (testado com recusa real do LocalStack, `InvalidMessageContents`) |
+| Entrada sem resposta (nem `Successful` nem `Failed`) | tratada como falha, nunca como publicada |
+| Chamada inteira falha (rede, timeout, 5xx, fila inexistente) | `scheduleRetry` do lote todo |
+| Chamada inteira recusada por erro do cliente (`$fault = client`, 4xx) | reenvia **uma a uma**, dentro do mesmo prazo: uma entrada "venenosa" não prende os outros agregados do lote |
+| Falha do próprio ciclo (banco fora) | rollback; o loop pausa 1s·2^(n−1), até 30s |
+
+- **Backoff** do domínio (`OutboxMessage.scheduleRetry`): 1s·2^(attempts−1), com teto de 5 min. `attempts` e `next_attempt_at` são gravados no mesmo commit.
+- **Nunca há descarte nem DLQ para a outbox.**
+  - Um evento confirmado não pode ser perdido (CHALLENGE §3).
+  - Uma DLQ quebraria a ordem do agregado.
+- A partir de `OUTBOX_STUCK_ATTEMPTS` tentativas (10, cerca de 8,5 min acumulados):
+  - cada nova falha gera um log `error` `outbox_event_stuck`, com `eventId`, `aggregateId`, `eventType`, `attempts`, `nextAttemptAt` e `code`;
+  - o evento passa a contar no gauge `wagering_outbox_stuck_events`.
+
+**Um evento que falha para sempre bloqueia os seguintes do mesmo agregado.** É consequência direta da ordem por agregado; os outros agregados seguem normalmente.
+
+Procedimento operacional:
+1. **Alertas:**
+   - `wagering_outbox_stuck_events > 0`, ou o log `outbox_event_stuck`;
+   - `wagering_outbox_lag_seconds` acima do SLO.
+2. **Diagnóstico** pelo `code` do log:
+   - `InvalidMessageContents` ou `InvalidParameterValue`: payload ou atributo inválido, ou seja, bug no produtor do evento;
+   - `batch_failed`, timeout ou erro de rede: problema de infraestrutura (SQS, rede, IAM).
+3. **Infraestrutura:** basta corrigir a causa. O evento sai sozinho no próximo `next_attempt_at` (no máximo 5 min), e os seguintes do agregado vão atrás, em ordem.
+4. **Payload inválido:** corrija o código e reprocesse.
+   - Nunca apague a linha nem a marque como publicada à mão sem decidir o que o consumidor deve receber: isso perde o evento ou quebra a ordem.
+   - Para antecipar a nova tentativa: `update outbox_messages set next_attempt_at = null where id = $eventId`.
+
+### Timeouts: um SQS lento não segura locks
+
+| Parâmetro | Default | Motivo |
+|---|---|---|
+| `OUTBOX_SQS_TIMEOUT_MS` | 3s | `AbortSignal.timeout` em `GetQueueUrl` e `SendMessageBatch` (testado: o sinal chega ao SDK real) |
+| SDK do publisher | `maxAttempts: 1` | cliente SQS próprio (`OUTBOX_SQS_CLIENT`), porque o `abortSignal` não interrompe a espera entre retries internos do SDK. O retry com backoff fica com a outbox |
+| `OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS` | 15s | se o processo travar com o lock, o Postgres derruba a sessão e solta o lock (testado com 1s) |
+| `statement_timeout` | 5s | limita o claim e os updates |
+| Regra validada no boot | `sqs + 2000 ≤ idle` | a folga cobre o save e o commit depois do envio |
+
+### Loop
+
+- Se o claim trouxe algum evento (publicado ou reagendado), busca de novo **na hora**.
+- Espera `OUTBOX_POLL_INTERVAL_MS` (500ms) **só quando o claim volta vazio**.
+- Com o SQS fora, cada claim reagenda o próprio lote. Logo todos os pendentes ficam em backoff, o claim volta vazio e o loop passa a esperar: não há laço quente.
+
+### Outbox lag
+
+- `wagering_outbox_lag_seconds` = agora − `occurred_at` do pendente mais antigo, em segundos (0 sem pendentes). Vem da mesma query do gauge de eventos travados.
+- É medido a cada ciclo vazio e, sob carga, no máximo uma vez por intervalo, para não varrer os pendentes a cada lote.
+- Inclui eventos em backoff e os bloqueados atrás de um evento travado: é o atraso real visto pelo consumidor.
+
+### Shutdown
+
+`OutboxPublisherModule.beforeApplicationShutdown` roda antes de o ORM e os clientes SQS fecharem:
+1. para de buscar e acorda a espera do intervalo (testado: `stop()` volta na hora, mesmo com intervalo de 60s);
+2. espera o lote em andamento commitar, até `OUTBOX_SHUTDOWN_TIMEOUT_MS` (25s, abaixo do grace period de 30s; testado);
+3. se o prazo estourar:
+   - loga `outbox_publisher_shutdown_timeout` e segue;
+   - o lote abandonado não commita, e a sessão cai (pelo fechamento do pool ou pelo idle timeout);
+   - outra instância republica o lote (testado).
+
+### Limitações
+
+- No máximo um evento por agregado por ciclo (ver acima).
+- Cada publisher mantém uma conexão ocupada por lote: com N instâncias, até N conexões do pool, além das usadas pelo tráfego.

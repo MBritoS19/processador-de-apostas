@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **6 — Outbox publisher** (aguardando plano)
+Fase atual: **7 — Worker de referências pendentes** (aguardando plano)
 
 ---
 
@@ -69,10 +69,10 @@ Fase atual: **6 — Outbox publisher** (aguardando plano)
 - [x] Shutdown gracioso no `SIGTERM`
 
 ## Fase 6 — Outbox publisher (§11)
-- [ ] Worker com `FOR UPDATE SKIP LOCKED` (ou equivalente)
-- [ ] Backoff e retry
-- [ ] Seguro com múltiplos publishers
-- [ ] Publicação duplicada continua segura para o consumidor
+- [x] Worker com `FOR UPDATE SKIP LOCKED` (ou equivalente)
+- [x] Backoff e retry
+- [x] Seguro com múltiplos publishers
+- [x] Publicação duplicada continua segura para o consumidor (mesmo `eventId`; dedup por `eventId` é contrato do consumidor, ARCHITECTURE §19)
 
 ## Fase 7 — Worker de referências pendentes (§7.1)
 - [ ] Reprocessamento com backoff exponencial
@@ -85,7 +85,7 @@ Fase atual: **6 — Outbox publisher** (aguardando plano)
 - [x] Métricas: transações por status, duplicatas, conflitos de lock, latência e divergência de reconciliação
 - [x] Métricas de retries, DLQ e outbox lag declaradas no registry
 - [x] Retries e DLQ incrementados (Fase 5)
-- [ ] Outbox lag medido (Fase 6)
+- [x] Outbox lag medido (Fase 6)
 - [x] `correlationId` propagado até os eventos da outbox
 
 ## Fase 9 — Testes de integração e concorrência (§13)
@@ -196,3 +196,4 @@ Concorrência (paralelismo real):
 - 2026-11-07 — Fase 8 parcial concluída: logs JSON com correlação HTTP, métricas Prometheus em registry próprio e wrapper compartilhado do use case; retries/DLQ/outbox lag apenas declaradas para as Fases 5–7. — Próximo: Fase 5 (SQS), aguardando plano.
 - 2026-11-07 — Validação das Fases 4 e 8 (implementadas pelo Copilot; revisores correctness + interface): 14 achados corrigidos (erros do banco viravam 400, id não-UUID dava 500, FAILED em 503, label `kind` sem limite, reconciliação sem métrica, OPENING sem evento, envelope de erro, nomes reservados, cursor, correlationId, wrapper, convenções Prometheus, 202/409). Novo use case `OpenWallet`, factory `WagerTransaction.opening`, filtro global; ARCHITECTURE §16–17 reescritos. 437 testes passando (240 unit, 193 integração, 4 concorrência). — Próximo: Fase 5 (SQS), aguardando plano.
 - 2026-11-07 — Fase 5 concluída: consumidor SQS (inbox, ack após commit, retry com backoff, DLQ com motivo, FIFO por grupo, pausa do polling com banco fora, shutdown gracioso), `WageringCoreModule` compartilhado; revisão (correctness + test-evidence): 6 achados de código e 10 de testes corrigidos (redrive 10 / limite 5, ordem do grupo sem depender do broker, releitura da inbox, envelope ilegível → DLQ, loop único). ARCHITECTURE §18. 483 testes passando (259 unit, 220 integração, 4 concorrência). — Próximo: Fase 6 (outbox publisher), aguardando plano.
+- 2026-11-07 — Fase 6 concluída: outbox publisher em `wager-events.fifo` (claim com `FOR UPDATE SKIP LOCKED` publicando ainda com o lock, ordem por agregado via `seq`, `SendMessageBatch` com falha por entrada, backoff sem descarte nem DLQ, timeouts do SQS abaixo do idle timeout, métricas published/failures/retries/stuck e outbox lag, shutdown gracioso). Revisão (correctness + test-evidence): 4 achados de código e 14 de testes corrigidos (backfill ordenado do `seq`, reenvio um a um em 4xx, SDK sem retries + folga de 2s, falha parcial real do LocalStack, `pg_terminate_backend`, idle timeout, shutdown com timeout). ARCHITECTURE §19. 513 testes passando (263 unit, 244 integração, 6 concorrência). Observação: uma execução da integração travou uma vez sem atividade no banco e não se repetiu em duas execuções seguidas. — Próximo: Fase 7 (referências pendentes), aguardando plano.
