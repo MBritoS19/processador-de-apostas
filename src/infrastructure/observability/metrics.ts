@@ -58,4 +58,27 @@ export class ObservabilityMetrics {
     help: 'Idade, em segundos, do evento mais antigo ainda não publicado da outbox.',
     registers: [this.registry],
   });
+
+  // Outbox publisher (Fase 6).
+  readonly outboxPublished = new Counter({
+    name: 'wagering_outbox_published_total',
+    help: 'Eventos da outbox publicados e marcados como publicados (commit).',
+    registers: [this.registry],
+  });
+  readonly outboxPublishFailures = new Counter({
+    name: 'wagering_outbox_publish_failures_total',
+    help: 'Falhas de publicação: scope=batch (a chamada inteira falhou) ou entry (entrada recusada no lote).',
+    labelNames: ['scope'] as const,
+    registers: [this.registry],
+  });
+  readonly outboxRetries = new Counter({
+    name: 'wagering_outbox_retries_total',
+    help: 'Eventos da outbox reagendados com backoff após falha de publicação.',
+    registers: [this.registry],
+  });
+  readonly outboxStuck = new Gauge({
+    name: 'wagering_outbox_stuck_events',
+    help: 'Eventos pendentes com tentativas acima do limite (OUTBOX_STUCK_ATTEMPTS); bloqueiam o agregado.',
+    registers: [this.registry],
+  });
 }

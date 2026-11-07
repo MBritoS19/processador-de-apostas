@@ -104,6 +104,34 @@ describe('loadConfig', () => {
     ]);
   });
 
+  it('outbox publisher: defaults, valores informados e validação', () => {
+    const defaults = loadConfig({ DATABASE_URL: validEnv.DATABASE_URL });
+    expect(defaults.sqs.wagerEventsQueueName).toBe('wager-events.fifo');
+    expect(defaults.outboxPublisher).toEqual({
+      enabled: true,
+      batchSize: 10,
+      pollIntervalMs: 500,
+      sqsTimeoutMs: 3_000,
+      idleInTransactionTimeoutMs: 15_000,
+      stuckAttempts: 10,
+      shutdownTimeoutMs: 25_000,
+    });
+    const config = loadConfig({ ...validEnv, OUTBOX_PUBLISHER_ENABLED: 'false', OUTBOX_POLL_INTERVAL_MS: '20' });
+    expect(config.outboxPublisher.enabled).toBe(false);
+    expect(config.outboxPublisher.pollIntervalMs).toBe(20);
+
+    expect(problemsOf({ ...validEnv, OUTBOX_BATCH_SIZE: '11' })).toEqual([
+      'OUTBOX_BATCH_SIZE deve ser um inteiro entre 1 e 10 (recebido: "11")',
+    ]);
+    expect(problemsOf({ ...validEnv, SQS_WAGER_EVENTS_QUEUE_NAME: 'eventos' })).toEqual([
+      'SQS_WAGER_EVENTS_QUEUE_NAME deve terminar em ".fifo"',
+    ]);
+    // O lock do claim é segurado durante o envio: o timeout do SQS precisa ser menor.
+    expect(
+      problemsOf({ ...validEnv, OUTBOX_SQS_TIMEOUT_MS: '15000', OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS: '15000' }),
+    ).toEqual(['OUTBOX_SQS_TIMEOUT_MS deve ser menor que OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS']);
+  });
+
   it('exige as duas credenciais AWS juntas', () => {
     const message = 'AWS_ACCESS_KEY_ID e AWS_SECRET_ACCESS_KEY devem ser informadas juntas';
     expect(problemsOf({ ...validEnv, AWS_ACCESS_KEY_ID: 'test' })).toEqual([message]);

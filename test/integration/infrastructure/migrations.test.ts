@@ -92,7 +92,8 @@ describe('migrations', () => {
     );
     expect(phase3.ck_wager_tx_failure_code).toContain('BALANCE_LIMIT_EXCEEDED');
 
-    for (let i = 0; i < 3; i++) await migrator.down();
+    // Fase 6 (outbox_seq) + as 3 da Fase 3.
+    for (let i = 0; i < 4; i++) await migrator.down();
     const phase2 = await schemaObjects();
     expect(phase2).toHaveProperty('ux_wager_tx_one_reversal_per_kind');
     expect(phase2).toHaveProperty('uq_wager_tx_idempotency_key');
@@ -102,6 +103,27 @@ describe('migrations', () => {
 
     await migrator.up();
     expect(await schemaObjects()).toEqual(phase3);
+  });
+
+  it('down da migration da Fase 6 remove seq e o índice da ordem por agregado', async () => {
+    const migrator = orm.getMigrator();
+    await migrator.up();
+    const outboxSchema = async () => {
+      const rows = await orm.em.getConnection().execute<{ name: string }[]>(
+        `select column_name as name from information_schema.columns where table_name = 'outbox_messages' and column_name = 'seq'
+         union all
+         select indexname from pg_indexes where tablename = 'outbox_messages' and indexname = 'ix_outbox_pending_aggregate'
+         order by name`,
+      );
+      return rows.map((row) => row.name);
+    };
+    expect(await outboxSchema()).toEqual(['ix_outbox_pending_aggregate', 'seq']);
+
+    await migrator.down();
+    expect(await outboxSchema()).toEqual([]);
+
+    await migrator.up();
+    expect(await outboxSchema()).toEqual(['ix_outbox_pending_aggregate', 'seq']);
   });
 
   it('up é idempotente', async () => {

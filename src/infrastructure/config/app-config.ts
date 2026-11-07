@@ -15,6 +15,23 @@ export interface AppConfig {
   readonly sqs: {
     readonly wagerQueueName: string;
     readonly wagerDlqName: string;
+    /** Destino do outbox publisher (Fase 6). FIFO, sem DLQ. */
+    readonly wagerEventsQueueName: string;
+  };
+  /** Outbox publisher (Fase 6). Números justificados no ARCHITECTURE.md §19. */
+  readonly outboxPublisher: {
+    readonly enabled: boolean;
+    /** Até 10: limite do SendMessageBatch. */
+    readonly batchSize: number;
+    /** Espera só quando o claim volta vazio. */
+    readonly pollIntervalMs: number;
+    /** Timeout do SendMessageBatch; sempre menor que `idleInTransactionTimeoutMs`. */
+    readonly sqsTimeoutMs: number;
+    /** `idle_in_transaction_session_timeout` da transação do claim (o lock é segurado durante o envio). */
+    readonly idleInTransactionTimeoutMs: number;
+    /** A partir de quantas tentativas o evento é considerado travado (log error + gauge). */
+    readonly stuckAttempts: number;
+    readonly shutdownTimeoutMs: number;
   };
   /** Consumidor da fila de transações (Fase 5). Números justificados no ARCHITECTURE.md §18. */
   readonly sqsConsumer: {
@@ -132,6 +149,16 @@ export function loadConfig(env: Env = process.env): AppConfig {
     sqs: {
       wagerQueueName: fifoQueue('SQS_WAGER_QUEUE_NAME', 'wager-transactions.fifo'),
       wagerDlqName: fifoQueue('SQS_WAGER_DLQ_NAME', 'wager-transactions-dlq.fifo'),
+      wagerEventsQueueName: fifoQueue('SQS_WAGER_EVENTS_QUEUE_NAME', 'wager-events.fifo'),
+    },
+    outboxPublisher: {
+      enabled: bool('OUTBOX_PUBLISHER_ENABLED', true),
+      batchSize: intInRange('OUTBOX_BATCH_SIZE', 10, 1, 10),
+      pollIntervalMs: intInRange('OUTBOX_POLL_INTERVAL_MS', 500, 1, 60_000),
+      sqsTimeoutMs: intInRange('OUTBOX_SQS_TIMEOUT_MS', 3_000, 100, 60_000),
+      idleInTransactionTimeoutMs: intInRange('OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS', 15_000, 1_000, 300_000),
+      stuckAttempts: intInRange('OUTBOX_STUCK_ATTEMPTS', 10, 1, 1000),
+      shutdownTimeoutMs: intInRange('OUTBOX_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
     },
     sqsConsumer: {
       enabled: bool('SQS_CONSUMER_ENABLED', true),
@@ -149,6 +176,11 @@ export function loadConfig(env: Env = process.env): AppConfig {
   if (config.sqsConsumer.name.length > 256) problems.push('SQS_CONSUMER_NAME excede 256 caracteres');
   if (config.sqsConsumer.retryMaxSeconds < config.sqsConsumer.retryBaseSeconds) {
     problems.push('SQS_RETRY_MAX_SECONDS deve ser maior ou igual a SQS_RETRY_BASE_SECONDS');
+  }
+
+  if (config.outboxPublisher.sqsTimeoutMs >= config.outboxPublisher.idleInTransactionTimeoutMs) {
+    // O lock do claim é segurado durante o envio: um SQS lento não pode segurá-lo além do timeout da transação.
+    problems.push('OUTBOX_SQS_TIMEOUT_MS deve ser menor que OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS');
   }
 
   if (problems.length > 0) throw new InvalidConfigError(problems);

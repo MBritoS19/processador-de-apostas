@@ -25,6 +25,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       SQS_WAGER_QUEUE_NAME: ${SQS_WAGER_QUEUE_NAME:-wager-transactions.fifo}
       SQS_WAGER_DLQ_NAME: ${SQS_WAGER_DLQ_NAME:-wager-transactions-dlq.fifo}
+      SQS_WAGER_EVENTS_QUEUE_NAME: ${SQS_WAGER_EVENTS_QUEUE_NAME:-wager-events.fifo}
       SQS_MAX_RECEIVE_COUNT: ${SQS_MAX_RECEIVE_COUNT:-10}
     ports:
       - "127.0.0.1:4566:4566"

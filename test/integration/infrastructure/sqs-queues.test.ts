@@ -39,4 +39,12 @@ describe('filas SQS', () => {
     expect(redrive.deadLetterTargetArn).toBe(dlq.QueueArn);
     expect(Number(redrive.maxReceiveCount)).toBe(10);
   });
+
+  it('a fila de eventos da outbox é FIFO, sem dedup por conteúdo e sem DLQ', async () => {
+    const events = await attributesOf(config.sqs.wagerEventsQueueName);
+    expect(config.sqs.wagerEventsQueueName).toBe('wager-events.fifo');
+    expect(events.FifoQueue).toBe('true');
+    expect(events.ContentBasedDeduplication).toBe('false');
+    expect(events.RedrivePolicy).toBeUndefined();
+  });
 });

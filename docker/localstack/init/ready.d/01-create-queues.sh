@@ -7,13 +7,14 @@ set -euo pipefail
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 QUEUE_NAME="${SQS_WAGER_QUEUE_NAME:-wager-transactions.fifo}"
 DLQ_NAME="${SQS_WAGER_DLQ_NAME:-wager-transactions-dlq.fifo}"
+EVENTS_QUEUE_NAME="${SQS_WAGER_EVENTS_QUEUE_NAME:-wager-events.fifo}"
 MAX_RECEIVE_COUNT="${SQS_MAX_RECEIVE_COUNT:-10}"
 
 if ! [[ "$MAX_RECEIVE_COUNT" =~ ^[1-9][0-9]*$ ]] || (( MAX_RECEIVE_COUNT > 1000 )); then
   echo "SQS_MAX_RECEIVE_COUNT inválido: '${MAX_RECEIVE_COUNT}' (esperado inteiro entre 1 e 1000)" >&2
   exit 1
 fi
-for name in "$QUEUE_NAME" "$DLQ_NAME"; do
+for name in "$QUEUE_NAME" "$DLQ_NAME" "$EVENTS_QUEUE_NAME"; do
   if ! [[ "$name" =~ ^[A-Za-z0-9_-]{1,75}\.fifo$ ]]; then
     echo "Nome de fila FIFO inválido: '${name}'" >&2
     exit 1
@@ -52,3 +53,12 @@ awslocal sqs create-queue \
   --attributes "file://${ATTRIBUTES_FILE}" >/dev/null
 
 echo "Filas criadas: ${QUEUE_NAME} -> DLQ ${DLQ_ARN} (maxReceiveCount=${MAX_RECEIVE_COUNT})"
+
+# Destino do outbox publisher (Fase 6): sem DLQ. O publisher nunca descarta eventos; a dedup
+# do broker (MessageDeduplicationId = eventId) é só otimização, o consumidor deduplica por eventId.
+awslocal sqs create-queue \
+  --region "$REGION" \
+  --queue-name "$EVENTS_QUEUE_NAME" \
+  --attributes FifoQueue=true,ContentBasedDeduplication=false,MessageRetentionPeriod=1209600 >/dev/null
+
+echo "Fila de eventos criada: ${EVENTS_QUEUE_NAME}"

@@ -175,7 +175,7 @@ export async function startConsumerApp(options: ConsumerAppOptions): Promise<INe
   const base = loadConfig();
   const config: AppConfig = {
     ...base,
-    sqs: { wagerQueueName: options.queues.queueName, wagerDlqName: options.queues.dlqName },
+    sqs: { ...base.sqs, wagerQueueName: options.queues.queueName, wagerDlqName: options.queues.dlqName },
     sqsConsumer: {
       ...base.sqsConsumer,
       enabled: true,
