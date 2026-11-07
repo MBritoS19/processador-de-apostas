@@ -37,6 +37,6 @@ describe('filas SQS', () => {
       maxReceiveCount?: string | number;
     };
     expect(redrive.deadLetterTargetArn).toBe(dlq.QueueArn);
-    expect(Number(redrive.maxReceiveCount)).toBe(5);
+    expect(Number(redrive.maxReceiveCount)).toBe(10);
   });
 });

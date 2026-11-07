@@ -51,6 +51,7 @@ describe('loadConfig', () => {
       visibilityTimeoutSeconds: 60,
       retryBaseSeconds: 30,
       retryMaxSeconds: 300,
+      maxAttempts: 5,
       shutdownTimeoutMs: 25_000,
     });
     const config = loadConfig({

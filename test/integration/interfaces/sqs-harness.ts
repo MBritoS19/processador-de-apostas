@@ -27,7 +27,7 @@ export interface TestQueues {
 }
 
 /** Fila + DLQ próprias do teste (LocalStack real), com a mesma redrive policy da Fase 0. */
-export async function createQueues(sqs: SQSClient, maxReceiveCount = 5): Promise<TestQueues> {
+export async function createQueues(sqs: SQSClient, maxReceiveCount = 10): Promise<TestQueues> {
   const suffix = randomUUID().slice(0, 8);
   const queueName = `test-wager-${suffix}.fifo`;
   const dlqName = `test-wager-${suffix}-dlq.fifo`;
@@ -184,6 +184,7 @@ export async function startConsumerApp(options: ConsumerAppOptions): Promise<INe
       visibilityTimeoutSeconds: 10,
       retryBaseSeconds: 0,
       retryMaxSeconds: 0,
+      maxAttempts: 5,
       shutdownTimeoutMs: 5_000,
       ...options.consumer,
     },
@@ -209,20 +210,30 @@ export async function startConsumerApp(options: ConsumerAppOptions): Promise<INe
   return app;
 }
 
-/** Use case que falha (TransientFailure ou exceção) nas primeiras `failures` chamadas. */
+export interface FailureOptions {
+  mode?: 'transient' | 'throw';
+  reason?: 'lock_timeout' | 'unavailable';
+  /** Só falha para os comandos que passam no filtro (os outros seguem direto). */
+  when?: (command: ProcessWagerTransactionCommand) => boolean;
+}
+
+/** Use case que falha (TransientFailure ou exceção) nas primeiras `failures` chamadas filtradas. */
 export function failing(
   failures: number,
-  mode: 'transient' | 'throw' = 'transient',
+  options: FailureOptions = {},
 ): { wrap: (real: Process) => Process; calls: () => number } {
+  const { mode = 'transient', reason = 'lock_timeout', when = () => true } = options;
   let calls = 0;
+  let failed = 0;
   return {
     calls: () => calls,
     wrap: (real) => ({
       async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
         calls++;
-        if (calls <= failures) {
+        if (when(command) && failed < failures) {
+          failed++;
           if (mode === 'throw') throw new Error('falha injetada');
-          return { type: 'TransientFailure', reason: 'lock_timeout' };
+          return { type: 'TransientFailure', reason };
         }
         return real.execute(command);
       },
@@ -237,8 +248,10 @@ export function gated(): {
   open: () => void;
   abort: () => void;
   calls: () => number;
+  finished: () => number;
 } {
   let calls = 0;
+  let finished = 0;
   let markStarted!: () => void;
   const started = new Promise<void>((resolve) => (markStarted = resolve));
   let release!: (proceed: boolean) => void;
@@ -248,32 +261,67 @@ export function gated(): {
     open: () => release(true),
     abort: () => release(false),
     calls: () => calls,
+    finished: () => finished,
     wrap: (real) => ({
       async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
         calls++;
         markStarted();
-        if (!(await gate)) throw new Error('processamento abortado pelo teste');
-        return real.execute(command);
+        try {
+          if (!(await gate)) throw new Error('processamento abortado pelo teste');
+          return await real.execute(command);
+        } finally {
+          finished++;
+        }
       },
     }),
   };
 }
 
-/** Cliente cujo DeleteMessage falha nas primeiras `failures` chamadas (worker morto antes do ack). */
-export class FailingDeleteQueueClient extends WagerQueueClient {
+export interface QueueFaults {
+  /** DeleteMessage falha nas primeiras N chamadas (worker morto depois do commit, antes do ack). */
+  failDeletes?: number;
+  /** ChangeMessageVisibility falha nas primeiras N chamadas. */
+  failVisibilityChanges?: number;
+  /** Registra o valor pedido, mas manda 0 ao SQS (backoff real sem esperar no teste). */
+  fakeVisibility?: boolean;
+}
+
+/** Cliente real da fila com contadores e falhas injetadas — só nos testes. */
+export class SpyQueueClient extends WagerQueueClient {
   deletes = 0;
+  /** Instantes (ms) em que cada ReceiveMessage começou e terminou. */
+  readonly receives: Array<{ startedAt: number; endedAt?: number; count?: number }> = [];
+  /** Segundos pedidos em cada ChangeMessageVisibility, na ordem. */
+  readonly visibilities: number[] = [];
 
   constructor(
     sqs: SQSClient,
     config: AppConfig,
-    private readonly failures: number,
+    private readonly faults: QueueFaults = {},
   ) {
     super(sqs, config.sqs.wagerQueueName, config.sqs.wagerDlqName);
   }
 
+  override async receive(...args: Parameters<WagerQueueClient['receive']>): Promise<ReceivedMessage[]> {
+    const entry: { startedAt: number; endedAt?: number; count?: number } = { startedAt: Date.now() };
+    this.receives.push(entry);
+    const messages = await super.receive(...args);
+    entry.endedAt = Date.now();
+    entry.count = messages.length;
+    return messages;
+  }
+
   override async delete(message: ReceivedMessage): Promise<void> {
     this.deletes++;
-    if (this.deletes <= this.failures) throw new Error('DeleteMessage falhou (injetado)');
+    if (this.deletes <= (this.faults.failDeletes ?? 0)) throw new Error('DeleteMessage falhou (injetado)');
     return super.delete(message);
+  }
+
+  override async changeVisibility(message: ReceivedMessage, seconds: number): Promise<void> {
+    this.visibilities.push(seconds);
+    if (this.visibilities.length <= (this.faults.failVisibilityChanges ?? 0)) {
+      throw new Error('ChangeMessageVisibility falhou (injetado)');
+    }
+    return super.changeVisibility(message, this.faults.fakeVisibility ? 0 : seconds);
   }
 }

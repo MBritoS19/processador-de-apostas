@@ -2,13 +2,15 @@ import 'reflect-metadata';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import type { INestApplication } from '@nestjs/common';
 import type { MikroORM } from '@mikro-orm/postgresql';
-import { loadConfig } from '../../../src/infrastructure/config/app-config';
+import { randomUUID } from 'node:crypto';
+import type { ProcessWagerTransactionCommand } from '../../../src/application/wagering/process-wager-transaction';
+import { loadConfig, type AppConfig } from '../../../src/infrastructure/config/app-config';
 import { createSqsClient } from '../../../src/infrastructure/messaging/sqs.client';
 import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
 import { countRows } from '../application/harness';
 import { expectLedgerConsistent, openOrm, seedWallet, truncateAll } from '../persistence/db';
 import {
-  FailingDeleteQueueClient,
+  SpyQueueClient,
   createQueues,
   deleteQueues,
   envelope,
@@ -21,8 +23,11 @@ import {
   startConsumerApp,
   visibleCount,
   type ConsumerAppOptions,
+  type QueueFaults,
   type TestQueues,
 } from './sqs-harness';
+
+type Wallet = { walletId: string; playerId: string };
 
 /** Consumidor SQS de ponta a ponta: LocalStack e Postgres reais, aplicação Nest inteira. */
 describe('consumidor SQS (LocalStack + Postgres reais)', () => {
@@ -61,18 +66,52 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await app.close();
   }
 
-  const counter = async (app: INestApplication, name: 'retries' | 'dlqMessages' | 'replays') =>
-    (await app.get(ObservabilityMetrics)[name].get()).values.reduce((sum, value) => sum + value.value, 0);
+  /** Cliente espião: `spy.client` fica disponível depois que a aplicação sobe. */
+  function spyQueue(faults: QueueFaults = {}) {
+    const spy: { client?: SpyQueueClient; factory: (s: typeof sqs, config: AppConfig) => SpyQueueClient } = {
+      factory: (sqsClient, config) => (spy.client = new SpyQueueClient(sqsClient, config, faults)),
+    };
+    return spy;
+  }
+
+  const counter = async (list: INestApplication[], name: 'retries' | 'dlqMessages' | 'replays') => {
+    let total = 0;
+    for (const app of list) {
+      total += (await app.get(ObservabilityMetrics)[name].get()).values.reduce((sum, value) => sum + value.value, 0);
+    }
+    return total;
+  };
 
   const debits = (walletId: string) => countRows(orm, 'wallet_ledger_entries', { wallet_id: walletId, direction: 'DEBIT' });
   const balance = async (walletId: string) =>
     (await orm.em.getKnex()('wallets').where({ id: walletId }).first('balance')).balance as string;
+  const statusOf = async (externalTransactionId: string) =>
+    (await orm.em.getKnex()('wager_transactions').where({ external_transaction_id: externalTransactionId }).first('status'))?.status as
+      | string
+      | undefined;
 
-  async function expectDrained(): Promise<void> {
-    await eventually(async () => expect(await queueDepth(sqs, queues.queueUrl)).toBe(0));
+  async function expectDrained(timeoutMs?: number): Promise<void> {
+    await eventually(async () => expect(await queueDepth(sqs, queues.queueUrl)).toBe(0), timeoutMs);
   }
 
-  it('mensagem válida: efeito aplicado, inbox gravada, fila vazia', async () => {
+  /** BET e, em seguida no mesmo grupo, o ROLLBACK dela. Fora de ordem, o ROLLBACK vira PENDING_REFERENCE. */
+  async function sendBetThenRollback(wallet: Wallet): Promise<{ bet: string; rollback: string }> {
+    const bet = `bet-${randomUUID()}`;
+    const rollback = `rb-${randomUUID()}`;
+    await send(sqs, queues.queueUrl, envelope(wallet, { data: { externalTransactionId: bet, idempotencyKey: `provider-a:${bet}` } }));
+    await send(
+      sqs,
+      queues.queueUrl,
+      envelope(wallet, {
+        data: { externalTransactionId: rollback, idempotencyKey: `provider-a:${rollback}`, kind: 'ROLLBACK', referenceExternalTransactionId: bet },
+      }),
+    );
+    return { bet, rollback };
+  }
+
+  const isExternal = (id: string) => (command: ProcessWagerTransactionCommand) => command.payload.externalTransactionId === id;
+
+  it('mensagem válida: efeito aplicado, inbox gravada, fila vazia, causation = messageId', async () => {
     const wallet = await seedWallet(orm, '100.00');
     await start();
     const message = envelope(wallet, { correlationId: 'corr-sqs-1' });
@@ -82,27 +121,32 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await expectDrained();
     expect(await balance(wallet.walletId)).toBe('90.00');
     expect(await countRows(orm, 'inbox_messages', { consumer_name: 'wager-consumer-test', message_id: message.messageId })).toBe(1);
-    expect(await countRows(orm, 'outbox_messages')).toBe(2);
-    const outbox = await orm.em.getKnex()('outbox_messages').select('payload');
+    const outbox = await orm.em.getKnex()('outbox_messages').select('event_type', 'payload');
+    expect(outbox).toHaveLength(2);
     expect(outbox.every((row) => row.payload.correlationId === 'corr-sqs-1')).toBe(true);
-    expect(outbox.every((row) => row.payload.causationId !== undefined)).toBe(true);
+    const processed = outbox.find((row) => row.event_type === 'WagerTransactionProcessed');
+    const changed = outbox.find((row) => row.event_type === 'WalletBalanceChanged');
+    expect(processed?.payload.causationId).toBe(message.messageId);
+    expect(changed?.payload.causationId).toBe(processed?.payload.eventId);
     expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
-  it('a mesma mensagem entregue duas vezes: um único efeito', async () => {
+  it('a mesma mensagem entregue duas vezes: a inbox confirma a 2ª sem chamar o use case', async () => {
     const wallet = await seedWallet(orm, '100.00');
     const message = envelope(wallet);
     // Dedup ids diferentes: o broker não descarta, a inbox precisa resolver.
     await send(sqs, queues.queueUrl, message, { dedupId: 'copy-1' });
     await send(sqs, queues.queueUrl, message, { dedupId: 'copy-2' });
-    const app = await start();
+    const counting = failing(0);
+    const app = await start({ wrapProcess: counting.wrap });
 
     await expectDrained();
+    expect(counting.calls()).toBe(1);
     expect(await debits(wallet.walletId)).toBe(1);
     expect(await countRows(orm, 'wager_transactions', { wallet_id: wallet.walletId, kind: 'BET' })).toBe(1);
     expect(await countRows(orm, 'inbox_messages')).toBe(1);
-    expect(await counter(app, 'replays')).toBe(1);
+    expect(await counter([app], 'replays')).toBe(1);
     expect(await balance(wallet.walletId)).toBe('90.00');
     expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
     await expectLedgerConsistent(orm, wallet.walletId);
@@ -114,12 +158,14 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     const second = { ...first, messageId: 'msg-reenviada-pelo-provedor' };
     await send(sqs, queues.queueUrl, first);
     await send(sqs, queues.queueUrl, second);
-    const app = await start();
+    const counting = failing(0);
+    const app = await start({ wrapProcess: counting.wrap });
 
     await expectDrained();
+    expect(counting.calls()).toBe(2);
     expect(await debits(wallet.walletId)).toBe(1);
     expect(await countRows(orm, 'inbox_messages')).toBe(2);
-    expect(await counter(app, 'replays')).toBe(1);
+    expect(await counter([app], 'replays')).toBe(1);
     expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
     await expectLedgerConsistent(orm, wallet.walletId);
   });
@@ -174,10 +220,20 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     expect(dead[0]?.reason).toBe(reason);
     expect(dead[0]?.detail).toBe(detail);
     await expectDrained();
-    expect(await counter(app, 'dlqMessages')).toBe(1);
+    expect(await counter([app], 'dlqMessages')).toBe(1);
     expect(await countRows(orm, 'wager_transactions', { wallet_id: wallet.walletId, kind: 'BET' })).toBe(0);
     expect(await countRows(orm, 'inbox_messages')).toBe(0);
     await expectLedgerConsistent(orm, wallet.walletId);
+  });
+
+  it('envelope que estoura o parser (aninhamento profundo): DLQ INVALID_ENVELOPE, não loop', async () => {
+    const depth = 60_000;
+    const body = `{"messageId":"m-deep","type":"WagerTransactionRequested","occurredAt":"2026-11-07T12:00:00Z","data":{"idempotencyKey":"k","x":${'['.repeat(depth)}${']'.repeat(depth)}}}`;
+    await start();
+    await send(sqs, queues.queueUrl, body, { groupId: 'deep' });
+
+    await eventually(async () => expect((await readDlq(sqs, queues.dlqUrl)).map((d) => d.reason)).toEqual(['INVALID_ENVELOPE']));
+    await expectDrained();
   });
 
   it('mesmo messageId com payload diferente: DLQ INBOX_PAYLOAD_MISMATCH, sem efeito novo', async () => {
@@ -194,33 +250,39 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
-  it('falha transitória: retry com backoff e depois sucesso, um único efeito', async () => {
+  it('falha transitória: visibilidade 30/60/120/240 por ApproximateReceiveCount e sucesso na 5ª, um único efeito', async () => {
     const wallet = await seedWallet(orm, '100.00');
-    const flaky = failing(2);
-    const app = await start({ wrapProcess: flaky.wrap, consumer: { retryBaseSeconds: 1, retryMaxSeconds: 1 } });
+    const flaky = failing(4);
+    const spy = spyQueue({ fakeVisibility: true });
+    const app = await start({
+      wrapProcess: flaky.wrap,
+      queueClient: spy.factory,
+      consumer: { retryBaseSeconds: 30, retryMaxSeconds: 300 },
+    });
     await send(sqs, queues.queueUrl, envelope(wallet));
 
-    await eventually(async () => expect(await debits(wallet.walletId)).toBe(1), 20_000);
+    await eventually(async () => expect(await debits(wallet.walletId)).toBe(1));
     await expectDrained();
-    expect(flaky.calls()).toBe(3);
-    expect(await counter(app, 'retries')).toBe(2);
+    expect(spy.client?.visibilities).toEqual([30, 60, 120, 240]);
+    expect(flaky.calls()).toBe(5);
+    expect(await counter([app], 'retries')).toBe(4);
     expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
   it('erro inesperado (exceção) é tratado como transitório: retry e depois sucesso', async () => {
     const wallet = await seedWallet(orm, '100.00');
-    const flaky = failing(1, 'throw');
+    const flaky = failing(1, { mode: 'throw' });
     const app = await start({ wrapProcess: flaky.wrap });
     await send(sqs, queues.queueUrl, envelope(wallet));
 
     await eventually(async () => expect(await debits(wallet.walletId)).toBe(1));
     await expectDrained();
-    expect(await counter(app, 'retries')).toBe(1);
+    expect(await counter([app], 'retries')).toBe(1);
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
-  it('falha transitória além do limite (maxReceiveCount=5): DLQ MAX_ATTEMPTS_EXCEEDED', async () => {
+  it('falha transitória além do limite do consumidor (5, fila em 10): DLQ MAX_ATTEMPTS_EXCEEDED', async () => {
     const wallet = await seedWallet(orm, '100.00');
     const flaky = failing(Number.POSITIVE_INFINITY);
     const app = await start({ wrapProcess: flaky.wrap });
@@ -232,35 +294,117 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     }, 20_000);
     await expectDrained();
     expect(flaky.calls()).toBe(5);
-    expect(await counter(app, 'retries')).toBe(4);
-    expect(await counter(app, 'dlqMessages')).toBe(1);
+    expect(await counter([app], 'retries')).toBe(4);
+    expect(await counter([app], 'dlqMessages')).toBe(1);
     expect(await debits(wallet.walletId)).toBe(0);
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
-  it('worker morto depois do commit e antes do ack: reentrega, inbox detecta, um único efeito', async () => {
+  it('retry no meio do grupo: a mensagem seguinte espera (ROLLBACK só depois da BET)', async () => {
     const wallet = await seedWallet(orm, '100.00');
-    let client: FailingDeleteQueueClient | undefined;
-    const app = await start({
-      consumer: { visibilityTimeoutSeconds: 2 },
-      queueClient: (sqsClient, config) => (client = new FailingDeleteQueueClient(sqsClient, config, 1)),
-    });
+    const betExternal = { id: '' };
+    const flaky = failing(1, { when: (command) => isExternal(betExternal.id)(command) });
+    const sent = await sendBetThenRollback(wallet);
+    betExternal.id = sent.bet;
+    // Backoff real de 1s: o ROLLBACK não pode ficar visível antes da BET.
+    const app = await start({ wrapProcess: flaky.wrap, consumer: { retryBaseSeconds: 1, retryMaxSeconds: 1 } });
+
+    await expectDrained();
+    expect(await counter([app], 'retries')).toBe(1);
+    expect(await statusOf(sent.bet)).toBe('PROCESSED');
+    expect(await statusOf(sent.rollback)).toBe('PROCESSED');
+    expect(await balance(wallet.walletId)).toBe('100.00');
+    await expectLedgerConsistent(orm, wallet.walletId);
+  });
+
+  it('ação no SQS falhou (ChangeMessageVisibility): o grupo para e a ordem se mantém', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    const betExternal = { id: '' };
+    const flaky = failing(1, { when: (command) => isExternal(betExternal.id)(command) });
+    const sent = await sendBetThenRollback(wallet);
+    betExternal.id = sent.bet;
+    const spy = spyQueue({ failVisibilityChanges: 1 });
+    await start({ wrapProcess: flaky.wrap, queueClient: spy.factory, consumer: { visibilityTimeoutSeconds: 2 } });
+
+    await expectDrained(20_000);
+    expect(await statusOf(sent.bet)).toBe('PROCESSED');
+    expect(await statusOf(sent.rollback)).toBe('PROCESSED');
+    expect(await balance(wallet.walletId)).toBe('100.00');
+    await expectLedgerConsistent(orm, wallet.walletId);
+  });
+
+  it('a primeira do grupo esgota as tentativas: vai para a DLQ e as seguintes são processadas', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    const head = envelope(wallet);
+    const follower = envelope(wallet, { data: { money: { amount: '20.00', currency: 'BRL' } } });
+    const headExternal = (head.data as { externalTransactionId: string }).externalTransactionId;
+    await send(sqs, queues.queueUrl, head);
+    await send(sqs, queues.queueUrl, follower);
+    const flaky = failing(Number.POSITIVE_INFINITY, { when: isExternal(headExternal) });
+    await start({ wrapProcess: flaky.wrap });
+
+    await expectDrained(20_000);
+    expect((await readDlq(sqs, queues.dlqUrl)).map((d) => d.reason)).toEqual(['MAX_ATTEMPTS_EXCEEDED']);
+    // 5 tentativas da primeira + 1 da seguinte: a seguinte nunca passou à frente.
+    expect(flaky.calls()).toBe(6);
+    expect(await debits(wallet.walletId)).toBe(1);
+    expect(await balance(wallet.walletId)).toBe('80.00');
+    await expectLedgerConsistent(orm, wallet.walletId);
+  });
+
+  it('banco indisponível: o polling pausa antes de buscar de novo', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    const flaky = failing(1, { reason: 'unavailable' });
+    const spy = spyQueue();
+    await start({ wrapProcess: flaky.wrap, queueClient: spy.factory });
     await send(sqs, queues.queueUrl, envelope(wallet));
 
-    await eventually(async () => expect(client?.deletes).toBe(2), 20_000);
+    await eventually(async () => expect(await debits(wallet.walletId)).toBe(1));
     await expectDrained();
+    const receives = spy.client?.receives ?? [];
+    const first = receives.findIndex((r) => r.count === 1);
+    const failed = receives[first];
+    const next = receives[first + 1];
+    expect(failed?.endedAt).toBeDefined();
+    // pollPauseMs(1) = 1s entre o lote com falha e o próximo ReceiveMessage.
+    expect((next?.startedAt ?? 0) - (failed?.endedAt ?? 0)).toBeGreaterThanOrEqual(900);
+    await expectLedgerConsistent(orm, wallet.walletId);
+  });
+
+  it('worker morto depois do commit e antes do ack: reentrega, inbox detecta sem chamar o use case', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    const spy = spyQueue({ failDeletes: 1 });
+    const counting = failing(0);
+    const app = await start({ wrapProcess: counting.wrap, queueClient: spy.factory, consumer: { visibilityTimeoutSeconds: 2 } });
+    await send(sqs, queues.queueUrl, envelope(wallet));
+
+    await eventually(async () => expect(spy.client?.deletes).toBe(2), 20_000);
+    await expectDrained();
+    expect(counting.calls()).toBe(1);
     expect(await debits(wallet.walletId)).toBe(1);
     expect(await countRows(orm, 'inbox_messages')).toBe(1);
-    expect(await counter(app, 'replays')).toBe(1);
+    expect(await counter([app], 'replays')).toBe(1);
     expect(await balance(wallet.walletId)).toBe('90.00');
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
-  it('duas instâncias com a mesma mensagem em paralelo: um efeito, as duas confirmam, nada na DLQ', async () => {
+  it('DeleteMessage falha depois do envio para a DLQ: reentrega não duplica na DLQ', async () => {
+    const spy = spyQueue({ failDeletes: 1 });
+    await start({ queueClient: spy.factory, consumer: { visibilityTimeoutSeconds: 2 } });
+    await send(sqs, queues.queueUrl, '{nope', { groupId: 'bad' });
+
+    await eventually(async () => expect(spy.client?.deletes).toBe(2), 20_000);
+    await expectDrained();
+    expect((await readDlq(sqs, queues.dlqUrl)).map((d) => d.reason)).toEqual(['INVALID_ENVELOPE']);
+  });
+
+  it('duas instâncias com a mesma mensagem em paralelo: um efeito, as duas confirmam, sem retry nem DLQ', async () => {
     const wallet = await seedWallet(orm, '100.00');
     const gate = gated();
-    await start({ wrapProcess: gate.wrap, consumer: { maxMessages: 1 } });
-    await start({ wrapProcess: gate.wrap, consumer: { maxMessages: 1 } });
+    const both = [
+      await start({ wrapProcess: gate.wrap, consumer: { maxMessages: 1 } }),
+      await start({ wrapProcess: gate.wrap, consumer: { maxMessages: 1 } }),
+    ];
     const message = envelope(wallet);
     // Grupos distintos: as duas cópias podem estar em voo ao mesmo tempo (uma em cada instância).
     await send(sqs, queues.queueUrl, message, { groupId: 'copy-a', dedupId: 'copy-a' });
@@ -269,17 +413,20 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await eventually(() => expect(gate.calls()).toBe(2));
     gate.open();
     await expectDrained();
+    expect(await counter(both, 'retries')).toBe(0);
     expect(await debits(wallet.walletId)).toBe(1);
     expect(await countRows(orm, 'inbox_messages')).toBe(1);
     expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
-  it('duas instâncias, mesmo messageId com payloads diferentes em paralelo: um efeito, a outra na DLQ', async () => {
+  it('duas instâncias, mesmo messageId com payloads diferentes em paralelo: um efeito, a outra na DLQ sem retry', async () => {
     const wallet = await seedWallet(orm, '100.00');
     const gate = gated();
-    await start({ wrapProcess: gate.wrap, consumer: { maxMessages: 1 } });
-    await start({ wrapProcess: gate.wrap, consumer: { maxMessages: 1 } });
+    const both = [
+      await start({ wrapProcess: gate.wrap, consumer: { maxMessages: 1 } }),
+      await start({ wrapProcess: gate.wrap, consumer: { maxMessages: 1 } }),
+    ];
     const first = envelope(wallet);
     const second = envelope(wallet, { messageId: first.messageId as string });
     await send(sqs, queues.queueUrl, first, { groupId: 'copy-a', dedupId: 'copy-a' });
@@ -291,6 +438,7 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
       expect((await readDlq(sqs, queues.dlqUrl)).map((d) => d.reason)).toEqual(['INBOX_PAYLOAD_MISMATCH']),
     );
     await expectDrained();
+    expect(await counter(both, 'retries')).toBe(0);
     expect(await debits(wallet.walletId)).toBe(1);
     expect(await countRows(orm, 'wager_transactions', { wallet_id: wallet.walletId, kind: 'BET' })).toBe(1);
     await expectLedgerConsistent(orm, wallet.walletId);
@@ -314,7 +462,19 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await expectLedgerConsistent(orm, b.walletId);
   });
 
-  it('SIGTERM com mensagem em andamento dentro do prazo: termina e confirma', async () => {
+  it('SQS_CONSUMER_ENABLED=false: o consumidor não busca mensagens', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    const spy = spyQueue();
+    await start({ queueClient: spy.factory, consumer: { enabled: false } });
+    await send(sqs, queues.queueUrl, envelope(wallet));
+
+    await Bun.sleep(1_500);
+    expect(spy.client?.receives ?? []).toEqual([]);
+    expect(await visibleCount(sqs, queues.queueUrl)).toBe(1);
+    expect(await debits(wallet.walletId)).toBe(0);
+  });
+
+  it('SIGTERM com mensagem em andamento dentro do prazo: termina, confirma e para de buscar', async () => {
     const wallet = await seedWallet(orm, '100.00');
     const gate = gated();
     const app = await start({ wrapProcess: gate.wrap, consumer: { shutdownTimeoutMs: 10_000 } });
@@ -322,16 +482,20 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await gate.started;
 
     const closing = stop(app);
+    // Chega durante o shutdown: não pode ser buscada.
+    await send(sqs, queues.queueUrl, envelope(wallet), { groupId: 'late' });
     await Bun.sleep(300);
     gate.open();
     await closing;
 
     expect(await debits(wallet.walletId)).toBe(1);
-    expect(await queueDepth(sqs, queues.queueUrl)).toBe(0);
+    expect(gate.calls()).toBe(1);
+    await eventually(async () => expect(await visibleCount(sqs, queues.queueUrl)).toBe(1));
+    expect(await queueDepth(sqs, queues.queueUrl)).toBe(1);
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
-  it('SIGTERM com mensagem em andamento além do prazo: devolve a visibilidade, outra instância processa uma vez', async () => {
+  it('SIGTERM além do prazo: devolve a visibilidade; o processamento abandonado e outra instância geram um único efeito', async () => {
     const wallet = await seedWallet(orm, '100.00');
     const gate = gated();
     const app = await start({ wrapProcess: gate.wrap, consumer: { shutdownTimeoutMs: 200, visibilityTimeoutSeconds: 30 } });
@@ -341,14 +505,13 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await stop(app);
     // Visível de novo bem antes dos 30s de visibilidade: foi devolvida no shutdown.
     await eventually(async () => expect(await visibleCount(sqs, queues.queueUrl)).toBe(1), 5_000);
-    gate.abort();
 
     await start();
+    gate.open(); // o processamento abandonado segue ao mesmo tempo que a nova instância
     await expectDrained();
+    await eventually(() => expect(gate.finished()).toBe(1));
     expect(await debits(wallet.walletId)).toBe(1);
     expect(await countRows(orm, 'inbox_messages')).toBe(1);
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 });
-
-type Wallet = { walletId: string; playerId: string };

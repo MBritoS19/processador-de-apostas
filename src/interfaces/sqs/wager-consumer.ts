@@ -17,6 +17,7 @@ export interface WagerConsumerOptions {
   visibilityTimeoutSeconds: number;
   retryBaseSeconds: number;
   retryMaxSeconds: number;
+  maxAttempts: number;
   shutdownTimeoutMs: number;
 }
 
@@ -28,6 +29,9 @@ type Decision =
   | { action: 'ack'; outcome: string; transactionId?: string; warn?: boolean }
   | { action: 'retry'; reason: string; unavailable: boolean }
   | { action: 'dlq'; reason: DlqReason; detail: string };
+
+/** O que foi efetivamente feito com a mensagem; `failed` = a ação no SQS falhou. */
+type Applied = Decision['action'] | 'failed';
 
 type LogContext = Record<string, unknown>;
 
@@ -63,11 +67,17 @@ export class WagerConsumer {
     private readonly options: WagerConsumerOptions,
   ) {}
 
+  /** Não inicia um segundo loop enquanto o anterior (mesmo após um stop com timeout) não terminou. */
   start(): void {
-    if (this.loop) return;
+    if (this.loop) {
+      this.logger.warn({ event: 'sqs_consumer_already_running' }, 'sqs consumer loop still running');
+      return;
+    }
     this.running = true;
     this.logger.info({ event: 'sqs_consumer_started', consumerName: this.options.consumerName }, 'sqs consumer started');
-    this.loop = this.run();
+    this.loop = this.run().finally(() => {
+      this.loop = undefined;
+    });
   }
 
   /**
@@ -76,12 +86,13 @@ export class WagerConsumer {
    * pela inbox na reentrega.
    */
   async stop(): Promise<void> {
-    if (!this.loop) return;
+    const loop = this.loop;
+    if (!loop) return;
     this.running = false;
     this.wakeUp?.();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finished = await Promise.race([
-      this.loop.then(() => true),
+      loop.then(() => true),
       new Promise<boolean>((resolve) => {
         timer = setTimeout(() => resolve(false), this.options.shutdownTimeoutMs);
       }),
@@ -91,7 +102,6 @@ export class WagerConsumer {
       this.logger.warn({ event: 'sqs_consumer_shutdown_timeout', pending: this.unfinished.size }, 'shutdown timeout');
       await this.releaseAll();
     }
-    this.loop = undefined;
     this.logger.info({ event: 'sqs_consumer_stopped', consumerName: this.options.consumerName }, 'sqs consumer stopped');
   }
 
@@ -100,14 +110,15 @@ export class WagerConsumer {
     while (this.running) {
       let unavailable: boolean;
       try {
-        const maxReceiveCount = await this.queue.maxReceiveCount();
+        // A fila (maxReceiveCount) é a rede de segurança; o consumidor decide antes, com motivo.
+        const limit = Math.min(this.options.maxAttempts, await this.queue.maxReceiveCount());
         const messages = await this.queue.receive({
           maxMessages: this.options.maxMessages,
           waitTimeSeconds: this.options.waitTimeSeconds,
           visibilityTimeoutSeconds: this.options.visibilityTimeoutSeconds,
         });
         for (const message of messages) this.unfinished.add(message);
-        unavailable = await this.processBatch(messages, maxReceiveCount);
+        unavailable = await this.processBatch(messages, limit);
       } catch (error) {
         this.logger.error({ event: 'sqs_poll_failed', errorName: errorName(error) }, 'sqs poll failed');
         unavailable = true;
@@ -124,52 +135,70 @@ export class WagerConsumer {
   }
 
   /**
-   * Grupos FIFO diferentes em paralelo; o mesmo grupo em sequência. Se uma mensagem do grupo
-   * vai para retry, as seguintes voltam para a fila (visibilidade 0) e esperam atrás dela.
-   * Devolve true se alguma falha indicou banco indisponível (o loop pausa o polling).
+   * Grupos FIFO diferentes em paralelo; o mesmo grupo em sequência. Devolve true se alguma
+   * falha indicou banco indisponível (o loop pausa o polling).
    */
-  private async processBatch(messages: readonly ReceivedMessage[], maxReceiveCount: number): Promise<boolean> {
+  private async processBatch(messages: readonly ReceivedMessage[], limit: number): Promise<boolean> {
     const groups = new Map<string, ReceivedMessage[]>();
     for (const message of messages) {
       const key = message.groupId ?? message.sqsMessageId;
       groups.set(key, [...(groups.get(key) ?? []), message]);
     }
-    const results = await Promise.all([...groups.values()].map((group) => this.processGroup(group, maxReceiveCount)));
+    const results = await Promise.all([...groups.values()].map((group) => this.processGroup(group, limit)));
     return results.some(Boolean);
   }
 
-  private async processGroup(group: readonly ReceivedMessage[], maxReceiveCount: number): Promise<boolean> {
+  /**
+   * Segue para a próxima mensagem do grupo só se a anterior foi resolvida (ack ou DLQ). Não
+   * depende de o broker bloquear o grupo enquanto há mensagem em voo (o LocalStack não
+   * bloqueia): as seguintes nunca ficam visíveis antes da que falhou.
+   * - retry: as seguintes recebem a mesma visibilidade e voltam junto, na ordem do grupo;
+   * - ação no SQS falhou: as seguintes ficam em voo e expiram junto com ela.
+   */
+  private async processGroup(group: readonly ReceivedMessage[], limit: number): Promise<boolean> {
     for (const [index, message] of group.entries()) {
       if (!this.running) {
         await this.release(group.slice(index));
         return false;
       }
-      const decision = await this.handle(message, maxReceiveCount);
-      if (decision?.action === 'retry') {
-        await this.release(group.slice(index + 1));
-        return decision.unavailable;
+      const outcome = await this.handle(message, limit);
+      const rest = group.slice(index + 1);
+      if (outcome.applied === 'retry') {
+        const delaySeconds = retryDelaySeconds(message.receiveCount, this.options.retryBaseSeconds, this.options.retryMaxSeconds);
+        await this.release(rest, delaySeconds);
+        return outcome.unavailable;
+      }
+      if (outcome.applied === 'failed') {
+        for (const follower of rest) this.unfinished.delete(follower);
+        return false;
       }
     }
     return false;
   }
 
-  private async handle(message: ReceivedMessage, maxReceiveCount: number): Promise<Decision | undefined> {
+  private async handle(message: ReceivedMessage, limit: number): Promise<{ applied: Applied; unavailable: boolean }> {
     const context: LogContext = { sqsMessageId: message.sqsMessageId, receiveCount: message.receiveCount };
     try {
       const decision = await this.decide(message, context);
-      await this.apply(decision, message, maxReceiveCount, context);
-      return decision;
+      const applied = await this.apply(decision, message, limit, context);
+      return { applied, unavailable: decision.action === 'retry' && decision.unavailable };
     } catch (error) {
       // Falha ao falar com o SQS: a mensagem volta sozinha quando a visibilidade expirar.
       this.logger.error({ ...context, event: 'sqs_message_action_failed', errorName: errorName(error) }, 'sqs action failed');
-      return undefined;
+      return { applied: 'failed', unavailable: false };
     } finally {
       this.unfinished.delete(message);
     }
   }
 
   private async decide(message: ReceivedMessage, context: LogContext): Promise<Decision> {
-    const envelope = parseEnvelope(message.body);
+    let envelope: WagerEnvelope | string;
+    try {
+      envelope = parseEnvelope(message.body);
+    } catch {
+      // Ex.: aninhamento tão profundo que o JSON canônico estoura a pilha.
+      envelope = 'envelope não pôde ser lido';
+    }
     if (typeof envelope === 'string') return { action: 'dlq', reason: 'INVALID_ENVELOPE', detail: envelope };
     context.messageId = envelope.messageId;
     context.correlationId = envelope.correlationId;
@@ -211,12 +240,14 @@ export class WagerConsumer {
       case 'PendingReference':
         return { action: 'ack', outcome: result.status, transactionId: result.transactionId };
       case 'IdempotencyConflict': {
+        // A inbox pode ter sido gravada por outra instância depois da pré-checagem: relê.
+        // Mesmo messageId com outro payload é DLQ, mesmo que o use case tenha visto conflito de key.
+        const stored = await this.inbox.payloadHashOf(this.options.consumerName, envelope.messageId);
         if (result.existingTransactionId !== undefined) {
+          if (stored !== undefined) return this.fromInbox(stored, envelope);
           // Conflito de negócio (mesma key, outro payload): terminal. A métrica vem do wrapper.
           return { action: 'ack', outcome: 'IDEMPOTENCY_CONFLICT', transactionId: result.existingTransactionId, warn: true };
         }
-        // Conflito na inbox: outra instância gravou a mesma mensagem. Relê para decidir.
-        const stored = await this.inbox.payloadHashOf(this.options.consumerName, envelope.messageId);
         if (stored === undefined) return { action: 'retry', reason: 'inbox_conflict_unresolved', unavailable: false };
         return this.fromInbox(stored, envelope);
       }
@@ -227,7 +258,7 @@ export class WagerConsumer {
     }
   }
 
-  private async apply(decision: Decision, message: ReceivedMessage, maxReceiveCount: number, context: LogContext): Promise<void> {
+  private async apply(decision: Decision, message: ReceivedMessage, limit: number, context: LogContext): Promise<Applied> {
     switch (decision.action) {
       case 'ack': {
         const fields = {
@@ -244,17 +275,17 @@ export class WagerConsumer {
           // O efeito já foi commitado: a reentrega cai na inbox e é confirmada sem efeito novo.
           this.logger.warn({ ...context, event: 'sqs_ack_failed', errorName: errorName(error) }, 'sqs ack failed');
         }
-        return;
+        return decision.action;
       }
       case 'retry': {
-        if (message.receiveCount >= maxReceiveCount) {
-          return this.apply({ action: 'dlq', reason: 'MAX_ATTEMPTS_EXCEEDED', detail: decision.reason }, message, maxReceiveCount, context);
+        if (message.receiveCount >= limit) {
+          return this.apply({ action: 'dlq', reason: 'MAX_ATTEMPTS_EXCEEDED', detail: decision.reason }, message, limit, context);
         }
         const delaySeconds = retryDelaySeconds(message.receiveCount, this.options.retryBaseSeconds, this.options.retryMaxSeconds);
         await this.queue.changeVisibility(message, delaySeconds);
         this.metrics.retries.inc();
         this.logger.warn({ ...context, event: 'sqs_message_retry', reason: decision.reason, delaySeconds }, 'sqs message retry');
-        return;
+        return decision.action;
       }
       case 'dlq': {
         // Primeiro a DLQ, depois o delete: se cair no meio, a mensagem volta e o envio é deduplicado.
@@ -262,16 +293,17 @@ export class WagerConsumer {
         await this.queue.delete(message);
         this.metrics.dlqMessages.inc();
         this.logger.warn({ ...context, event: 'sqs_message_dead_lettered', reason: decision.reason }, 'sqs message sent to dlq');
-        return;
+        return decision.action;
       }
     }
   }
 
-  private async release(messages: readonly ReceivedMessage[]): Promise<void> {
+  /** Devolve à fila em `seconds` (0 = já). Falha aqui só atrasa: a visibilidade original expira. */
+  private async release(messages: readonly ReceivedMessage[], seconds = 0): Promise<void> {
     await Promise.all(
       messages.map(async (message) => {
         try {
-          await this.queue.changeVisibility(message, 0);
+          await this.queue.changeVisibility(message, seconds);
         } catch (error) {
           this.logger.warn(
             { sqsMessageId: message.sqsMessageId, event: 'sqs_release_failed', errorName: errorName(error) },

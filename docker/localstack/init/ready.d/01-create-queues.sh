@@ -7,7 +7,7 @@ set -euo pipefail
 REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 QUEUE_NAME="${SQS_WAGER_QUEUE_NAME:-wager-transactions.fifo}"
 DLQ_NAME="${SQS_WAGER_DLQ_NAME:-wager-transactions-dlq.fifo}"
-MAX_RECEIVE_COUNT="${SQS_MAX_RECEIVE_COUNT:-5}"
+MAX_RECEIVE_COUNT="${SQS_MAX_RECEIVE_COUNT:-10}"
 
 if ! [[ "$MAX_RECEIVE_COUNT" =~ ^[1-9][0-9]*$ ]] || (( MAX_RECEIVE_COUNT > 1000 )); then
   echo "SQS_MAX_RECEIVE_COUNT inválido: '${MAX_RECEIVE_COUNT}' (esperado inteiro entre 1 e 1000)" >&2

@@ -26,6 +26,8 @@ export interface AppConfig {
     readonly visibilityTimeoutSeconds: number;
     readonly retryBaseSeconds: number;
     readonly retryMaxSeconds: number;
+    /** Limite do consumidor (DLQ com motivo); o `maxReceiveCount` da fila fica acima, como rede de segurança. */
+    readonly maxAttempts: number;
     readonly shutdownTimeoutMs: number;
   };
   readonly healthCheckTimeoutMs: number;
@@ -139,6 +141,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       visibilityTimeoutSeconds: intInRange('SQS_VISIBILITY_TIMEOUT_SECONDS', 60, 1, 43_200),
       retryBaseSeconds: intInRange('SQS_RETRY_BASE_SECONDS', 30, 0, 43_200),
       retryMaxSeconds: intInRange('SQS_RETRY_MAX_SECONDS', 300, 0, 43_200),
+      maxAttempts: intInRange('SQS_CONSUMER_MAX_ATTEMPTS', 5, 1, 1000),
       shutdownTimeoutMs: intInRange('SQS_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
     },
     healthCheckTimeoutMs: positiveInt('HEALTH_CHECK_TIMEOUT_MS', 2000, 60_000),
