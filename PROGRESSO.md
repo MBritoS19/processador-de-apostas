@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **7 — Worker de referências pendentes** (aguardando plano)
+Fase atual: **9 — Testes de integração e concorrência** (aguardando plano)
 
 ---
 
@@ -75,9 +75,9 @@ Fase atual: **7 — Worker de referências pendentes** (aguardando plano)
 - [x] Publicação duplicada continua segura para o consumidor (mesmo `eventId`; dedup por `eventId` é contrato do consumidor, ARCHITECTURE §19)
 
 ## Fase 7 — Worker de referências pendentes (§7.1)
-- [ ] Reprocessamento com backoff exponencial
-- [ ] Limite de tentativas ou TTL definido e justificado
-- [ ] Ao esgotar: `REJECTED` + evento publicado
+- [x] Reprocessamento com backoff exponencial (mesmas regras via `WagerSettlement`; lock wallet → transação)
+- [x] Limite de tentativas ou TTL definido e justificado (TTL 1h do `createdAt`, ARCHITECTURE §20)
+- [x] Ao esgotar: `REJECTED` + evento publicado (`REFERENCE_NOT_FOUND` + `WagerTransactionRejected` na outbox, mesmo commit)
 
 ## Fase 8 — Observabilidade (§12)
 - [x] Logs JSON com `correlationId`, `transactionId`, `walletId`, `providerId` (HTTP e use case)
@@ -102,7 +102,7 @@ Concorrência (paralelismo real):
 - [ ] 4. 3 ou mais instâncias simultâneas
 - [ ] 5. Worker morto depois do commit e antes do ack
 - [ ] 6. Dois publishers sobre a mesma outbox
-- [ ] 7. ROLLBACK/REFUND entregue antes da referência
+- [x] 7. ROLLBACK/REFUND entregue antes da referência (Fase 7: HTTP/use case, fila SQS, dois workers, worker + use case)
 - [ ] 8. Reinício do serviço com consistência final comprovada
 - [ ] Invariante final em todos: `wallet.balance == saldo reconstruído pelo ledger`
 
@@ -170,10 +170,17 @@ Concorrência (paralelismo real):
 - Limite 5 no consumidor, redrive 10 na fila; backoff 30/60/120/240 (teto 300s); visibilidade 60s; long polling 20s; pausa do polling até 30s com banco fora — §18
 - Ordem do grupo preservada sem depender do broker (as seguintes recebem a mesma visibilidade da que falhou) — §18
 - Shutdown em `beforeApplicationShutdown`, timeout 25s, devolve visibilidade 0 do que não terminou — §18
+- `WagerSettlement` é a fonte única das regras + gravação (use case `insert`, worker `update`) — §20
+- Worker de pendentes: candidatas sem lock; por candidata wallet `SKIP LOCKED` → transação `FOR UPDATE`, relida — §20
+- Expiração por TTL de 1h a partir do `createdAt` (sem limite de tentativas); próxima checagem limitada ao prazo — §20
+- No prazo, referência ausente ou ainda pendente → `REFERENCE_NOT_FOUND` — §20
+- Caminho rápido: transação terminal antecipa as pendentes da mesma wallet que a referenciam (só com a wallet travada) — §20
+- Coluna `correlation_id` imutável; fallback `tx.id`; `causationId` = evento de pendência (fallback `tx.id`) — §20
+- 5 erros inesperados seguidos → FAILED `INFRASTRUCTURE_FAILURE`; 5 `wallet_busy` seguidos → espera o lock; contadores em memória por instância (heurística) — §20
+- `WagerTransactionRejected` aceita FAILED (`failureCode` distingue) — §20
 
 ## Pendências e bloqueios
 - `README.md` fica para a Fase 10; por ora os comandos estão só no CLAUDE.md, que é local (fora do git).
-- Fase 7: definir limite de tentativas/TTL de `PENDING_REFERENCE` (o backoff já está no domínio).
 - Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor do lançamento = valor da transação, nem o encadeamento `balance_before` (ARCHITECTURE §11). O use case garante, e `expectLedgerConsistent` verifica nos testes; a reconciliação da Fase 4 cobre em produção.
 - Decisão pendente: amarrar `payload.providerId` ao provider autenticado e escopar as consultas por provider (desenho em ARCHITECTURE §16). Sem isso, qualquer cliente submete em nome de qualquer provider e lê transações e saldos alheios.
 - Decisão pendente: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. Decidir se é intencional.
@@ -197,3 +204,4 @@ Concorrência (paralelismo real):
 - 2026-11-07 — Validação das Fases 4 e 8 (implementadas pelo Copilot; revisores correctness + interface): 14 achados corrigidos (erros do banco viravam 400, id não-UUID dava 500, FAILED em 503, label `kind` sem limite, reconciliação sem métrica, OPENING sem evento, envelope de erro, nomes reservados, cursor, correlationId, wrapper, convenções Prometheus, 202/409). Novo use case `OpenWallet`, factory `WagerTransaction.opening`, filtro global; ARCHITECTURE §16–17 reescritos. 437 testes passando (240 unit, 193 integração, 4 concorrência). — Próximo: Fase 5 (SQS), aguardando plano.
 - 2026-11-07 — Fase 5 concluída: consumidor SQS (inbox, ack após commit, retry com backoff, DLQ com motivo, FIFO por grupo, pausa do polling com banco fora, shutdown gracioso), `WageringCoreModule` compartilhado; revisão (correctness + test-evidence): 6 achados de código e 10 de testes corrigidos (redrive 10 / limite 5, ordem do grupo sem depender do broker, releitura da inbox, envelope ilegível → DLQ, loop único). ARCHITECTURE §18. 483 testes passando (259 unit, 220 integração, 4 concorrência). — Próximo: Fase 6 (outbox publisher), aguardando plano.
 - 2026-11-07 — Fase 6 concluída: outbox publisher em `wager-events.fifo` (claim com `FOR UPDATE SKIP LOCKED` publicando ainda com o lock, ordem por agregado via `seq`, `SendMessageBatch` com falha por entrada, backoff sem descarte nem DLQ, timeouts do SQS abaixo do idle timeout, métricas published/failures/retries/stuck e outbox lag, shutdown gracioso). Revisão (correctness + test-evidence): 4 achados de código e 14 de testes corrigidos (backfill ordenado do `seq`, reenvio um a um em 4xx, SDK sem retries + folga de 2s, falha parcial real do LocalStack, `pg_terminate_backend`, idle timeout, shutdown com timeout). ARCHITECTURE §19. 513 testes passando (263 unit, 244 integração, 6 concorrência). Observação: uma execução da integração travou uma vez sem atividade no banco e não se repetiu em duas execuções seguidas. — Próximo: Fase 7 (referências pendentes), aguardando plano.
+- 2026-11-07 — Fase 7 concluída: `WagerSettlement` extraído (commit próprio), worker de referências pendentes (SKIP LOCKED na wallet, TTL 1h, caminho rápido, `correlation_id`, FAILED após 5 erros, espera do lock após 5 `wallet_busy`), métricas e flag. Corrigido o travamento intermitente da suíte de integração (`killClaimSession` agora espera o término do backend). Revisão (correctness + test-evidence): 3 achados de código e 12 de testes corrigidos. ARCHITECTURE §20. — Próximo: Fase 9 (testes de integração e concorrência), aguardando plano.

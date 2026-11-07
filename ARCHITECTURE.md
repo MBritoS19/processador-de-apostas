@@ -148,7 +148,7 @@ PENDING ──► PENDING_REFERENCE ──► PENDING_REFERENCE (nova tentativa,
 ```
 
 - `create` nasce em `PENDING`. Ela rejeita `OPENING` (interno, criado só pela abertura de wallet), exige `referenceExternalTransactionId` não vazio em `REFUND`/`ROLLBACK`, exige valor > 0 nos kinds que movem saldo e aceita valor ≥ 0 em `LOSS`.
-- `markPendingReference(now)` serve à entrada (vindo de `PENDING`) e às novas tentativas (`PENDING_REFERENCE → PENDING_REFERENCE`). Cada chamada incrementa `referenceAttempts` e agenda `nextReferenceCheckAt = now + min(5s · 2^(n−1), 10min)`. O limite de tentativas/TTL fica para a Fase 7. Só aceita transação que tenha referência.
+- `markPendingReference(now)` serve à entrada (vindo de `PENDING`) e às novas tentativas (`PENDING_REFERENCE → PENDING_REFERENCE`). Cada chamada incrementa `referenceAttempts` e agenda `nextReferenceCheckAt = now + min(5s · 2^(n−1), 10min)`, limitado ao `deadline` opcional (o prazo da referência, §20). Só aceita transação que tenha referência.
 - `markProcessed(referenceTransactionId, at, observedBalance)` exige o id interno da referência em `REFUND`/`ROLLBACK` e o saldo observado (na moeda da transação); `reject(code, observedBalance?)` aceita o saldo opcional. Ver §10.
 - Qualquer transição a partir de `PROCESSED`, `REJECTED` ou `FAILED` lança `InvalidTransactionStateError`, porque é erro de programação e não caminho de negócio. `rehydrate` não revalida nada.
 - **Direção no ledger** (`ledgerDirectionFor`): `BET` → DEBIT; `WIN`, `REFUND` e `OPENING` → CREDIT; `LOSS` não tem direção (não gera lançamento); `ROLLBACK` inverte a direção da referência, que precisa ser `BET`, `WIN` ou `REFUND`.
@@ -169,7 +169,7 @@ Strings estáveis (contrato público: só se acrescenta; renomear é breaking ch
 | `WALLET_NOT_FOUND` | `walletId` inexistente | corrigir o payload |
 | `WALLET_PLAYER_MISMATCH` | a wallet não pertence ao `playerId` informado | corrigir o payload |
 | `CURRENCY_MISMATCH` | moeda da transação ≠ moeda da wallet ou da referência | corrigir o payload |
-| `REFERENCE_NOT_FOUND` | referência não apareceu até esgotar as tentativas de `PENDING_REFERENCE` | reenviar a referência e depois a reversão, como nova transação |
+| `REFERENCE_NOT_FOUND` | prazo de `PENDING_REFERENCE` esgotado (1h a partir do `createdAt`, §20) sem a referência resolvida: ausente **ou** ainda pendente | reenviar a referência e depois a reversão, como nova transação |
 | `REFERENCE_NOT_PROCESSED` | referência terminou `REJECTED` ou `FAILED` (se está `PENDING`/`PENDING_REFERENCE`, a reversão **aguarda**, não é rejeitada) | desistir: não há o que reverter |
 | `INVALID_REFERENCE_KIND` | `REFUND`, `WIN` ou `LOSS` que não referencia `BET`, ou `ROLLBACK` que não referencia `BET`/`WIN`/`REFUND` | corrigir o payload |
 | `REFERENCE_ALREADY_REVERSED` | a referência já tem um `REFUND` ou `ROLLBACK` `PROCESSED` (uma reversão no total, §15); vale também para `WIN`/`LOSS` sobre `BET` estornada | desistir (já aplicado) |
@@ -177,7 +177,7 @@ Strings estáveis (contrato público: só se acrescenta; renomear é breaking ch
 | `REFERENCE_ROUND_MISMATCH` | referência de outra rodada | corrigir o payload |
 | `REFERENCE_PLAYER_MISMATCH` | referência de outro player | corrigir o payload |
 | `REFERENCE_WALLET_MISMATCH` | referência de outra wallet | corrigir o payload |
-| `INFRASTRUCTURE_FAILURE` | erro permanente de infraestrutura (status `FAILED`, auditável) | reenviar mais tarde com nova transação |
+| `INFRASTRUCTURE_FAILURE` | erro permanente de infraestrutura (status `FAILED`, auditável). Fase 7: pendente encerrada pelo worker após 5 erros inesperados seguidos (§20) | reenviar mais tarde com nova transação |
 | `BALANCE_LIMIT_EXCEEDED` | crédito que levaria o saldo além do limite do `numeric(20,2)` (18 dígitos inteiros) — Fase 3 | tratamento operacional/manual |
 
 - Não existe código de "referência de outro provider": a referência é resolvida por `(providerId, referenceExternalTransactionId)`, então outro provider resulta em `REFERENCE_NOT_FOUND`.
@@ -231,7 +231,7 @@ Todas criadas em `Migration20261107100000_schema` e provadas uma a uma em `test/
 | Moeda da transação = moeda da wallet (exceto rejeitadas/falhas) | `fk_wager_tx_wallet_currency` sobre a coluna gerada `wallet_fk_currency` |
 | Referência interna existe e é da mesma wallet | `fk_wager_tx_reference` → `uq_wager_tx_id_wallet` |
 | Uma reversão `PROCESSED` por referência, no total (Fase 3, §15) | índice único parcial `ux_wager_tx_one_reversal (reference_transaction_id) WHERE status='PROCESSED' AND kind IN ('REFUND','ROLLBACK')` |
-| Transação terminal não muda; identidade/payload nunca mudam; transação nunca é apagada | trigger `trg_wager_transactions_guard` (BEFORE UPDATE OR DELETE) |
+| Transação terminal não muda; identidade/payload (e `correlation_id`, Fase 7) nunca mudam; transação nunca é apagada | trigger `trg_wager_transactions_guard` (BEFORE UPDATE OR DELETE) |
 | Ledger append-only | trigger `trg_ledger_append_only` (BEFORE UPDATE OR DELETE) |
 | Aritmética do lançamento | `ck_ledger_arithmetic`, `ck_ledger_amount_positive`, `ck_ledger_direction` |
 | No máximo um lançamento por transação e wallet | `uq_ledger_wallet_transaction` |
@@ -439,6 +439,12 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | `wagering_outbox_publish_failures_total` | counter | scope (`batch`, `entry`) | 6: chamada inteira falhou × entrada recusada |
 | `wagering_outbox_retries_total` | counter | — | 6: eventos reagendados com backoff |
 | `wagering_outbox_stuck_events` | gauge | — | 6: pendentes com `attempts >= OUTBOX_STUCK_ATTEMPTS` |
+| `wagering_pending_references` | gauge | — | 7: transações em PENDING_REFERENCE, medido a cada `PENDING_REFERENCE_GAUGE_INTERVAL_MS` (§20) |
+| `wagering_pending_reference_resolved_total` | counter | status (`PROCESSED`, `REJECTED`) | 7: resolvidas com a referência encontrada |
+| `wagering_pending_reference_expired_total` | counter | — | 7: prazo esgotado → `REFERENCE_NOT_FOUND` |
+| `wagering_pending_reference_rescheduled_total` | counter | — | 7: novas tentativas agendadas |
+| `wagering_pending_reference_failed_total` | counter | — | 7: encerradas como FAILED após erros inesperados seguidos |
+| `wagering_pending_reference_skipped_total` | counter | reason (`wallet_busy`, `not_due`, `transient`, `error`) | 7: candidatas puladas; `error` é o alerta de bug |
 
 - `GET /metrics` é aberto, como os health checks. Em produção ficaria numa porta interna ou atrás da rede do scraper.
 - **Limitação:** os contadores são por instância (o Prometheus soma). O contador em memória do `LoggingLockConflictTelemetry` fica só para os testes.
@@ -650,3 +656,102 @@ Procedimento operacional:
 
 - No máximo um evento por agregado por ciclo (ver acima).
 - Cada publisher mantém uma conexão ocupada por lote: com N instâncias, até N conexões do pool, além das usadas pelo tráfego.
+
+## 20. Worker de referências pendentes (Fase 7)
+
+Transações que chegam antes da referência (ROLLBACK/REFUND antes da BET, WIN/LOSS antes da BET) ficam `PENDING_REFERENCE` (§8, §15). O `PendingReferenceWorker` as reprocessa com **as mesmas regras** da entrada: `WagerSettlement` (`src/application/wagering/wager-settlement.ts`) é a fonte única de "resolver referência + aplicar regras + gravar transação, saldo, ledger e outbox", usada pelo `ProcessWagerTransaction` (modo `insert`) e pelo `ResolvePendingReferences` (modo `update`).
+
+### Fluxo
+
+1. **Busca, sem lock**, numa transação curta (índice parcial `ix_wager_tx_reference_check_due`):
+   ```sql
+   select id, wallet_id, player_id from wager_transactions
+   where status = 'PENDING_REFERENCE' and next_reference_check_at <= $now
+   order by next_reference_check_at limit $batch   -- 10
+   ```
+2. **Por candidata**, uma transação SQL própria (com o `lock_timeout` de 2s do use case):
+   1. wallet com `FOR UPDATE SKIP LOCKED` (ocupada → pula, `skipped{wallet_busy}`);
+   2. a transação com `FOR UPDATE`, relida;
+   3. se não estiver mais `PENDING_REFERENCE` ou não estiver vencida → pula (`not_due`): outra instância já tratou;
+   4. `WagerSettlement.settle(..., 'update')`: `UPDATE ... WHERE id = ? AND status = 'PENDING_REFERENCE'` (0 linhas = bug, lança), saldo com `version`, ledger, outbox e o caminho rápido, tudo no mesmo commit.
+3. **Resultado**:
+   - referência PROCESSED → regras normais: PROCESSED (lançamento, `observedBalance`, `WagerTransactionProcessed` + `WalletBalanceChanged`) ou REJECTED com o código da regra (`AMOUNT_MISMATCH`, `REFERENCE_*_MISMATCH`, `REVERSAL_WOULD_OVERDRAW`, `REFERENCE_ALREADY_REVERSED`… avaliados **no momento da resolução**);
+   - referência REJECTED/FAILED → `REFERENCE_NOT_PROCESSED`;
+   - referência ausente ou ainda PENDING/PENDING_REFERENCE → nova tentativa (`attempts++`, backoff), **sem evento**;
+   - prazo esgotado → REJECTED `REFERENCE_NOT_FOUND` + `WagerTransactionRejected`, no mesmo commit.
+
+### Ordem de locks e deadlock
+
+- Use case: wallet (`FOR UPDATE`) → INSERT da transação → UPDATE do caminho rápido (só pendentes **da mesma wallet**).
+- Worker: wallet (`SKIP LOCKED`) → transação pendente (`FOR UPDATE`) → UPDATE da pendente → caminho rápido (mesma wallet).
+- As duas ordens começam pela wallet, e nenhuma linha de outra wallet é travada: não há ciclo. O caminho rápido só roda quando a wallet foi travada; uma rejeição sem wallet do player (`WALLET_NOT_FOUND`, `WALLET_PLAYER_MISMATCH`) não antecipa nada, porque essa transação nunca serve de referência (a pendente veria `REFERENCE_PLAYER_MISMATCH`/`WALLET_MISMATCH` no próximo check normal).
+- `SKIP LOCKED` na wallet: o worker não fica esperando atrás do tráfego de entrada nem de outra instância. Testado: dois workers sobre as mesmas pendentes e worker + use case em paralelo na mesma wallet → efeito único, sem deadlock.
+
+### Backoff e expiração
+
+| Item | Valor | Por quê |
+|---|---|---|
+| Backoff | `5s · 2^(n−1)`, teto 10min | o primeiro retry pega o caso comum (a referência atrasada segundos, em outra fila/instância); o teto limita a latência de resolução quando a referência chega tarde |
+| Expiração | **TTL de 1h a partir do `createdAt`** (`PENDING_REFERENCE_TTL_MS`) | ver abaixo |
+| Clamp | próxima checagem = `min(now + backoff, createdAt + TTL)` | a última tentativa cai exatamente no prazo (~13 tentativas em 1h) |
+| Critério | `now >= createdAt + TTL` e a referência ainda não resolvida | |
+
+Por que **TTL e não número de tentativas**:
+- o caminho rápido e as referências encadeadas consomem tentativas de forma imprevisível; um limite por contagem expiraria cedo justamente as cadeias que estão andando;
+- o TTL é tempo de relógio: não depende de o worker ter ficado parado (um worker que volta depois do prazo expira na primeira checagem, mas ainda resolve se a referência já estiver PROCESSED);
+- 1h folga bem sobre a janela de retry do SQS (~7,5min até a DLQ, §18) e do HTTP; depois disso a referência só viria de reprocessamento manual, e o provedor precisa de uma resposta (`REFERENCE_NOT_FOUND` → reenviar referência e reversão como transações novas).
+
+**Interpretação:** no prazo, a transação expira com `REFERENCE_NOT_FOUND` também quando a referência existe mas ainda está pendente (pedido explícito; o código diz "não resolvida a tempo"). Uma referência que chega depois não ressuscita a rejeição: o replay devolve o REJECTED original.
+
+O TTL vale também para o use case (o primeiro agendamento já respeita o clamp): `WagerSettlement` recebe `ttlMs` da config nos dois caminhos.
+
+### Caminho rápido
+
+Quando uma transação vira terminal (use case **ou** worker), na mesma transação SQL:
+```sql
+update wager_transactions set next_reference_check_at = $now
+where status = 'PENDING_REFERENCE' and provider_id = $p and reference_external_transaction_id = $ext
+  and wallet_id = $w and next_reference_check_at > $now
+```
+- Só reduz latência: quem resolve continua sendo o worker, sob as regras normais. Não conta tentativa.
+- `wallet_id = $w` vai além do pedido (provider + id externo): mantém o UPDATE dentro da wallet travada. Uma pendente de outra wallet só perde a antecipação.
+- Disparado também pelo worker: resolver um REFUND antecipa o ROLLBACK que espera por ele (cadeias resolvem em ciclos seguidos, não no backoff).
+- O trigger de guarda permite: o status não é terminal e nenhuma coluna de identidade muda (testado).
+
+### Eventos: `correlationId` e `causationId`
+
+- Coluna `correlation_id` (migration `…500000_correlation_id`), gravada no INSERT pelo use case (e pela abertura de wallet) e **imutável** (entra na tupla do trigger de guarda).
+- Eventos do reprocessamento: `correlationId` = `correlation_id` da transação. **Fallback:** linhas anteriores à coluna (nulo) usam o `id` da transação.
+- `causationId` = `eventId` do `WagerTransactionPendingReference` da transação (a resolução é consequência da pendência). **Fallback:** sem esse evento (não acontece pelo use case; só em linhas inseridas por fora), o `id` da transação. O `WalletBalanceChanged` continua causado pelo `WagerTransactionProcessed`.
+
+### Replay
+
+O replay (mesma key e payload) devolve o estado persistido: depois da resolução, o status final e o `observed_balance` **da resolução** (não o saldo atual). Pela fila, uma mensagem nova com a mesma key é replay e grava a inbox sem novo efeito (testado).
+
+### Erros e heurísticas por candidata
+
+- **Falha transitória** (lock timeout, deadlock, version, banco fora): `skipped{transient}`; a candidata continua vencida e volta no ciclo seguinte.
+- **Erro inesperado** (bug, dado inconsistente): log `pending_reference_error` (só ids) + `skipped{error}` — **é o alerta**: sem intervenção, a candidata ficaria em PENDING_REFERENCE indefinidamente (e ocupando lugar no lote). Depois de **5 erros inesperados seguidos** da mesma candidata, o worker a encerra como **FAILED `INFRASTRUCTURE_FAILURE`** numa transação nova (lock da wallet com espera → lock da transação → ainda pendente? → `fail` + `WagerTransactionRejected` + caminho rápido), com `pending_reference_failed_total`. Falhas transitórias **não contam e não zeram** o contador; um sucesso zera.
+- **Wallet muito ativa**: depois de **5 `wallet_busy` seguidos** da mesma candidata, a próxima tentativa espera o lock da wallet (`FOR UPDATE` com o `lock_timeout` de 2s) em vez de pular, para não adiar para sempre.
+- Os dois contadores ficam **em memória, por instância**: são **heurística operacional, não garantia**. Zeram no restart, cada instância conta a sua parte (com N instâncias, encerrar como FAILED pode levar mais de 5 erros no total) e têm teto de 10 mil entradas. A correção não depende deles: decisões são tomadas sob lock, com releitura e UPDATE condicionado ao status no banco.
+- `WagerTransactionRejected` passou a aceitar FAILED; o `failureCode` (`INFRASTRUCTURE_FAILURE`) distingue do REJECTED de negócio.
+
+### Loop, flag e shutdown
+
+| Variável | Padrão | Motivo |
+|---|---|---|
+| `PENDING_REFERENCE_WORKER_ENABLED` | true | liga o loop no boot (desligado no `.env.test`) |
+| `PENDING_REFERENCE_BATCH_SIZE` | 10 | lote pequeno: cada candidata é uma transação; lote grande só atrasa o shutdown |
+| `PENDING_REFERENCE_POLL_INTERVAL_MS` | 1000 | espera só quando o lote vem vazio **ou nenhuma candidata avançou** (todas puladas/erro): sem laço quente com wallet ocupada ou bug |
+| `PENDING_REFERENCE_GAUGE_INTERVAL_MS` | 10000 | gauge de pendentes por intervalo, com ou sem carga |
+| `PENDING_REFERENCE_TTL_MS` | 3600000 | prazo da referência (acima) |
+| `PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS` | 25000 | abaixo do grace period de 30s |
+
+- Mesmo padrão do outbox publisher (§19): `start`/`stop` no módulo, `stop` em `beforeApplicationShutdown` (antes de o ORM fechar), erro do ciclo inteiro (banco fora) → pausa `1s·2^(n−1)` até 30s.
+- Shutdown: para **entre candidatas**; a candidata em andamento commita (testado). Prazo estourado: loga `pending_reference_worker_shutdown_timeout`; a transação abandonada sofre rollback quando o pool fecha e outra instância a reprocessa.
+- **Limitação:** `start()` logo depois de um `stop()` que estourou o prazo é ignorado (`already_running`) enquanto o loop antigo termina. Só acontece no shutdown do processo.
+
+### Limitações
+
+- Erros inesperados repetidos em mais de `batchSize` candidatas ao mesmo tempo seguram o lote até cada uma atingir 5 erros e virar FAILED.
+- Uma pendente cuja referência está numa **wallet diferente** não é antecipada (é rejeitada com `REFERENCE_WALLET_MISMATCH` no próximo check normal).
