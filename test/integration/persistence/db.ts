@@ -93,17 +93,51 @@ export function ledgerRow(overrides: Row & { wallet_id: string; transaction_id: 
 }
 
 /** Wallet BRL com saldo inicial, já com a transação OPENING e o lançamento CREDIT (como a Fase 4 fará). */
-export async function seedWallet(orm: MikroORM, balance: string): Promise<{ walletId: string; openingId: string }> {
-  const wallet = walletRow({ balance });
+export async function seedWallet(
+  orm: MikroORM,
+  balance: string,
+  overrides: Row = {},
+): Promise<{ walletId: string; openingId: string; playerId: string }> {
+  const wallet = walletRow({ balance, ...overrides });
   const walletId = wallet.id as string;
-  const opening = processed({ wallet_id: walletId, kind: 'OPENING', amount: balance, observed_balance: balance });
+  const playerId = wallet.player_id as string;
+  const currency = wallet.currency as string;
+  const opening = processed({
+    wallet_id: walletId,
+    player_id: playerId,
+    kind: 'OPENING',
+    amount: balance,
+    currency,
+    observed_balance: balance,
+  });
   const openingId = opening.id as string;
   await orm.em.getKnex().transaction(async (trx) => {
     await trx('wallets').insert(wallet);
     await trx('wager_transactions').insert(opening);
     await trx('wallet_ledger_entries').insert(
-      ledgerRow({ wallet_id: walletId, transaction_id: openingId, amount: balance, balance_after: balance }),
+      ledgerRow({ wallet_id: walletId, transaction_id: openingId, amount: balance, currency, balance_after: balance }),
     );
   });
-  return { walletId, openingId };
+  return { walletId, openingId, playerId };
+}
+
+/** `wallet.balance` == saldo reconstruído pelo ledger, e todo lançamento é de transação PROCESSED de mesmo valor. */
+export async function expectLedgerConsistent(orm: MikroORM, walletId: string): Promise<void> {
+  const knex = orm.em.getKnex();
+  const [row] = await knex.raw<{ rows: { balance: string; ledger: string }[] }>(
+    `select w.balance::text as balance,
+            coalesce(sum(case l.direction when 'CREDIT' then l.amount else -l.amount end), 0)::numeric(20,2)::text as ledger
+       from wallets w left join wallet_ledger_entries l on l.wallet_id = w.id
+      where w.id = ? group by w.id`,
+    [walletId],
+  ).then((r) => r.rows);
+  expect(row).toBeDefined();
+  expect(row?.ledger).toBe(row?.balance);
+
+  const orphans = await knex.raw<{ rows: unknown[] }>(
+    `select l.id from wallet_ledger_entries l join wager_transactions t on t.id = l.transaction_id
+      where l.wallet_id = ? and (t.status <> 'PROCESSED' or t.amount <> l.amount)`,
+    [walletId],
+  );
+  expect(orphans.rows).toEqual([]);
 }

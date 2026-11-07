@@ -236,7 +236,7 @@ describe('schema — constraints e triggers', () => {
       );
     });
 
-    describe('uma reversão PROCESSED por referência e por tipo', () => {
+    describe('uma reversão PROCESSED por referência, no total', () => {
       const reversal = (bet: Record<string, unknown>, kind: string, overrides: Record<string, unknown> = {}) =>
         processed({
           wallet_id: walletId,
@@ -252,18 +252,27 @@ describe('schema — constraints e triggers', () => {
         await expectPgError(
           db()('wager_transactions').insert(reversal(bet, kind)),
           PG.uniqueViolation,
-          'ux_wager_tx_one_reversal_per_kind',
+          'ux_wager_tx_one_reversal',
         );
       });
 
-      it('aceita REFUND e ROLLBACK da mesma referência, e reversões rejeitadas repetidas', async () => {
+      it('rejeita ROLLBACK PROCESSED de uma BET que já tem REFUND PROCESSED', async () => {
+        const bet = processed({ wallet_id: walletId });
+        await db()('wager_transactions').insert([bet, reversal(bet, 'REFUND')]);
+        await expectPgError(
+          db()('wager_transactions').insert(reversal(bet, 'ROLLBACK')),
+          PG.uniqueViolation,
+          'ux_wager_tx_one_reversal',
+        );
+      });
+
+      it('aceita reversões rejeitadas repetidas', async () => {
         const bet = processed({ wallet_id: walletId });
         const rejected = { status: 'REJECTED', processed_at: null, observed_balance: null, failure_code: 'REFERENCE_ALREADY_REVERSED' };
         await db()('wager_transactions').insert([
           bet,
           reversal(bet, 'REFUND'),
-          reversal(bet, 'ROLLBACK'),
-          reversal(bet, 'REFUND', rejected),
+          reversal(bet, 'ROLLBACK', rejected),
           reversal(bet, 'REFUND', rejected),
         ]);
       });

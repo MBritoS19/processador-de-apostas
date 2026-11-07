@@ -30,7 +30,7 @@
     "migration:create": "bun src/infrastructure/persistence/migrate.ts create",
     "test:unit": "bun test ./test/unit",
     "test:integration": "bun test ./test/integration",
-    "test:concurrency": "bun test ./test/concurrency --pass-with-no-tests",
+    "test:concurrency": "bun test ./test/concurrency",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
