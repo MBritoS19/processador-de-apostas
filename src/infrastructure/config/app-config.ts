@@ -45,11 +45,12 @@ export function loadConfig(env: Env = process.env): AppConfig {
   const positiveInt = (name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number => {
     const raw = env[name]?.trim();
     if (raw === undefined || raw === '') return fallback;
-    if (!/^\d+$/.test(raw) || Number(raw) <= 0 || Number(raw) > max) {
+    const value = Number(raw);
+    if (!/^\d+$/.test(raw) || value <= 0 || value > max) {
       problems.push(`${name} deve ser um inteiro entre 1 e ${max} (recebido: "${raw}")`);
       return fallback;
     }
-    return Number(raw);
+    return value;
   };
 
   const url = (name: string, value: string | undefined, protocols: readonly string[]): void => {

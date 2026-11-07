@@ -1,4 +1,4 @@
-import { Controller, Get, HttpCode, HttpStatus, Res } from '@nestjs/common';
+import { Controller, Get, HttpStatus, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { ReadinessService, type ReadinessReport } from '../../../application/health/readiness.service';
 
@@ -9,7 +9,6 @@ export class HealthController {
 
   /** Liveness: o processo responde. Não toca dependências, para não ser reiniciado por falha alheia. */
   @Get('live')
-  @HttpCode(HttpStatus.OK)
   live(): { status: 'alive' } {
     return { status: 'alive' };
   }

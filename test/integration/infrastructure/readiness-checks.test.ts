@@ -11,7 +11,7 @@ import { PostgresReadinessCheck } from '../../../src/infrastructure/persistence/
 const config = loadConfig();
 const CLOSED = 'http://127.0.0.1:1';
 const signal = () => new AbortController().signal;
-const toClose: Array<() => Promise<unknown> | unknown> = [];
+const toClose: Array<() => unknown> = [];
 
 afterAll(async () => {
   for (const close of toClose) await close();

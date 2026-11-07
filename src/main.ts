@@ -6,7 +6,7 @@ import { loadConfig } from './infrastructure/config/app-config';
 
 async function bootstrap(): Promise<void> {
   const config = loadConfig();
-  const app = await NestFactory.create(AppModule.register(config), { bufferLogs: false });
+  const app = await NestFactory.create(AppModule.register(config));
 
   // SIGTERM/SIGINT disparam onModuleDestroy/onApplicationShutdown (pool do ORM, consumidores).
   app.enableShutdownHooks();
