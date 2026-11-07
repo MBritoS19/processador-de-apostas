@@ -12,6 +12,8 @@ build/
 .env
 .env.*
 !.env.example
+# .env.test é versionado: só valores locais (ver comentário no arquivo)
+!.env.test
 
 # Logs e cobertura
 logs/

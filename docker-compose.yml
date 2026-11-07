@@ -1,0 +1,41 @@
+name: processador-de-apostas
+
+services:
+  postgres:
+    image: postgres:16.10-alpine
+    environment:
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+      POSTGRES_DB: wagering
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wagering -d wagering"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  localstack:
+    image: localstack/localstack:4.9.2
+    environment:
+      SERVICES: sqs
+      AWS_DEFAULT_REGION: us-east-1
+      SQS_WAGER_QUEUE_NAME: ${SQS_WAGER_QUEUE_NAME:-wager-transactions.fifo}
+      SQS_WAGER_DLQ_NAME: ${SQS_WAGER_DLQ_NAME:-wager-transactions-dlq.fifo}
+      SQS_MAX_RECEIVE_COUNT: ${SQS_MAX_RECEIVE_COUNT:-5}
+    ports:
+      - "127.0.0.1:4566:4566"
+    volumes:
+      - ./docker/localstack/init/ready.d:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      # Saudável só quando o init terminou E nenhum script falhou (completed=true não basta).
+      test: ["CMD-SHELL", "curl -fs http://localhost:4566/_localstack/init/ready | python3 -c \"import json,sys; d=json.load(sys.stdin); sys.exit(0 if d['completed'] and d['scripts'] and all(s['state']=='SUCCESSFUL' for s in d['scripts']) else 1)\""]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+volumes:
+  postgres-data:

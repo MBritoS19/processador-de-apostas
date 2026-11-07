@@ -2,17 +2,17 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **0 — Setup**
+Fase atual: **1 — Domínio** (aguardando início)
 
 ---
 
 ## Fase 0 — Setup do projeto
-- [ ] Projeto NestJS com Bun e TypeScript strict
-- [ ] `docker-compose.yml`: PostgreSQL + LocalStack
-- [ ] Criação das filas `wager-transactions.fifo` e `wager-transactions-dlq.fifo`, com redrive policy
-- [ ] MikroORM configurado, com migrations rodando (up e down)
-- [ ] Scripts do `package.json` batendo com o `CLAUDE.md`
-- [ ] `GET /health/live` e `GET /health/ready` (Postgres + SQS)
+- [x] Projeto NestJS com Bun e TypeScript strict
+- [x] `docker-compose.yml`: PostgreSQL + LocalStack
+- [x] Criação das filas `wager-transactions.fifo` e `wager-transactions-dlq.fifo`, com redrive policy
+- [x] MikroORM configurado, com migrations rodando (up e down)
+- [x] Scripts do `package.json` batendo com o `CLAUDE.md`
+- [x] `GET /health/live` e `GET /health/ready` (Postgres + SQS)
 
 ## Fase 1 — Domínio (CHALLENGE.md §6, §7)
 - [ ] `Money`: imutável, escala 2, validação de entradas (NaN, Infinity, notação científica, vazio, mais de 2 casas, negativo)
@@ -114,8 +114,20 @@ Concorrência (paralelismo real):
 
 ## Decisões tomadas
 <!-- Uma linha por decisão; o detalhe vai no ARCHITECTURE.md -->
+- MikroORM 6 com `EntitySchema` em infrastructure (domínio sem ORM) — ARCHITECTURE §2
+- Migrations em SQL escrito à mão, CLI próprio via `getMigrator()` — §3
+- LocalStack fixado em 4.9.2 (sem auth token); MiniStack como alternativa — §4
+- Filas FIFO sem dedup por conteúdo; redrive para DLQ com `maxReceiveCount=5` (revisar na Fase 5) — §5
+- Liveness não toca dependências; readiness com porta `ReadinessCheck`, 503 e `reason` fechado (timeout|unreachable|error) — §6
+- Contexto do ORM explícito em todas as entradas (`allowGlobalContext:false`, `registerRequestContext:false`) — §2
+- Conexão preguiçosa no app: sobe com o Postgres fora e reporta not_ready (sem crash loop) — §2
+- Módulos Nest por responsabilidade (Config global, Persistence, Messaging, Health) — §1
 
 ## Pendências e bloqueios
+- `README.md` fica para a Fase 10; por ora os comandos estão só no CLAUDE.md, que é local (fora do git).
+- Fase 9: remover `--pass-with-no-tests` do `test:concurrency` quando o primeiro teste de concorrência existir.
 
 ## Registro de sessões
 <!-- Data — o que foi feito — próximo passo -->
+- 2026-11-07 — Fase 0 concluída: projeto Bun+Nest+TS strict, compose (Postgres 16 + LocalStack 4.9.2), filas FIFO + DLQ, MikroORM + migrator, health live/ready. 21 testes passando (12 unit, 9 integração). — Próximo: Fase 1 (domínio), aguardando aprovação do plano.
+- 2026-11-07 — Revisão (6 revisores) da Fase 0: 2 médios + 13 baixos corrigidos (reason do readiness fechado e sem vazamento, nome de migration validado, CLI valida args antes de conectar, .env.test autossuficiente, portas em loopback, healthcheck do LocalStack checa falha de script, módulos Nest, boot tolerante a Postgres fora). 64 testes passando (44 unit, 20 integração). — Próximo: Fase 1.

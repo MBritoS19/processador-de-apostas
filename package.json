@@ -1,0 +1,39 @@
+{
+  "name": "processador-de-apostas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-sqs": "^3.1164.0",
+    "@mikro-orm/core": "^6",
+    "@mikro-orm/migrations": "^6",
+    "@mikro-orm/nestjs": "^6",
+    "@mikro-orm/postgresql": "^6",
+    "@nestjs/common": "^11",
+    "@nestjs/core": "^11",
+    "@nestjs/platform-express": "^11",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@nestjs/testing": "^11",
+    "@types/bun": "^1.4.4",
+    "@types/express": "^5.0.6",
+    "typescript": "^7.0.2"
+  },
+  "scripts": {
+    "start": "bun src/main.ts",
+    "start:dev": "bun --watch src/main.ts",
+    "migration:up": "bun src/infrastructure/persistence/migrate.ts up",
+    "migration:down": "bun src/infrastructure/persistence/migrate.ts down",
+    "migration:pending": "bun src/infrastructure/persistence/migrate.ts pending",
+    "migration:create": "bun src/infrastructure/persistence/migrate.ts create",
+    "test:unit": "bun test ./test/unit",
+    "test:integration": "bun test ./test/integration",
+    "test:concurrency": "bun test ./test/concurrency --pass-with-no-tests",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "bun": ">=1.4"
+  }
+}
