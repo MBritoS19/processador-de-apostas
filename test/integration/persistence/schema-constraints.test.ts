@@ -123,13 +123,27 @@ describe('schema — constraints e triggers', () => {
       ({ walletId } = await seedWallet(orm, '100.00'));
     });
 
-    it('rejeita idempotency_key duplicada', async () => {
+    it('rejeita idempotency_key duplicada no mesmo provider', async () => {
       const first = transactionRow({ wallet_id: walletId });
       await db()('wager_transactions').insert(first);
       await expectPgError(
         db()('wager_transactions').insert(transactionRow({ wallet_id: walletId, idempotency_key: first.idempotency_key })),
         PG.uniqueViolation,
-        'uq_wager_tx_idempotency_key',
+        'uq_wager_tx_provider_idempotency_key',
+      );
+    });
+
+    it('aceita a mesma idempotency_key em providers diferentes', async () => {
+      const first = transactionRow({ wallet_id: walletId });
+      await db()('wager_transactions').insert([
+        first,
+        transactionRow({ wallet_id: walletId, provider_id: 'provider-b', idempotency_key: first.idempotency_key }),
+      ]);
+    });
+
+    it('aceita failure_code BALANCE_LIMIT_EXCEEDED', async () => {
+      await db()('wager_transactions').insert(
+        transactionRow({ wallet_id: walletId, kind: 'WIN', status: 'REJECTED', failure_code: 'BALANCE_LIMIT_EXCEEDED' }),
       );
     });
 

@@ -7,6 +7,7 @@ test('taxonomia de FailureCode é estável e sem duplicatas', () => {
   expect(new Set(values).size).toBe(values.length);
   expect(values.sort()).toEqual([
     'AMOUNT_MISMATCH',
+    'BALANCE_LIMIT_EXCEEDED',
     'CURRENCY_MISMATCH',
     'INFRASTRUCTURE_FAILURE',
     'INSUFFICIENT_BALANCE',

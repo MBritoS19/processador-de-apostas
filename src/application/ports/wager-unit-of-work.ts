@@ -9,10 +9,15 @@ import type { WalletLedgerEntry } from '../../domain/wallet-ledger-entry';
  * saldo, ledger, outbox, inbox) é confirmado junto no COMMIT, ou nada é.
  */
 export interface WagerProcessingRepository {
-  /** `SELECT ... FOR UPDATE` da wallet: a única linha travada pela transação. */
-  lockWallet(walletId: string): Promise<Wallet | undefined>;
-  /** Transações com a idempotency key OU com o mesmo (providerId, externalTransactionId). */
-  findByIdempotency(idempotencyKey: string, providerId: string, externalTransactionId: string): Promise<WagerTransaction[]>;
+  /**
+   * `SELECT ... FOR UPDATE` da wallet do player: a única linha travada pela transação.
+   * Uma wallet de outro player não é travada (quem não é dono não segura o lock dela).
+   */
+  lockWallet(walletId: string, playerId: string): Promise<Wallet | undefined>;
+  /** Leitura sem lock, só para distinguir WALLET_NOT_FOUND de WALLET_PLAYER_MISMATCH. */
+  walletExists(walletId: string): Promise<boolean>;
+  /** Transações do provider com a idempotency key OU com o mesmo externalTransactionId. */
+  findByIdempotency(providerId: string, idempotencyKey: string, externalTransactionId: string): Promise<WagerTransaction[]>;
   /** Resolve uma referência pelo id externo no provedor. */
   findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | undefined>;
   /** Existe REFUND ou ROLLBACK PROCESSED desta transação? */
@@ -41,10 +46,19 @@ export class WalletVersionConflictError extends Error {
   }
 }
 
-/** Violação de unicidade (SQLSTATE 23505). A transação já sofreu rollback. */
+/**
+ * Qual unicidade foi violada: `idempotency` (key ou externalTransactionId do provider) ou
+ * `inbox` (mesma mensagem do mesmo consumidor). Outras violações não são traduzidas: são bug.
+ */
+export type UniqueViolationKind = 'idempotency' | 'inbox';
+
+/** Violação de unicidade (SQLSTATE 23505) esperada sob concorrência. A transação já sofreu rollback. */
 export class UniqueViolationError extends Error {
-  constructor(readonly constraint: string | undefined) {
-    super(`violação de unicidade${constraint ? ` (${constraint})` : ''}`);
+  constructor(
+    readonly kind: UniqueViolationKind,
+    options?: { cause?: unknown },
+  ) {
+    super(`violação de unicidade (${kind})`, options);
     this.name = 'UniqueViolationError';
   }
 }

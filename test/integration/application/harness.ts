@@ -9,7 +9,7 @@ import {
 } from '../../../src/application/wagering/process-wager-transaction';
 import { LoggingLockConflictTelemetry } from '../../../src/infrastructure/observability/lock-conflict-telemetry';
 import { MikroOrmWagerUnitOfWork } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
-import { randomIdGenerator } from '../../../src/infrastructure/system-clock';
+import { randomIdGenerator } from '../../../src/infrastructure/system-adapters';
 import { T0 } from '../persistence/db';
 
 export const fixedClock: Clock = { now: () => new Date(T0) };
@@ -57,7 +57,10 @@ export function command(
   };
 }
 
-/** Reenvia enquanto a falha for transitória, como um provedor faria (com limite). */
+/**
+ * Reenvia a MESMA requisição enquanto a falha for transitória, como um provedor faria:
+ * limite de tentativas e pequeno backoff com jitter (5–25 ms) para não reenviar em rajada.
+ */
 export async function untilSettled(
   run: () => Promise<ProcessWagerTransactionResult>,
   maxAttempts = 50,
@@ -65,6 +68,7 @@ export async function untilSettled(
   for (let attempt = 1; ; attempt++) {
     const result = await run();
     if (result.type !== 'TransientFailure' || attempt >= maxAttempts) return result;
+    await Bun.sleep(5 + Math.floor(Math.random() * 20));
   }
 }
 

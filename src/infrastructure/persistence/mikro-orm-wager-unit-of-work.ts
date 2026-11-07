@@ -4,12 +4,13 @@ import {
   TransientPersistenceError,
   UniqueViolationError,
   WalletVersionConflictError,
+  type UniqueViolationKind,
   type WagerProcessingRepository,
   type WagerUnitOfWork,
 } from '../../application/ports/wager-unit-of-work';
 import type { InboxMessage } from '../../domain/inbox-message';
 import type { OutboxMessage } from '../../domain/outbox-message';
-import { WagerTransactionKind, WagerTransactionStatus, type WagerTransaction } from '../../domain/wager-transaction';
+import { REVERSAL_KINDS, WagerTransactionStatus, type WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
 import type { WalletLedgerEntry } from '../../domain/wallet-ledger-entry';
 import { isNetworkError } from '../network-errors';
@@ -49,15 +50,25 @@ export class MikroOrmWagerUnitOfWork implements WagerUnitOfWork {
         return work(new MikroOrmWagerProcessingRepository(em));
       });
     } catch (error) {
-      throw translate(error);
+      throw translatePersistenceError(error);
     }
   }
 }
 
-function translate(error: unknown): unknown {
+/** Unicidades que concorrência ou reentrega violam legitimamente. As demais são bug e saem sem tradução. */
+const EXPECTED_UNIQUE_VIOLATIONS: Readonly<Record<string, UniqueViolationKind>> = {
+  uq_wager_tx_provider_idempotency_key: 'idempotency',
+  uq_wager_tx_provider_external: 'idempotency',
+  pk_inbox_messages: 'inbox',
+};
+
+/** Traduz erros do driver/ORM para os erros da porta. Exportada para teste. */
+export function translatePersistenceError(error: unknown): unknown {
   const { code, constraint, name } = (error ?? {}) as { code?: unknown; constraint?: unknown; name?: unknown };
-  if (code === '23505') return new UniqueViolationError(typeof constraint === 'string' ? constraint : undefined);
-  if (typeof code === 'string' && code in TRANSIENT_SQLSTATES) {
+  if (code === '23505' && typeof constraint === 'string' && Object.hasOwn(EXPECTED_UNIQUE_VIOLATIONS, constraint)) {
+    return new UniqueViolationError(EXPECTED_UNIQUE_VIOLATIONS[constraint] as UniqueViolationKind, { cause: error });
+  }
+  if (typeof code === 'string' && Object.hasOwn(TRANSIENT_SQLSTATES, code)) {
     return new TransientPersistenceError(TRANSIENT_SQLSTATES[code as keyof typeof TRANSIENT_SQLSTATES], { cause: error });
   }
   // Pool esgotado (tarn/knex) ou banco fora do ar.
@@ -70,18 +81,27 @@ function translate(error: unknown): unknown {
 class MikroOrmWagerProcessingRepository implements WagerProcessingRepository {
   constructor(private readonly em: EntityManager) {}
 
-  async lockWallet(walletId: string): Promise<Wallet | undefined> {
-    const record = await this.em.findOne(WalletRecord, { id: walletId }, { lockMode: LockMode.PESSIMISTIC_WRITE });
+  async lockWallet(walletId: string, playerId: string): Promise<Wallet | undefined> {
+    const record = await this.em.findOne(
+      WalletRecord,
+      { id: walletId, playerId },
+      { lockMode: LockMode.PESSIMISTIC_WRITE },
+    );
     return record ? toWallet(record) : undefined;
   }
 
+  async walletExists(walletId: string): Promise<boolean> {
+    return (await this.em.count(WalletRecord, { id: walletId })) > 0;
+  }
+
   async findByIdempotency(
-    idempotencyKey: string,
     providerId: string,
+    idempotencyKey: string,
     externalTransactionId: string,
   ): Promise<WagerTransaction[]> {
     const records = await this.em.find(WagerTransactionRecord, {
-      $or: [{ idempotencyKey }, { providerId, externalTransactionId }],
+      providerId,
+      $or: [{ idempotencyKey }, { externalTransactionId }],
     });
     return records.map(toWagerTransaction);
   }
@@ -94,7 +114,7 @@ class MikroOrmWagerProcessingRepository implements WagerProcessingRepository {
   async hasProcessedReversal(referenceTransactionId: string): Promise<boolean> {
     const count = await this.em.count(WagerTransactionRecord, {
       referenceTransactionId,
-      kind: { $in: [WagerTransactionKind.Refund, WagerTransactionKind.Rollback] },
+      kind: { $in: [...REVERSAL_KINDS] },
       status: WagerTransactionStatus.Processed,
     });
     return count > 0;

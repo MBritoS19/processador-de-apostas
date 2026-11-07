@@ -14,8 +14,9 @@ export enum FailureCode {
   ReferenceNotFound = 'REFERENCE_NOT_FOUND',
   /** Referência terminou REJECTED ou FAILED (PENDING/PENDING_REFERENCE significam aguardar). */
   ReferenceNotProcessed = 'REFERENCE_NOT_PROCESSED',
-  /** REFUND que não referencia BET, ou ROLLBACK que não referencia BET/WIN/REFUND. */
+  /** REFUND, WIN ou LOSS que não referencia BET, ou ROLLBACK que não referencia BET/WIN/REFUND. */
   InvalidReferenceKind = 'INVALID_REFERENCE_KIND',
+  /** A referência já tem REFUND/ROLLBACK processado (vale para reversões e para WIN/LOSS sobre BET estornada). */
   ReferenceAlreadyReversed = 'REFERENCE_ALREADY_REVERSED',
   AmountMismatch = 'AMOUNT_MISMATCH',
   ReferenceRoundMismatch = 'REFERENCE_ROUND_MISMATCH',
@@ -23,4 +24,6 @@ export enum FailureCode {
   ReferenceWalletMismatch = 'REFERENCE_WALLET_MISMATCH',
   /** Erro permanente de infraestrutura (status FAILED). */
   InfrastructureFailure = 'INFRASTRUCTURE_FAILURE',
+  /** Crédito que levaria o saldo além do limite do numeric(20,2) (18 dígitos inteiros). */
+  BalanceLimitExceeded = 'BALANCE_LIMIT_EXCEEDED',
 }

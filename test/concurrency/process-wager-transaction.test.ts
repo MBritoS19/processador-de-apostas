@@ -10,6 +10,9 @@ import { expectLedgerConsistent, openOrm, seedWallet, truncateAll } from '../int
  * Paralelismo real: cada "instância" é um MikroORM próprio (pool e conexões separados),
  * e cada execução abre seu EntityManager (fork) e sua transação. Nada é sequencial.
  */
+/** Folga para máquinas lentas: lock_timeout (2s) + espera de pool podem somar mais que os 5s padrão. */
+const TIMEOUT_MS = 30_000;
+
 describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
   const INSTANCES = 3;
   let instances: MikroORM[];
@@ -17,7 +20,9 @@ describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
   let orm: MikroORM;
 
   beforeAll(async () => {
-    instances = await Promise.all(Array.from({ length: INSTANCES }, () => openOrm()));
+    // A primeira instância migra sozinha; as outras só abrem (sem migrators concorrentes).
+    const first = await openOrm();
+    instances = [first, ...(await Promise.all(Array.from({ length: INSTANCES - 1 }, () => openOrm())))];
     [orm] = instances as [MikroORM];
     useCases = instances.map((instance) => buildUseCase(instance).useCase);
   });
@@ -35,9 +40,10 @@ describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
 
   it('cenário obrigatório: saldo 100.00, duas BETs de 80.00 em paralelo → uma PROCESSED, uma REJECTED, saldo 20.00, um débito', async () => {
     const wallet = await seedWallet(orm, '100.00');
-    const bet = () => command(wallet, { money: { amount: '80.00', currency: 'BRL' } });
+    // Duas apostas distintas; cada uma, se falhar transitoriamente, é reenviada idêntica.
+    const bets = [0, 1].map(() => command(wallet, { money: { amount: '80.00', currency: 'BRL' } }));
 
-    const results = await Promise.all([0, 1].map((i) => untilSettled(() => useCaseFor(i).execute(bet()))));
+    const results = await Promise.all(bets.map((bet, i) => untilSettled(() => useCaseFor(i).execute(bet))));
 
     const processed = results.filter((r) => r.type === 'Processed');
     const rejected = results.filter((r): r is Extract<ProcessWagerTransactionResult, { type: 'Rejected' }> => r.type === 'Rejected');
@@ -68,7 +74,7 @@ describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
     expect(await debits(wallet.walletId)).toBe(1);
     expect(await walletBalance(orm, wallet.walletId)).toBe('70.00');
     await expectLedgerConsistent(orm, wallet.walletId);
-  });
+  }, TIMEOUT_MS);
 
   it('mesma key com walletIds diferentes em paralelo (locks distintos) → uma processada, a outra conflito (sob lock ou via 23505)', async () => {
     const a = await seedWallet(orm, '100.00');
@@ -86,11 +92,8 @@ describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
 
   it('BETs concorrentes até esgotar o saldo: nunca negativo, um débito por aceite', async () => {
     const wallet = await seedWallet(orm, '100.00');
-    const results = await Promise.all(
-      Array.from({ length: 30 }, (_, i) =>
-        untilSettled(() => useCaseFor(i).execute(command(wallet, { money: { amount: '7.00', currency: 'BRL' } }))),
-      ),
-    );
+    const bets = Array.from({ length: 30 }, () => command(wallet, { money: { amount: '7.00', currency: 'BRL' } }));
+    const results = await Promise.all(bets.map((bet, i) => untilSettled(() => useCaseFor(i).execute(bet))));
 
     const accepted = results.filter((r) => r.type === 'Processed').length;
     expect(accepted).toBe(14); // 14 × 7.00 = 98.00
@@ -98,5 +101,5 @@ describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
     expect(await walletBalance(orm, wallet.walletId)).toBe('2.00');
     expect(await debits(wallet.walletId)).toBe(14);
     await expectLedgerConsistent(orm, wallet.walletId);
-  });
+  }, TIMEOUT_MS);
 });

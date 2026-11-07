@@ -57,6 +57,13 @@ describe('ProcessWagerTransaction — validação antes de qualquer gravação',
     expect(unitOfWork.calls).toBe(0);
   });
 
+  it.each([null, undefined, 'texto'])('payload %p → InvalidInput', async (payload) => {
+    const { useCase, unitOfWork } = setup();
+    const command = { ...cmd(), payload } as unknown as ProcessWagerTransactionCommand;
+    expect(await useCase.execute(command)).toEqual({ type: 'InvalidInput', reason: 'payload é obrigatório' });
+    expect(unitOfWork.calls).toBe(0);
+  });
+
   it('idempotencyKey vazia → InvalidInput', async () => {
     const { useCase, unitOfWork } = setup();
     expect((await useCase.execute({ ...cmd(), idempotencyKey: '' })).type).toBe('InvalidInput');
@@ -93,6 +100,6 @@ describe('ProcessWagerTransaction — falhas de concorrência', () => {
 
   it('erro desconhecido é relançado (bug, não falha transitória)', async () => {
     const { useCase } = setup(new Error('boom'));
-    expect(useCase.execute(cmd())).rejects.toThrow('boom');
+    await expect(useCase.execute(cmd())).rejects.toThrow('boom');
   });
 });

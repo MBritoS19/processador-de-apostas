@@ -186,6 +186,26 @@ describe('WagerTransaction — consultas', () => {
     expect(withRef(Kind.Rollback).ledgerDirectionFor(reference)).toBe(expected);
   });
 
+  test('isReversal só para REFUND e ROLLBACK', () => {
+    expect(withRef(Kind.Refund).isReversal()).toBe(true);
+    expect(withRef(Kind.Rollback).isReversal()).toBe(true);
+    for (const kind of [Kind.Bet, Kind.Win, Kind.Loss]) expect(newTransaction({ kind }).isReversal()).toBe(false);
+  });
+
+  test.each([
+    [Kind.Refund, [Kind.Bet]],
+    [Kind.Win, [Kind.Bet]],
+    [Kind.Loss, [Kind.Bet]],
+    [Kind.Rollback, [Kind.Bet, Kind.Win, Kind.Refund]],
+    [Kind.Bet, []],
+  ])('canReference: %s aceita %p', (kind, accepted) => {
+    const tx = kind === Kind.Refund || kind === Kind.Rollback ? withRef(kind) : newTransaction({ kind });
+    for (const refKind of [Kind.Bet, Kind.Win, Kind.Loss, Kind.Refund, Kind.Rollback]) {
+      const reference = refKind === Kind.Refund || refKind === Kind.Rollback ? withRef(refKind) : newTransaction({ kind: refKind });
+      expect(tx.canReference(reference)).toBe(accepted.includes(refKind));
+    }
+  });
+
   test('ROLLBACK sem referência ou de LOSS/ROLLBACK lança erro', () => {
     const rollback = withRef(Kind.Rollback);
     expect(() => rollback.ledgerDirectionFor()).toThrow(InvalidWagerTransactionError);

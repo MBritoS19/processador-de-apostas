@@ -31,8 +31,21 @@ const TERMINAL = new Set([
   WagerTransactionStatus.Rejected,
   WagerTransactionStatus.Failed,
 ]);
-const REQUIRES_REFERENCE = new Set([WagerTransactionKind.Refund, WagerTransactionKind.Rollback]);
+/** Kinds que revertem outra transação (e por isso exigem referência). Fonte única para application e infra. */
+export const REVERSAL_KINDS: readonly WagerTransactionKind[] = Object.freeze([
+  WagerTransactionKind.Refund,
+  WagerTransactionKind.Rollback,
+]);
+const REVERSALS = new Set(REVERSAL_KINDS);
 const ROLLBACKABLE = new Set([WagerTransactionKind.Bet, WagerTransactionKind.Win, WagerTransactionKind.Refund]);
+const BET_ONLY = new Set([WagerTransactionKind.Bet]);
+/** Kinds que a referência de cada operação pode ter. WIN/LOSS só referenciam a BET da rodada. */
+const REFERENCEABLE: Partial<Record<WagerTransactionKind, ReadonlySet<WagerTransactionKind>>> = {
+  [WagerTransactionKind.Win]: BET_ONLY,
+  [WagerTransactionKind.Loss]: BET_ONLY,
+  [WagerTransactionKind.Refund]: BET_ONLY,
+  [WagerTransactionKind.Rollback]: ROLLBACKABLE,
+};
 
 export interface CreateWagerTransactionProps {
   id: string;
@@ -119,7 +132,7 @@ export class WagerTransaction {
     if (kind === WagerTransactionKind.Opening) {
       throw new InvalidWagerTransactionError('OPENING é interno e não pode ser submetido');
     }
-    if (REQUIRES_REFERENCE.has(kind) && (reference === undefined || reference.trim() === '')) {
+    if (REVERSALS.has(kind) && (reference === undefined || reference.trim() === '')) {
       throw new InvalidWagerTransactionError(`${kind} exige referenceExternalTransactionId`);
     }
     if (kind === WagerTransactionKind.Loss ? money.isNegative() : !money.isPositive()) {
@@ -219,7 +232,20 @@ export class WagerTransaction {
   }
 
   requiresReference(): boolean {
-    return REQUIRES_REFERENCE.has(this.kind);
+    return REVERSALS.has(this.kind);
+  }
+
+  /** REFUND ou ROLLBACK. */
+  isReversal(): boolean {
+    return REVERSALS.has(this.kind);
+  }
+
+  /**
+   * O kind da referência é aceito para esta operação? REFUND, WIN e LOSS → BET;
+   * ROLLBACK → BET, WIN ou REFUND. BET e OPENING não referenciam nada.
+   */
+  canReference(reference: WagerTransaction): boolean {
+    return REFERENCEABLE[this.kind]?.has(reference.kind) ?? false;
   }
 
   matchesPayload(payloadHash: string): boolean {
@@ -238,7 +264,7 @@ export class WagerTransaction {
       case WagerTransactionKind.Loss:
         throw new InvalidWagerTransactionError('LOSS não movimenta saldo');
       case WagerTransactionKind.Rollback:
-        if (reference === undefined || !ROLLBACKABLE.has(reference.kind)) {
+        if (reference === undefined || !this.canReference(reference)) {
           throw new InvalidWagerTransactionError('ROLLBACK exige referência BET, WIN ou REFUND');
         }
         return reference.ledgerDirectionFor() === LedgerDirection.Debit

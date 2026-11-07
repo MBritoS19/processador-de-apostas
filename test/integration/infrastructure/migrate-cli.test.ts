@@ -27,7 +27,7 @@ async function cli(...args: string[]): Promise<{ code: number; stdout: string; s
 describe('CLI de migrations', () => {
   let orm: MikroORM;
   const applied = async () =>
-    (await orm.em.getConnection().execute<{ name: string }[]>('select name from mikro_orm_migrations')).map(
+    (await orm.em.getConnection().execute<{ name: string }[]>('select name from mikro_orm_migrations order by id')).map(
       (row) => row.name,
     );
 

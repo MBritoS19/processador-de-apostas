@@ -73,6 +73,37 @@ describe('migrations', () => {
     expect(await existingSchemaObjects()).toEqual(SCHEMA_OBJECTS);
   });
 
+  it('down das migrations da Fase 3 restaura os índices e constraints da Fase 2', async () => {
+    const migrator = orm.getMigrator();
+    await migrator.up();
+    const schemaObjects = async () => {
+      const rows = await orm.em.getConnection().execute<{ name: string; definition: string }[]>(
+        `select indexname as name, indexdef as definition from pg_indexes where tablename = 'wager_transactions'
+         union all
+         select conname, pg_get_constraintdef(oid) from pg_constraint
+          where conrelid = 'wager_transactions'::regclass and conname = 'ck_wager_tx_failure_code'`,
+      );
+      return Object.fromEntries(rows.map((row) => [row.name, row.definition]));
+    };
+
+    const phase3 = await schemaObjects();
+    expect(Object.keys(phase3)).toEqual(
+      expect.arrayContaining(['ux_wager_tx_one_reversal', 'uq_wager_tx_provider_idempotency_key']),
+    );
+    expect(phase3.ck_wager_tx_failure_code).toContain('BALANCE_LIMIT_EXCEEDED');
+
+    for (let i = 0; i < 3; i++) await migrator.down();
+    const phase2 = await schemaObjects();
+    expect(phase2).toHaveProperty('ux_wager_tx_one_reversal_per_kind');
+    expect(phase2).toHaveProperty('uq_wager_tx_idempotency_key');
+    expect(phase2).not.toHaveProperty('ux_wager_tx_one_reversal');
+    expect(phase2).not.toHaveProperty('uq_wager_tx_provider_idempotency_key');
+    expect(phase2.ck_wager_tx_failure_code).not.toContain('BALANCE_LIMIT_EXCEEDED');
+
+    await migrator.up();
+    expect(await schemaObjects()).toEqual(phase3);
+  });
+
   it('up é idempotente', async () => {
     // Monta o próprio estado: não depende da ordem dos testes anteriores.
     await orm.getMigrator().up();

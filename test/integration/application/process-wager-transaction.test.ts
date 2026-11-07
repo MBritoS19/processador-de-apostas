@@ -10,8 +10,20 @@ import { FailureCode } from '../../../src/domain/failure-code';
 import { Money } from '../../../src/domain/money';
 import { Wallet } from '../../../src/domain/wallet';
 import { MikroOrmWagerUnitOfWork } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
-import { T0, expectLedgerConsistent, openOrm, seedWallet, truncateAll } from '../persistence/db';
+import { T0, expectLedgerConsistent, openOrm, seedWallet, transactionRow, truncateAll } from '../persistence/db';
 import { buildUseCase, command, countRows, walletBalance, type WalletRef } from './harness';
+
+/** Espera até alguma sessão estar bloqueada em lock (o INSERT do use case esperando a unicidade). */
+async function waitForLockWait(orm: MikroORM): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    const { rows } = await orm.em
+      .getKnex()
+      .raw<{ rows: { n: string }[] }>(`select count(*) as n from pg_stat_activity where wait_event_type = 'Lock'`);
+    if (Number(rows[0]?.n) > 0) return;
+    await Bun.sleep(10);
+  }
+  throw new Error('nenhuma sessão ficou esperando lock');
+}
 
 describe('ProcessWagerTransaction (Postgres real)', () => {
   let orm: MikroORM;
@@ -268,6 +280,27 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       expect(await walletBalance(orm, wallet.walletId)).toBe('100.00');
     });
 
+    it.each(['WIN', 'LOSS'])('REFERENCE_ALREADY_REVERSED: %s sobre BET já estornada (não credita duas vezes)', async (kind) => {
+      const bet = await processedTx({});
+      await processedTx({ kind: 'REFUND', referenceExternalTransactionId: bet.external });
+      const result = await expectType(
+        command(wallet, { kind, referenceExternalTransactionId: bet.external, money: { amount: '50.00', currency: 'BRL' } }),
+        'Rejected',
+      );
+      expect(result).toMatchObject({ failureCode: FailureCode.ReferenceAlreadyReversed, balance: { amount: '100.00' } });
+      expect(await walletBalance(orm, wallet.walletId)).toBe('100.00');
+    });
+
+    it('CURRENCY_MISMATCH na referência: BET rejeitada em outra moeda', async () => {
+      const usdBet = command(wallet, { money: { amount: '10.00', currency: 'USD' } });
+      expect((await expectType(usdBet, 'Rejected')).failureCode).toBe(FailureCode.CurrencyMismatch);
+      const result = await expectType(
+        command(wallet, { kind: 'REFUND', referenceExternalTransactionId: usdBet.payload.externalTransactionId }),
+        'Rejected',
+      );
+      expect(result.failureCode).toBe(FailureCode.CurrencyMismatch);
+    });
+
     it('referência de outro provider não é encontrada → PENDING_REFERENCE', async () => {
       const bet = await processedTx({});
       await expectType(
@@ -295,6 +328,28 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       const result = await expectType(command(wallet, { money: { amount: '10.00', currency: 'USD' } }), 'Rejected');
       expect(result.failureCode).toBe(FailureCode.CurrencyMismatch);
     });
+
+    it('quem não é dono não espera pelo lock da wallet: WALLET_PLAYER_MISMATCH mesmo com a wallet travada', async () => {
+      const { useCase: impatient } = buildUseCase(orm, { lockTimeoutMs: 200 });
+      const trx = await orm.em.getKnex().transaction();
+      try {
+        await trx.raw('select id from wallets where id = ? for update', [wallet.walletId]);
+        const result = await impatient.execute(command({ ...wallet, playerId: 'intruder' }, {}));
+        expect(result).toMatchObject({ type: 'Rejected', failureCode: FailureCode.WalletPlayerMismatch });
+      } finally {
+        await trx.rollback();
+      }
+    });
+  });
+
+  describe('limite do saldo', () => {
+    it('crédito que passaria do numeric(20,2) → BALANCE_LIMIT_EXCEEDED, saldo intacto', async () => {
+      const rich = await seedWallet(orm, '999999999999999999.00');
+      const result = await expectType(command(rich, { kind: 'WIN', money: { amount: '1.00', currency: 'BRL' } }), 'Rejected');
+      expect(result).toMatchObject({ failureCode: FailureCode.BalanceLimitExceeded, balance: { amount: '999999999999999999.00' } });
+      expect(await walletBalance(orm, rich.walletId)).toBe('999999999999999999.00');
+      await expectLedgerConsistent(orm, rich.walletId);
+    });
   });
 
   describe('entrada inválida → InvalidInput, nada gravado', () => {
@@ -317,6 +372,10 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       ['REFUND sem referência', { kind: 'REFUND' }],
       ['BET com referência', { referenceExternalTransactionId: 'x' }],
       ['playerId vazio', { playerId: ' ' }],
+      ['playerId não-texto', { playerId: 123 }],
+      ['externalTransactionId acima de 256 caracteres', { externalTransactionId: 'x'.repeat(257) }],
+      ['referência acima de 256 caracteres', { kind: 'WIN', referenceExternalTransactionId: 'r'.repeat(257) }],
+      ['transação referenciando a si mesma', { kind: 'WIN', externalTransactionId: 'self', referenceExternalTransactionId: 'self' }],
     ])('%s', async (_, payload) => {
       expect((await run(command(wallet, payload))).type).toBe('InvalidInput');
       expect(await countRows(orm, 'wager_transactions')).toBe(1);
@@ -373,6 +432,19 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       await expectType({ ...first, idempotencyKey: 'another-key' }, 'IdempotencyConflict');
     });
 
+    it('idempotency key acima de 256 caracteres → InvalidInput', async () => {
+      expect((await run({ ...command(wallet, {}), idempotencyKey: 'k'.repeat(257) })).type).toBe('InvalidInput');
+    });
+
+    it('a mesma key em providers diferentes não colide: cada um tem a sua transação', async () => {
+      const a = command(wallet, { providerId: 'provider-a' }, { idempotencyKey: 'shared-key' });
+      const b = command(wallet, { providerId: 'provider-b' }, { idempotencyKey: 'shared-key' });
+      const resultA = await expectType(a, 'Processed');
+      const resultB = await expectType(b, 'Processed');
+      expect(resultB.transactionId).not.toBe(resultA.transactionId);
+      expect(await walletBalance(orm, wallet.walletId)).toBe('80.00');
+    });
+
     it('header e metadados não entram no hash: outro correlationId é replay', async () => {
       const first = command(wallet, {});
       await expectType(first, 'Processed');
@@ -405,6 +477,28 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       expect(await run({ ...cmd, inbox: inbox('msg-2') })).toMatchObject({ idempotentReplay: true });
       expect(await countRows(orm, 'inbox_messages')).toBe(2);
     });
+
+    it('mensagem já usada por outra transação → conflito sem id, e rollback de tudo (transação, saldo, ledger, outbox)', async () => {
+      await expectType(command(wallet, {}, { inbox: inbox('msg-X') }), 'Processed');
+      const before = {
+        transactions: await countRows(orm, 'wager_transactions'),
+        ledger: await countRows(orm, 'wallet_ledger_entries'),
+        outbox: await countRows(orm, 'outbox_messages'),
+        balance: await walletBalance(orm, wallet.walletId),
+      };
+
+      // Outra transação (outra key) com o mesmo messageId: o INSERT da inbox é o último e falha.
+      const other = command(wallet, { money: { amount: '30.00', currency: 'BRL' } }, { inbox: inbox('msg-X') });
+      expect(await run(other)).toEqual({ type: 'IdempotencyConflict' });
+
+      expect({
+        transactions: await countRows(orm, 'wager_transactions'),
+        ledger: await countRows(orm, 'wallet_ledger_entries'),
+        outbox: await countRows(orm, 'outbox_messages'),
+        balance: await walletBalance(orm, wallet.walletId),
+      }).toEqual(before);
+      expect(await countRows(orm, 'wager_transactions', { external_transaction_id: other.payload.externalTransactionId })).toBe(0);
+    });
   });
 
   describe('concorrência (barreiras)', () => {
@@ -423,10 +517,39 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       expect(await countRows(orm, 'wager_transactions')).toBe(1);
     });
 
+    it('INSERT bloqueado pela unicidade e liberado depois → 23505 relido como conflito (determinístico)', async () => {
+      const other = await seedWallet(orm, '100.00');
+      const cmd = command(wallet, {});
+      const knex = orm.em.getKnex();
+      const trx = await knex.transaction();
+      let pending: Promise<ProcessWagerTransactionResult> | undefined;
+      try {
+        // Linha concorrente, ainda não commitada, com o mesmo (provider, externalTransactionId) em outra wallet.
+        const rival = transactionRow({
+          wallet_id: other.walletId,
+          player_id: other.playerId,
+          external_transaction_id: cmd.payload.externalTransactionId,
+          idempotency_key: cmd.idempotencyKey,
+          status: 'REJECTED',
+          failure_code: 'INSUFFICIENT_BALANCE',
+        });
+        await trx('wager_transactions').insert(rival);
+        pending = run(cmd);
+        await waitForLockWait(orm);
+        await trx.commit();
+        expect(await pending).toEqual({ type: 'IdempotencyConflict', existingTransactionId: rival.id as string });
+      } finally {
+        if (!trx.isCompleted()) await trx.rollback();
+        await pending?.catch(() => undefined);
+      }
+      expect(await walletBalance(orm, wallet.walletId)).toBe('100.00');
+      expect(await countRows(orm, 'outbox_messages')).toBe(0);
+    });
+
     it('UPDATE com version divergente → WalletVersionConflictError e rollback', async () => {
       const unitOfWork = new MikroOrmWagerUnitOfWork(orm.em);
       const action = unitOfWork.run(async (repository) => {
-        const locked = (await repository.lockWallet(wallet.walletId)) as Wallet;
+        const locked = (await repository.lockWallet(wallet.walletId, wallet.playerId)) as Wallet;
         const stale = Wallet.rehydrate({
           id: locked.id,
           playerId: locked.playerId,
