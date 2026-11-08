@@ -52,6 +52,34 @@ const REFERENCEABLE: Partial<Record<WagerTransactionKind, ReadonlySet<WagerTrans
   [WagerTransactionKind.Rollback]: ROLLBACKABLE,
 };
 
+/**
+ * Direção do lançamento de uma transação PROCESSED, só pelos kinds. Fonte única: a entidade
+ * (`ledgerDirectionFor`) e a reconciliação usam esta regra. LOSS e ROLLBACK sem referência
+ * aceitável lançam erro.
+ */
+export function ledgerDirectionForKind(kind: WagerTransactionKind, referenceKind?: WagerTransactionKind): LedgerDirection {
+  switch (kind) {
+    case WagerTransactionKind.Bet:
+      return LedgerDirection.Debit;
+    case WagerTransactionKind.Opening:
+    case WagerTransactionKind.Win:
+    case WagerTransactionKind.Refund:
+      return LedgerDirection.Credit;
+    case WagerTransactionKind.Loss:
+      throw new InvalidWagerTransactionError('LOSS não movimenta saldo');
+    case WagerTransactionKind.Rollback:
+      if (referenceKind === undefined || !ROLLBACKABLE.has(referenceKind)) {
+        throw new InvalidWagerTransactionError('ROLLBACK exige referência BET, WIN ou REFUND');
+      }
+      return ledgerDirectionForKind(referenceKind) === LedgerDirection.Debit ? LedgerDirection.Credit : LedgerDirection.Debit;
+  }
+}
+
+/** false só para LOSS. */
+export function kindAffectsBalance(kind: WagerTransactionKind): boolean {
+  return kind !== WagerTransactionKind.Loss;
+}
+
 export interface CreateWagerTransactionProps {
   id: string;
   providerId: string;
@@ -262,7 +290,7 @@ export class WagerTransaction {
 
   /** false só para LOSS. */
   affectsBalance(): boolean {
-    return this.kind !== WagerTransactionKind.Loss;
+    return kindAffectsBalance(this.kind);
   }
 
   requiresReference(): boolean {
@@ -288,23 +316,7 @@ export class WagerTransaction {
 
   /** Direção do lançamento. ROLLBACK inverte a direção da referência (BET, WIN ou REFUND). */
   ledgerDirectionFor(reference?: WagerTransaction): LedgerDirection {
-    switch (this.kind) {
-      case WagerTransactionKind.Bet:
-        return LedgerDirection.Debit;
-      case WagerTransactionKind.Opening:
-      case WagerTransactionKind.Win:
-      case WagerTransactionKind.Refund:
-        return LedgerDirection.Credit;
-      case WagerTransactionKind.Loss:
-        throw new InvalidWagerTransactionError('LOSS não movimenta saldo');
-      case WagerTransactionKind.Rollback:
-        if (reference === undefined || !this.canReference(reference)) {
-          throw new InvalidWagerTransactionError('ROLLBACK exige referência BET, WIN ou REFUND');
-        }
-        return reference.ledgerDirectionFor() === LedgerDirection.Debit
-          ? LedgerDirection.Credit
-          : LedgerDirection.Debit;
-    }
+    return ledgerDirectionForKind(this.kind, reference?.kind);
   }
 
   private assertTransactionCurrency(balance: Money): void {

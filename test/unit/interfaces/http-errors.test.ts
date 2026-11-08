@@ -51,7 +51,7 @@ describe('ApiExceptionFilter', () => {
 
 describe('WageringHttpService — mapeamento do resultado do use case', () => {
   const service = (result: ProcessWagerTransactionResult) =>
-    new WageringHttpService({} as never, { execute: async () => result }, { execute: async () => ({ type: 'InvalidInput', reason: 'x' }) }, new ObservabilityMetrics());
+    new WageringHttpService({} as never, { execute: async () => result }, { execute: async () => ({ type: 'InvalidInput', reason: 'x' }) }, { execute: async () => ({ type: 'NotFound' }) }, new ObservabilityMetrics());
   const submit = (result: ProcessWagerTransactionResult) => service(result).submit('k', 'c', {});
   const rejection = (result: ProcessWagerTransactionResult) => submit(result).then(
     () => undefined,

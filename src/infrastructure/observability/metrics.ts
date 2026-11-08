@@ -54,6 +54,11 @@ export class ObservabilityMetrics {
     help: 'Mensagens enviadas para a dead-letter queue.',
     registers: [this.registry],
   });
+  readonly consumerDbUnavailable = new Gauge({
+    name: 'wagering_consumer_db_unavailable',
+    help: '1 enquanto o consumidor SQS está no modo "banco fora" (sem receber, sondando o Postgres); 0 caso contrário.',
+    registers: [this.registry],
+  });
   readonly outboxLag = new Gauge({
     name: 'wagering_outbox_lag_seconds',
     help: 'Idade, em segundos, do evento mais antigo ainda não publicado da outbox.',

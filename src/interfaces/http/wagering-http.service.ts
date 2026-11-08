@@ -1,5 +1,6 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
 import type { OpenWallet } from '../../application/wallets/open-wallet';
+import type { ReconcileWallet } from '../../application/wallets/reconcile-wallet';
 import { UUID_PATTERN, textProblem } from '../../application/validation';
 import {
   type ProcessWagerTransaction,
@@ -34,6 +35,7 @@ export class WageringHttpService {
     private readonly em: EntityManager,
     private readonly process: Pick<ProcessWagerTransaction, 'execute'>,
     private readonly openWallet: Pick<OpenWallet, 'execute'>,
+    private readonly reconcileWallet: Pick<ReconcileWallet, 'execute'>,
     private readonly metrics: ObservabilityMetrics,
   ) {}
 
@@ -134,44 +136,26 @@ export class WageringHttpService {
     };
   }
 
-  /** Compara o saldo com a soma do ledger num único statement. Nunca corrige: loga, conta e sinaliza. */
+  /** Reconciliação pelo use case. Nunca corrige: loga (só tipos e ids, sem valores), conta e sinaliza. */
   async reconcile(walletId: string, correlationId: string): Promise<HttpResult> {
     assertUuid('walletId', walletId);
-    const { rows } = await this.em.getKnex().raw<{
-      rows: Array<{ balance: string; currency: string; calculated: string; difference: string; entries: string }>;
-    }>(
-      `select w.balance::text as balance, w.currency,
-              l.calculated::text as calculated,
-              (w.balance - l.calculated)::numeric(21,2)::text as difference,
-              l.entries::text as entries
-         from wallets w
-         cross join lateral (
-           select coalesce(sum(case direction when 'CREDIT' then amount else -amount end), 0)::numeric(21,2) as calculated,
-                  count(*) as entries
-             from wallet_ledger_entries
-            where wallet_id = w.id
-         ) l
-        where w.id = ?`,
-      [walletId],
-    );
-    const [row] = rows;
-    if (!row) throw ApiError.notFound('wallet não encontrada');
-    const consistent = row.difference === '0.00';
-    if (!consistent) {
+    const result = await this.reconcileWallet.execute(walletId);
+    if (result.type === 'NotFound') throw ApiError.notFound('wallet não encontrada');
+    const { type: _type, ...body } = result;
+    if (!result.consistent) {
       this.metrics.reconciliationDivergences.inc();
-      this.logger.warn({ event: 'reconciliation_divergence', walletId, correlationId }, 'reconciliation divergence');
+      this.logger.warn(
+        {
+          event: 'reconciliation_divergence',
+          walletId,
+          correlationId,
+          divergenceCount: result.divergenceCount,
+          divergences: result.divergences,
+        },
+        'reconciliation divergence',
+      );
     }
-    return {
-      status: 200,
-      body: {
-        walletId,
-        storedBalance: { amount: row.balance, currency: row.currency },
-        calculatedBalance: { amount: row.calculated, currency: row.currency },
-        difference: { amount: row.difference, currency: row.currency },
-        consistent,
-        checkedEntries: Number(row.entries),
-      },
-    };
+    return { status: 200, body: { walletId, ...body } };
   }
 }
 

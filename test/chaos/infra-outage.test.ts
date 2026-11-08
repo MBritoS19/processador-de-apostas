@@ -12,15 +12,22 @@ import { ROOT, callWithRetry, cents, eventually, freePort, Instance } from '../m
  * CHALLENGE §3: "PostgreSQL e SQS podem ficar temporariamente indisponíveis".
  *
  * Duas instâncias reais da aplicação (API + consumidor + publisher + worker de pendentes) sob
- * carga, com a dependência derrubada de verdade por ~12s:
- *  - Postgres: `docker compose stop` / `start` (conexões recusadas; a imagem para com fast shutdown).
- *  - LocalStack: `docker compose pause` / `unpause` (um stop apagaria as filas da suíte).
+ * carga, com a dependência derrubada de verdade:
+ *  - Postgres: `docker compose stop` / `start` por ~40s (conexões recusadas; a imagem para com fast shutdown).
+ *  - LocalStack: `docker compose pause` / `unpause` por ~12s (um stop apagaria as filas da suíte).
  * Tudo é verificado por comportamento: 503 na API, retries > 0, nada na DLQ, nada perdido,
  * consistência final por SQL. Só roda com CHAOS=1 (`bun run test:chaos`): pausa containers
  * compartilhados, então fica fora do `bun test` e das outras suítes.
  */
 const ENABLED = process.env['CHAOS'] === '1';
-const OUTAGE_MS = 12_000;
+/** LocalStack pausado. */
+const SQS_OUTAGE_MS = 12_000;
+/**
+ * Postgres parado: acima da tolerância que o consumidor tinha antes do modo "banco fora" (com os
+ * números desta suíte, 5 tentativas com backoff 2/4/8/8s = 22s). Sem o modo, as mensagens válidas
+ * recebidas na queda iriam para a DLQ com MAX_ATTEMPTS_EXCEEDED.
+ */
+const PG_OUTAGE_MS = 40_000;
 const PROVIDER = 'provider-a';
 const BET = 1_000n; // 10.00
 
@@ -54,8 +61,9 @@ describe.skipIf(!ENABLED)('chaos: Postgres e SQS temporariamente indisponíveis'
     SQS_WAGER_QUEUE_NAME: queues.queueName,
     SQS_WAGER_DLQ_NAME: queues.dlqName,
     SQS_WAGER_EVENTS_QUEUE_NAME: events.name,
-    // Só nesta suíte: tempos curtos. A tolerância do consumidor (5 tentativas, backoff 2/4/8/8s
-    // = 22s) cobre a queda de ~12s; a mensagem não pode ir para a DLQ.
+    // Só nesta suíte: tempos curtos. Sem conexão com o banco, o consumidor para de receber (modo
+    // "banco fora") e as tentativas não se esgotam: a queda de 40s passa dos 22s que 5 tentativas
+    // com backoff 2/4/8/8s cobririam, e mesmo assim nada pode ir para a DLQ.
     SQS_WAIT_TIME_SECONDS: '1',
     SQS_VISIBILITY_TIMEOUT_SECONDS: '5',
     SQS_RETRY_BASE_SECONDS: '2',
@@ -221,7 +229,7 @@ describe.skipIf(!ENABLED)('chaos: Postgres e SQS temporariamente indisponíveis'
     const duringOutage: Array<{ ext: string; status: number; retryAfter: string | null; body: string }> = [];
     let readyDown = 0;
     await submitSqs(payload(w0, 'bet-pg-1'));
-    for (let i = 0; Date.now() - stoppedAt < OUTAGE_MS; i++) {
+    for (let i = 0; Date.now() - stoppedAt < PG_OUTAGE_MS; i++) {
       const wallet = wallets[i % wallets.length]!;
       const http = `pg-http-${i}`;
       duringOutage.push({ ext: http, ...(await submitOnce(payload(wallet, http))) });
@@ -253,8 +261,14 @@ describe.skipIf(!ENABLED)('chaos: Postgres e SQS temporariamente indisponíveis'
     await quiescent();
 
     expect((await metric('wagering_retries_total')) - retriesBefore, 'o consumidor fez retry durante a queda').toBeGreaterThan(0);
+    // Os consumidores entraram no modo "banco fora" e saíram dele; nenhum mandou mensagem para a DLQ.
+    const total = (event: string) => instances.reduce((sum, instance) => sum + instance.count(event), 0);
+    expect(total('sqs_consumer_db_unavailable'), 'entrou no modo "banco fora"').toBeGreaterThan(0);
+    expect(total('sqs_consumer_db_available'), 'saiu do modo a cada entrada').toBe(total('sqs_consumer_db_unavailable'));
+    expect(total('sqs_message_dead_lettered'), 'nenhuma mensagem na DLQ').toBe(0);
+    expect(await metric('wagering_consumer_db_unavailable'), 'gauge de volta a 0').toBe(0);
     await expectConsistent(fromSeq, externals);
-  }, 240_000);
+  }, 300_000);
 
   it('SQS fora do ar: eventos confirmados ficam na outbox até publicar; consumidor e publisher retomam sem perder nada', async () => {
     const fromSeq = await maxSeq();
@@ -273,7 +287,7 @@ describe.skipIf(!ENABLED)('chaos: Postgres e SQS temporariamente indisponíveis'
     down.add('localstack-paused');
     const pausedAt = Date.now();
     const committed: string[] = [];
-    for (let i = 0; Date.now() - pausedAt < OUTAGE_MS; i++) {
+    for (let i = 0; Date.now() - pausedAt < SQS_OUTAGE_MS; i++) {
       const wallet = wallets[i % wallets.length]!;
       const ext = `sqs-down-http-${i}`;
       // A API não depende do SQS: a transação financeira é confirmada normalmente.

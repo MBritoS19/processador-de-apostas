@@ -30,7 +30,7 @@ export class AppModule implements NestModule {
         HealthModule.register(persistence),
         WageringModule,
         MetricsModule,
-        WagerConsumerModule,
+        WagerConsumerModule.register(persistence),
         OutboxPublisherModule,
         PendingReferenceWorkerModule,
       ],

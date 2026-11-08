@@ -79,6 +79,12 @@ describe('API HTTP de wagering (Postgres real)', () => {
 
   const metricsText = async () => (await fetch(`${url}/metrics`)).text();
 
+  async function reconcile(walletId: string): Promise<Json> {
+    const response = await call('POST', `/wallets/${walletId}/reconciliation`);
+    expect(response.status).toBe(200);
+    return response.body;
+  }
+
   describe('POST /wallets', () => {
     it('grava wallet, OPENING, CREDIT e WalletBalanceChanged na mesma transação, com version 1', async () => {
       const response = await call('POST', '/wallets', { playerId: 'p1', initialBalance: { amount: '100.00', currency: 'BRL' } }, { 'x-correlation-id': 'corr-open' });
@@ -387,8 +393,167 @@ describe('API HTTP de wagering (Postgres real)', () => {
         difference: { amount: '0.00', currency: 'BRL' },
         consistent: true,
         checkedEntries: 2,
+        divergenceCount: 0,
+        divergences: [],
       });
       await expectLedgerConsistent(orm, wallet.id);
+    });
+
+    it('wallet só com a abertura (OPENING move saldo): consistente', async () => {
+      const wallet = await openWallet('p-opening', '250.00');
+      expect(await reconcile(wallet.id)).toMatchObject({
+        storedBalance: { amount: '250.00' },
+        calculatedBalance: { amount: '250.00' },
+        consistent: true,
+        checkedEntries: 1,
+        divergences: [],
+      });
+    });
+
+    it('wallet aberta com saldo zero (sem lançamentos): consistente', async () => {
+      const wallet = await openWallet('p-zero-rec', '0.00');
+      expect(await reconcile(wallet.id)).toMatchObject({ consistent: true, checkedEntries: 0, divergences: [] });
+    });
+
+    it('wallet com BET, WIN, LOSS, REFUND e ROLLBACK de WIN: consistente', async () => {
+      const wallet = await openWallet('p-mix', '100.00');
+      expect((await submit(wager(wallet, 'mx-b1'))).status).toBe(200);
+      expect((await submit(wager(wallet, 'mx-w1', { kind: 'WIN', referenceExternalTransactionId: 'mx-b1', money: { amount: '30.00', currency: 'BRL' } }))).status).toBe(200);
+      expect((await submit(wager(wallet, 'mx-rb', { kind: 'ROLLBACK', referenceExternalTransactionId: 'mx-w1', money: { amount: '30.00', currency: 'BRL' } }))).status).toBe(200);
+      expect((await submit(wager(wallet, 'mx-b2', { roundId: 'round-2' }))).status).toBe(200);
+      expect((await submit(wager(wallet, 'mx-l2', { roundId: 'round-2', kind: 'LOSS', referenceExternalTransactionId: 'mx-b2' }))).status).toBe(200);
+      expect((await submit(wager(wallet, 'mx-b3', { roundId: 'round-3' }))).status).toBe(200);
+      expect((await submit(wager(wallet, 'mx-r3', { roundId: 'round-3', kind: 'REFUND', referenceExternalTransactionId: 'mx-b3' }))).status).toBe(200);
+      expect(await reconcile(wallet.id)).toMatchObject({ storedBalance: { amount: '80.00' }, consistent: true, divergences: [] });
+    });
+
+    describe('cruza ledger × transações: cada divergência é detectada sozinha', () => {
+      /** Corrompe por fora, com os triggers e FKs desligados só nesta transação. */
+      async function tamper(work: (trx: any) => Promise<void>): Promise<void> {
+        ledgerTampered = true;
+        await knex().transaction(async (trx) => {
+          await trx.raw('set local session_replication_role = replica');
+          await work(trx);
+        });
+      }
+
+      /** Lançamento extra, mantendo saldo = soma (só a divergência pedida aparece). */
+      async function insertEntry(trx: any, walletId: string, transactionId: string, direction: 'CREDIT' | 'DEBIT', amount: string) {
+        const [{ balance }] = await trx('wallets').where({ id: walletId }).select(trx.raw('balance::text as balance'));
+        const after = (Number(balance) + (direction === 'CREDIT' ? 1 : -1) * Number(amount)).toFixed(2);
+        await trx('wallet_ledger_entries').insert({
+          id: crypto.randomUUID(),
+          wallet_id: walletId,
+          transaction_id: transactionId,
+          direction,
+          amount,
+          currency: 'BRL',
+          balance_before: balance,
+          balance_after: after,
+          created_at: new Date(),
+        });
+        await trx('wallets').where({ id: walletId }).update({ balance: after });
+      }
+
+      const txId = async (ext: string) => ((await knex()('wager_transactions').where({ external_transaction_id: ext }).first()) as { id: string }).id;
+      const entryOf = async (transactionId: string) => (await knex()('wallet_ledger_entries').where({ transaction_id: transactionId }).first()) as Json;
+      const types = (body: Json) => (body.divergences as Json[]).map((d) => d.type).sort();
+
+      it('ENTRY_WITHOUT_PROCESSED_TRANSACTION: lançamento de uma transação REJECTED', async () => {
+        const wallet = await openWallet('p-d1', '5.00');
+        expect((await submit(wager(wallet, 'd1-bet'))).status).toBe(422); // INSUFFICIENT_BALANCE
+        const rejected = await txId('d1-bet');
+        await tamper((trx) => insertEntry(trx, wallet.id, rejected, 'DEBIT', '5.00'));
+        const body = await reconcile(wallet.id);
+        expect(body.consistent).toBe(false);
+        expect(body.divergences).toEqual([{ type: 'ENTRY_WITHOUT_PROCESSED_TRANSACTION', transactionId: rejected, ledgerEntryId: expect.any(String) }]);
+      });
+
+      it('ENTRY_TRANSACTION_DOES_NOT_MOVE_BALANCE: lançamento de um LOSS', async () => {
+        const wallet = await openWallet('p-d2');
+        expect((await submit(wager(wallet, 'd2-bet'))).status).toBe(200);
+        expect((await submit(wager(wallet, 'd2-loss', { kind: 'LOSS', referenceExternalTransactionId: 'd2-bet' }))).status).toBe(200);
+        const loss = await txId('d2-loss');
+        await tamper((trx) => insertEntry(trx, wallet.id, loss, 'CREDIT', '10.00'));
+        expect((await reconcile(wallet.id)).divergences).toEqual([
+          { type: 'ENTRY_TRANSACTION_DOES_NOT_MOVE_BALANCE', transactionId: loss, ledgerEntryId: expect.any(String) },
+        ]);
+      });
+
+      it('ENTRY_AMOUNT_MISMATCH: lançamento com valor diferente do da transação', async () => {
+        const wallet = await openWallet('p-d3');
+        expect((await submit(wager(wallet, 'd3-bet'))).status).toBe(200);
+        const bet = await txId('d3-bet');
+        await tamper(async (trx) => {
+          await trx('wallet_ledger_entries').where({ transaction_id: bet }).update({ amount: '12.00', balance_after: '88.00' });
+          await trx('wallets').where({ id: wallet.id }).update({ balance: '88.00' });
+        });
+        const entry = await entryOf(bet);
+        expect((await reconcile(wallet.id)).divergences).toEqual([{ type: 'ENTRY_AMOUNT_MISMATCH', transactionId: bet, ledgerEntryId: entry.id }]);
+      });
+
+      it('ENTRY_DIRECTION_MISMATCH: BET lançada como CREDIT', async () => {
+        const wallet = await openWallet('p-d4');
+        expect((await submit(wager(wallet, 'd4-bet'))).status).toBe(200);
+        const bet = await txId('d4-bet');
+        await tamper(async (trx) => {
+          await trx('wallet_ledger_entries').where({ transaction_id: bet }).update({ direction: 'CREDIT', balance_after: '110.00' });
+          await trx('wallets').where({ id: wallet.id }).update({ balance: '110.00' });
+        });
+        expect(types(await reconcile(wallet.id))).toEqual(['ENTRY_DIRECTION_MISMATCH']);
+      });
+
+      it('ENTRY_DIRECTION_MISMATCH: ROLLBACK de WIN lançado como CREDIT (a direção vem da referência)', async () => {
+        const wallet = await openWallet('p-d4b');
+        expect((await submit(wager(wallet, 'd4b-bet'))).status).toBe(200);
+        expect((await submit(wager(wallet, 'd4b-win', { kind: 'WIN', referenceExternalTransactionId: 'd4b-bet' }))).status).toBe(200);
+        expect((await submit(wager(wallet, 'd4b-rb', { kind: 'ROLLBACK', referenceExternalTransactionId: 'd4b-win' }))).status).toBe(200);
+        const rollback = await txId('d4b-rb');
+        await tamper(async (trx) => {
+          // 100 − 10 + 10 = 100 antes do ROLLBACK; como CREDIT, ele levaria a 110.
+          await trx('wallet_ledger_entries').where({ transaction_id: rollback }).update({ direction: 'CREDIT', balance_after: '110.00' });
+          await trx('wallets').where({ id: wallet.id }).update({ balance: '110.00' });
+        });
+        expect((await reconcile(wallet.id)).divergences).toEqual([
+          { type: 'ENTRY_DIRECTION_MISMATCH', transactionId: rollback, ledgerEntryId: expect.any(String) },
+        ]);
+      });
+
+      it('PROCESSED_WITHOUT_ENTRY: BET PROCESSED cujo lançamento sumiu', async () => {
+        const wallet = await openWallet('p-d5');
+        expect((await submit(wager(wallet, 'd5-bet'))).status).toBe(200);
+        const bet = await txId('d5-bet');
+        await tamper(async (trx) => {
+          await trx('wallet_ledger_entries').where({ transaction_id: bet }).delete();
+          await trx('wallets').where({ id: wallet.id }).update({ balance: '100.00' });
+        });
+        expect((await reconcile(wallet.id)).divergences).toEqual([{ type: 'PROCESSED_WITHOUT_ENTRY', transactionId: bet }]);
+      });
+
+      it('PROCESSED_WITH_MULTIPLE_ENTRIES: a mesma transação lançada também em outra wallet', async () => {
+        // O schema impede dois lançamentos da mesma transação na mesma wallet (uq_ledger_wallet_transaction);
+        // o extra só pode estar em outra wallet, e as duas reconciliações acusam.
+        const a = await openWallet('p-d6a');
+        const b = await openWallet('p-d6b');
+        expect((await submit(wager(a, 'd6-bet'))).status).toBe(200);
+        const bet = await txId('d6-bet');
+        await tamper((trx) => insertEntry(trx, b.id, bet, 'DEBIT', '10.00'));
+        expect((await reconcile(a.id)).divergences).toEqual([{ type: 'PROCESSED_WITH_MULTIPLE_ENTRIES', transactionId: bet }]);
+        expect(types(await reconcile(b.id))).toEqual(['ENTRY_WITHOUT_PROCESSED_TRANSACTION']);
+      });
+
+      it('várias divergências juntas: todas listadas, com divergenceCount', async () => {
+        const wallet = await openWallet('p-d7');
+        expect((await submit(wager(wallet, 'd7-bet'))).status).toBe(200);
+        const bet = await txId('d7-bet');
+        await tamper(async (trx) => {
+          await trx('wallet_ledger_entries').where({ transaction_id: bet }).delete();
+          await trx('wallets').where({ id: wallet.id }).update({ balance: '1.00' });
+        });
+        const body = await reconcile(wallet.id);
+        expect(types(body)).toEqual(['BALANCE_MISMATCH', 'PROCESSED_WITHOUT_ENTRY']);
+        expect(body.divergenceCount).toBe(2);
+      });
     });
 
     it('divergente: sinaliza, conta na métrica e não corrige o saldo', async () => {
@@ -405,7 +570,16 @@ describe('API HTTP de wagering (Postgres real)', () => {
       const warn = spyOn(logger, 'warn');
       const correlationId = 'c0ffee00-0000-4000-8000-000000000001';
       const response = await call('POST', `/wallets/${wallet.id}/reconciliation`, undefined, { 'x-correlation-id': correlationId });
-      expect(warn.mock.calls.map(([fields]) => fields)).toEqual([{ event: 'reconciliation_divergence', walletId: wallet.id, correlationId }]);
+      expect(warn.mock.calls.map(([fields]) => fields)).toEqual([
+        {
+          event: 'reconciliation_divergence',
+          walletId: wallet.id,
+          correlationId,
+          divergenceCount: 1,
+          divergences: [{ type: 'BALANCE_MISMATCH' }],
+        },
+      ]);
+      expect(JSON.stringify(warn.mock.calls)).not.toMatch(/70\.00|100\.00|30\.00/);
       warn.mockRestore();
       expect(response.body).toMatchObject({
         storedBalance: { amount: '70.00' },
@@ -413,6 +587,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
         difference: { amount: '-30.00' },
         consistent: false,
         checkedEntries: 1,
+        divergences: [{ type: 'BALANCE_MISMATCH' }],
       });
       expect(counter(await metricsText(), 'wagering_reconciliation_divergences_total')).toBe(before + 1);
       const [row] = await knex()('wallets').where({ id: wallet.id });

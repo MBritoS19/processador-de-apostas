@@ -12,6 +12,7 @@ import { countRows } from '../application/harness';
 import { expectLedgerConsistent, openOrm, seedWallet, truncateAll } from '../persistence/db';
 import {
   SpyQueueClient,
+  controlledProbe,
   createQueues,
   deleteQueues,
   envelope,
@@ -414,23 +415,101 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
-  it('banco indisponível: o polling pausa antes de buscar de novo', async () => {
-    const wallet = await seedWallet(orm, '100.00');
-    const flaky = failing(1, { reason: 'unavailable' });
-    const spy = spyQueue();
-    await start({ wrapProcess: flaky.wrap, queueClient: spy.factory });
-    await send(sqs, queues.queueUrl, envelope(wallet));
+  describe('modo "banco fora"', () => {
+    const gauge = async (app: INestApplication) =>
+      (await app.get(ObservabilityMetrics).consumerDbUnavailable.get()).values[0]?.value ?? 0;
 
-    await eventually(async () => expect(await debits(wallet.walletId)).toBe(1));
-    await expectDrained();
-    const receives = spy.client?.receives ?? [];
-    const first = receives.findIndex((r) => r.count === 1);
-    const failed = receives[first];
-    const next = receives[first + 1];
-    expect(failed?.endedAt).toBeDefined();
-    // errorPauseMs(1) = 1s entre o lote com falha e o próximo ReceiveMessage.
-    expect((next?.startedAt ?? 0) - (failed?.endedAt ?? 0)).toBeGreaterThanOrEqual(900);
-    await expectLedgerConsistent(orm, wallet.walletId);
+    it('sem conexão: para de receber enquanto a sonda falha, devolve a mensagem e retoma quando o banco volta', async () => {
+      const wallet = await seedWallet(orm, '100.00');
+      const flaky = failing(1, { reason: 'unavailable' });
+      const spy = spyQueue();
+      const db = controlledProbe(true);
+      const app = await start({ wrapProcess: flaky.wrap, queueClient: spy.factory, databaseProbe: db.probe });
+      await send(sqs, queues.queueUrl, envelope(wallet));
+
+      // Entra no modo: gauge 1, a sonda é chamada e nenhum ReceiveMessage novo sai enquanto ela falha.
+      await eventually(async () => expect(await gauge(app)).toBe(1));
+      await eventually(() => expect(db.calls.length).toBeGreaterThanOrEqual(2), 10_000);
+      const receivesWhileDown = spy.client?.receives.length ?? 0;
+      const probesBefore = db.calls.length;
+      await eventually(() => expect(db.calls.length).toBeGreaterThan(probesBefore), 10_000);
+      expect(spy.client?.receives.length, 'nenhum receive com a sonda falhando').toBe(receivesWhileDown);
+      // A mensagem voltou já (visibilidade 0), sem esperar o visibility timeout.
+      expect(await visibleCount(sqs, queues.queueUrl)).toBe(1);
+
+      db.setDown(false);
+      await eventually(async () => expect(await debits(wallet.walletId)).toBe(1), 20_000);
+      await expectDrained();
+      expect(await gauge(app)).toBe(0);
+      const resumedAt = spy.client?.receives[receivesWhileDown]?.startedAt ?? 0;
+      expect(resumedAt, 'o receive seguinte só sai depois da sonda que passou').toBeGreaterThanOrEqual(db.calls.at(-1) ?? Infinity);
+      expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
+      await expectLedgerConsistent(orm, wallet.walletId);
+    }, 40_000);
+
+    it('banco fora não conta para o limite de tentativas do consumidor: a mensagem não vai para a DLQ', async () => {
+      const wallet = await seedWallet(orm, '100.00');
+      // 4 falhas de conexão seguidas com limite 2: no modelo antigo, a 2ª já iria para a DLQ.
+      const flaky = failing(4, { reason: 'unavailable' });
+      await start({ wrapProcess: flaky.wrap, consumer: { maxAttempts: 2 } });
+      await send(sqs, queues.queueUrl, envelope(wallet));
+
+      await eventually(async () => expect(await debits(wallet.walletId)).toBe(1), 30_000);
+      await expectDrained();
+      expect(flaky.calls()).toBe(5);
+      expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
+      await expectLedgerConsistent(orm, wallet.walletId);
+    }, 40_000);
+
+    it('as mensagens em voo de outros grupos voltam sem tentativa quando o banco cai', async () => {
+      const a = await seedWallet(orm, '100.00');
+      const b = await seedWallet(orm, '100.00');
+      const db = controlledProbe(true);
+      // Só a mensagem da wallet A falha por conexão; a de B esperaria a vez no mesmo lote.
+      const flaky = failing(1, { reason: 'unavailable', when: (command) => (command.payload as { walletId: string }).walletId === a.walletId });
+      const app = await start({ wrapProcess: flaky.wrap, databaseProbe: db.probe, consumer: { maxMessages: 10 } });
+      await send(sqs, queues.queueUrl, envelope(a));
+      await send(sqs, queues.queueUrl, envelope(b));
+
+      await eventually(async () => expect(await gauge(app)).toBe(1));
+      db.setDown(false);
+      await eventually(async () => {
+        expect(await debits(a.walletId)).toBe(1);
+        expect(await debits(b.walletId)).toBe(1);
+      }, 20_000);
+      await expectDrained();
+      expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
+    }, 40_000);
+
+    it('lock_timeout (ou deadlock, serialização, pool esgotado) não ativa o modo: sem sonda e sem pausa', async () => {
+      const wallet = await seedWallet(orm, '100.00');
+      const flaky = failing(1, { reason: 'lock_timeout' });
+      const db = controlledProbe(false);
+      const app = await start({ wrapProcess: flaky.wrap, databaseProbe: db.probe });
+      await send(sqs, queues.queueUrl, envelope(wallet));
+
+      await eventually(async () => expect(await debits(wallet.walletId)).toBe(1));
+      await expectDrained();
+      expect(flaky.calls()).toBe(2);
+      expect(db.calls, 'a sonda nunca foi chamada').toEqual([]);
+      expect(await gauge(app)).toBe(0);
+    });
+
+    it('stop() interrompe a espera do modo "banco fora" sem esperar a sonda voltar', async () => {
+      const wallet = await seedWallet(orm, '100.00');
+      const db = controlledProbe(true);
+      const app = await start({ wrapProcess: failing(1, { reason: 'unavailable' }).wrap, databaseProbe: db.probe });
+      await send(sqs, queues.queueUrl, envelope(wallet));
+      await eventually(async () => expect(await gauge(app)).toBe(1));
+      // Deixa o backoff crescer (1s, 2s, 4s...) antes de parar.
+      await eventually(() => expect(db.calls.length).toBeGreaterThanOrEqual(3), 15_000);
+
+      const metrics = app.get(ObservabilityMetrics);
+      const startedAt = Date.now();
+      await stop(app);
+      expect(Date.now() - startedAt, 'shutdown não espera a pausa de 8s').toBeLessThan(2_000);
+      expect((await metrics.consumerDbUnavailable.get()).values[0]?.value).toBe(0);
+    }, 30_000);
   });
 
   it('worker morto depois do commit e antes do ack: reentrega, inbox detecta sem chamar o use case', async () => {

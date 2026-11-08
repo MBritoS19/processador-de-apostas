@@ -28,12 +28,19 @@ describe('translatePersistenceError', () => {
 
   it.each([
     ['ConnectionException', new ConnectionException(pgError({ code: 'ECONNREFUSED' }))],
-    ['pool esgotado (KnexTimeoutError)', Object.assign(new Error('Knex: Timeout acquiring a connection'), { name: 'KnexTimeoutError' })],
     ['erro de rede aninhado', Object.assign(new Error('x'), { cause: pgError({ code: 'ECONNRESET' }) })],
   ])('%s → unavailable', (_, error) => {
     const translated = translatePersistenceError(error);
     expect(translated).toBeInstanceOf(TransientPersistenceError);
     expect((translated as TransientPersistenceError).reason).toBe('unavailable');
+  });
+
+  it('pool esgotado (KnexTimeoutError) → pool_exhausted, não unavailable', () => {
+    const translated = translatePersistenceError(
+      Object.assign(new Error('Knex: Timeout acquiring a connection'), { name: 'KnexTimeoutError' }),
+    );
+    expect(translated).toBeInstanceOf(TransientPersistenceError);
+    expect((translated as TransientPersistenceError).reason).toBe('pool_exhausted');
   });
 
   it.each([

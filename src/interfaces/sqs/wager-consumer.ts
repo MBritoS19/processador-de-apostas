@@ -1,4 +1,5 @@
 import type { FaultInjection } from '../../infrastructure/config/app-config';
+import type { ReadinessCheck } from '../../application/ports/readiness-check';
 import { TransientPersistenceError } from '../../application/ports/wager-unit-of-work';
 import type { ProcessWagerTransactionResult } from '../../application/wagering/process-wager-transaction';
 import {
@@ -34,6 +35,9 @@ type Decision =
 /** O que foi efetivamente feito com a mensagem; `failed` = a ação no SQS falhou. */
 type Applied = Decision['action'] | 'failed';
 
+/** Resultado de um ciclo: `db_unavailable` entra no modo "banco fora"; `poll_failed` pausa com backoff. */
+type BatchOutcome = 'ok' | 'db_unavailable' | 'poll_failed';
+
 type LogContext = Record<string, unknown>;
 
 /** Atraso da nova tentativa: base·2^(receiveCount−1), com teto. */
@@ -55,11 +59,15 @@ export class WagerConsumer {
   private wakeUp: (() => void) | undefined;
   /** Aborta o receive em andamento no `stop()`: o long polling (até 20s) não segura o shutdown. */
   private polling: AbortController | undefined;
+  /** Aborta a sonda do banco em andamento no `stop()` (modo "banco fora"). */
+  private probing: AbortController | undefined;
 
   constructor(
     private readonly queue: Pick<WagerQueueClient, 'maxReceiveCount' | 'receive' | 'delete' | 'changeVisibility' | 'sendToDlq'>,
     private readonly inbox: Pick<InboxLookup, 'payloadHashOf'>,
     private readonly process: Pick<InstrumentedProcessWagerTransaction, 'execute'>,
+    /** Sonda do Postgres usada no modo "banco fora" (o mesmo check do /health/ready). */
+    private readonly database: Pick<ReadinessCheck, 'check'>,
     private readonly metrics: ObservabilityMetrics,
     private readonly options: WagerConsumerOptions,
   ) {}
@@ -88,6 +96,7 @@ export class WagerConsumer {
     this.running = false;
     this.wakeUp?.();
     this.polling?.abort();
+    this.probing?.abort();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finished = await Promise.race([
       loop.then(() => true),
@@ -106,7 +115,7 @@ export class WagerConsumer {
   private async run(): Promise<void> {
     let failures = 0;
     while (this.running) {
-      let unavailable: boolean;
+      let outcome: BatchOutcome;
       const polling = new AbortController();
       try {
         // A fila (maxReceiveCount) é a rede de segurança; o consumidor decide antes, com motivo.
@@ -124,14 +133,19 @@ export class WagerConsumer {
           this.polling = undefined;
         }
         for (const message of messages) this.unfinished.add(message);
-        unavailable = await this.processBatch(messages, limit);
+        outcome = await this.processBatch(messages, limit);
       } catch (error) {
         // Receive abortado pelo stop(): saída normal do loop, não falha de polling.
         if (polling.signal.aborted && !this.running) break;
         this.logger.error({ event: 'sqs_poll_failed', errorName: errorName(error) }, 'sqs poll failed');
-        unavailable = true;
+        outcome = 'poll_failed';
       }
-      if (!unavailable) {
+      if (outcome === 'db_unavailable') {
+        failures = 0;
+        await this.waitForDatabase();
+        continue;
+      }
+      if (outcome === 'ok') {
         failures = 0;
         continue;
       }
@@ -143,45 +157,94 @@ export class WagerConsumer {
   }
 
   /**
-   * Grupos FIFO diferentes em paralelo; o mesmo grupo em sequência. Devolve true se alguma
-   * falha indicou banco indisponível (o loop pausa o polling).
+   * Modo "banco fora" (ARCHITECTURE.md → "Consumidor SQS"): sem conexão com o Postgres, não
+   * adianta receber (cada recebimento soma no `ApproximateReceiveCount` da mensagem). O loop
+   * para de receber, sonda o banco com backoff (1s→30s) e só volta a receber quando a sonda
+   * passa. O `stop()` interrompe a espera e a sonda.
    */
-  private async processBatch(messages: readonly ReceivedMessage[], limit: number): Promise<boolean> {
+  private async waitForDatabase(): Promise<void> {
+    const since = Date.now();
+    this.metrics.consumerDbUnavailable.set(1);
+    this.logger.warn({ event: 'sqs_consumer_db_unavailable' }, 'database unavailable: polling suspended');
+    let probes = 0;
+    try {
+      while (this.running) {
+        probes++;
+        await this.pause(errorPauseMs(probes));
+        if (!this.running) break;
+        if (await this.databaseReachable()) {
+          this.logger.info(
+            { event: 'sqs_consumer_db_available', downMs: Date.now() - since, probes },
+            'database available: polling resumed',
+          );
+          return;
+        }
+      }
+      this.logger.info({ event: 'sqs_consumer_db_wait_stopped', downMs: Date.now() - since, probes }, 'database wait stopped');
+    } finally {
+      this.metrics.consumerDbUnavailable.set(0);
+    }
+  }
+
+  private async databaseReachable(): Promise<boolean> {
+    const probe = new AbortController();
+    this.probing = probe;
+    try {
+      await this.database.check(probe.signal);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.probing = undefined;
+    }
+  }
+
+  /**
+   * Grupos FIFO diferentes em paralelo; o mesmo grupo em sequência. Se uma mensagem acusa banco
+   * fora, as que ainda não foram tentadas (de qualquer grupo) voltam à fila sem tentativa.
+   */
+  private async processBatch(messages: readonly ReceivedMessage[], limit: number): Promise<BatchOutcome> {
     const groups = new Map<string, ReceivedMessage[]>();
     for (const message of messages) {
       const key = message.groupId ?? message.sqsMessageId;
       groups.set(key, [...(groups.get(key) ?? []), message]);
     }
-    const results = await Promise.all([...groups.values()].map((group) => this.processGroup(group, limit)));
-    return results.some(Boolean);
+    const batch = { dbUnavailable: false };
+    await Promise.all([...groups.values()].map((group) => this.processGroup(group, limit, batch)));
+    return batch.dbUnavailable ? 'db_unavailable' : 'ok';
   }
 
   /**
    * Segue para a próxima mensagem do grupo só se a anterior foi resolvida (ack ou DLQ). Não
    * depende de o broker bloquear o grupo enquanto há mensagem em voo (o LocalStack não
    * bloqueia): as seguintes nunca ficam visíveis antes da que falhou.
-   * - retry: as seguintes recebem a mesma visibilidade e voltam junto, na ordem do grupo;
+   * - retry: as seguintes recebem a mesma visibilidade e voltam junto, na ordem do grupo
+   *   (no banco fora, visibilidade 0 para todas);
    * - ação no SQS falhou: as seguintes ficam em voo e expiram junto com ela.
    */
-  private async processGroup(group: readonly ReceivedMessage[], limit: number): Promise<boolean> {
+  private async processGroup(group: readonly ReceivedMessage[], limit: number, batch: { dbUnavailable: boolean }): Promise<void> {
     for (const [index, message] of group.entries()) {
-      if (!this.running) {
+      if (!this.running || batch.dbUnavailable) {
         await this.release(group.slice(index));
-        return false;
+        return;
       }
       const outcome = await this.handle(message, limit);
       const rest = group.slice(index + 1);
       if (outcome.applied === 'retry') {
+        if (outcome.unavailable) {
+          batch.dbUnavailable = true;
+          await this.release(rest);
+          return;
+        }
         const delaySeconds = retryDelaySeconds(message.receiveCount, this.options.retryBaseSeconds, this.options.retryMaxSeconds);
         await this.release(rest, delaySeconds);
-        return outcome.unavailable;
+        return;
       }
       if (outcome.applied === 'failed') {
         for (const follower of rest) this.unfinished.delete(follower);
-        return false;
+        return;
       }
     }
-    return false;
   }
 
   private async handle(message: ReceivedMessage, limit: number): Promise<{ applied: Applied; unavailable: boolean }> {
@@ -296,6 +359,14 @@ export class WagerConsumer {
         return decision.action;
       }
       case 'retry': {
+        if (decision.unavailable) {
+          // Banco fora não é culpa da mensagem: volta já (visibilidade 0), sem o limite de tentativas
+          // do consumidor, e o loop entra no modo "banco fora". A rede de segurança é o maxReceiveCount da fila.
+          await this.queue.changeVisibility(message, 0);
+          this.metrics.retries.inc();
+          this.logger.warn({ ...context, event: 'sqs_message_retry', reason: decision.reason, delaySeconds: 0 }, 'sqs message retry');
+          return decision.action;
+        }
         if (message.receiveCount >= limit) {
           return this.apply({ action: 'dlq', reason: 'MAX_ATTEMPTS_EXCEEDED', detail: decision.reason }, message, limit, context);
         }

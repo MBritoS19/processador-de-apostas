@@ -246,7 +246,7 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 - **Eventos só saem pelo publisher**, depois do commit. Nenhum caminho publica no SQS de dentro do use case.
 - **Ack do SQS só depois do commit:** o `DeleteMessage` acontece quando o use case retorna.
 - **O domínio decide, o banco confirma:** o use case aplica as regras no domínio e grava o resultado. As FKs deferidas e o trigger saldo × ledger são checados no COMMIT; qualquer violação desfaz tudo.
-- **Tradução de erros:** o adaptador traduz SQLSTATE em resultados do use case. `55P03` (lock timeout), `40P01` (deadlock), `40001` (serialização), pool esgotado ou banco fora viram `TransientFailure`; `23505` só nas constraints de idempotência e inbox vira replay ou conflito (ver [Idempotência](#idempotência)); `23505` em qualquer outra constraint, e os demais erros, são bugs e são relançados.
+- **Tradução de erros:** o adaptador traduz SQLSTATE em resultados do use case. `55P03` (lock timeout), `40P01` (deadlock), `40001` (serialização), pool esgotado (`pool_exhausted`) ou banco fora (`unavailable`, só erro de conexão) viram `TransientFailure`; `23505` só nas constraints de idempotência e inbox vira replay ou conflito (ver [Idempotência](#idempotência)); `23505` em qualquer outra constraint, e os demais erros, são bugs e são relançados.
 - **Prova:** `test/integration/application/atomicity.test.ts` cria um trigger real que derruba uma gravação no meio do commit (no use case e na resolução pelo worker): nada persiste, e o reenvio aplica uma vez.
 
 ## Concorrência
@@ -415,10 +415,31 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 
 ### Reconciliação
 
-- `POST /wallets/:id/reconciliation` lê o saldo e a soma do ledger (CREDIT − DEBIT) **num único statement**, então os dois vêm do mesmo snapshot.
-- `difference = storedBalance − calculatedBalance`. `consistent` é `difference == 0.00`, e `checkedEntries` é o número de lançamentos somados.
-- **Nunca corrige.** Na divergência: log `warn` `reconciliation_divergence` (com `walletId` e `correlationId`), incremento de `wagering_reconciliation_divergences_total` e `consistent: false` na resposta. Corrigir exige investigar a causa; um ajuste automático esconderia o bug que a gerou.
-- Cobre o que o schema não garante: problemas no encadeamento de `balance_before` ou no valor do lançamento aparecem como divergência de soma.
+`POST /wallets/:id/reconciliation` chama o use case `ReconcileWallet` (`src/application/wallets/reconcile-wallet.ts`). A leitura fica atrás da porta `WalletReconciliationReader`, cujo adaptador é `PostgresWalletReconciliationReader`.
+
+- **Leitura:** wallet, lançamentos (com a transação de cada um e a referência dela) e transações PROCESSED (com quantos lançamentos cada uma tem, em qualquer wallet). As três consultas rodam numa transação `REPEATABLE READ, READ ONLY`: um único snapshot, sem lock e sem bloquear escritas.
+- **Regras no use case**, com as funções do domínio usadas para gravar (`ledgerDirectionForKind`, `kindAffectsBalance`). A soma usa `Money`.
+- **Custo:** O(lançamentos + transações) da wallet por chamada. É uma ferramenta de auditoria sob demanda, não um caminho quente. Para wallets com milhões de lançamentos, o próximo passo seria reconciliar por faixa de `seq` a partir de um ponto já conferido.
+
+| `divergences[].type` | O que detecta |
+|---|---|
+| `ENTRY_WITHOUT_PROCESSED_TRANSACTION` | lançamento de transação inexistente, de outra wallet ou que não está PROCESSED |
+| `ENTRY_TRANSACTION_DOES_NOT_MOVE_BALANCE` | lançamento de transação PROCESSED que não move saldo (LOSS) |
+| `ENTRY_AMOUNT_MISMATCH` | valor ou moeda do lançamento diferente do da transação |
+| `ENTRY_DIRECTION_MISMATCH` | direção diferente da exigida pelo kind; no ROLLBACK, o inverso da direção da referência |
+| `PROCESSED_WITHOUT_ENTRY` | transação PROCESSED que move saldo (inclusive OPENING) sem lançamento |
+| `PROCESSED_WITH_MULTIPLE_ENTRIES` | transação PROCESSED com mais de um lançamento; o extra só pode estar em outra wallet, porque `uq_ledger_wallet_transaction` impede dois na mesma |
+| `BALANCE_MISMATCH` | saldo guardado ≠ soma do ledger (CREDIT − DEBIT) |
+
+- **Resposta:**
+  - `storedBalance`, `calculatedBalance`, `difference` (= guardado − calculado) e `checkedEntries`;
+  - `consistent` (nenhuma divergência);
+  - `divergenceCount` e `divergences: [{ type, transactionId?, ledgerEntryId? }]`, limitada a 100 itens.
+- **Nunca corrige.** Na divergência: log `warn` `reconciliation_divergence` com `walletId`, `correlationId`, `divergenceCount` e a lista (só tipos e ids, **sem valores**). Também incrementa `wagering_reconciliation_divergences_total` e responde `consistent: false`. Corrigir exige investigar a causa; um ajuste automático esconderia o bug que a gerou.
+- **O que ela não detecta:**
+  - Encadeamento: um `balance_before` que não é o `balance_after` anterior não é conferido lançamento a lançamento. Cada lançamento é aritmeticamente correto (`ck_ledger_arithmetic`), e o saldo final é conferido contra a soma, então um erro de encadeamento só passa se for compensado por outro erro de mesmo valor.
+  - Regras de negócio violadas com lançamentos coerentes: duas reversões da mesma BET aparecem coerentes aqui, porque essa garantia é do índice `ux_wager_tx_one_reversal` e do use case.
+  - Eventos da outbox.
 
 ## Autenticação
 
@@ -464,7 +485,8 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | Inbox com o mesmo `messageId` e outro hash | DLQ `INBOX_PAYLOAD_MISMATCH` |
 | Corpo não-JSON, envelope inválido ou ilegível | DLQ `INVALID_ENVELOPE` |
 | `InvalidInput` | DLQ `INVALID_PAYLOAD` (motivo em `dlqDetail`) |
-| `TransientFailure`, falha transitória na pré-checagem, exceção inesperada (bug) | retry: `ChangeMessageVisibility` com backoff + `wagering_retries_total`; na 5ª tentativa → DLQ `MAX_ATTEMPTS_EXCEEDED` |
+| `TransientFailure` `unavailable` (sem conexão com o banco), no use case ou na pré-checagem | `ChangeMessageVisibility` 0 + `wagering_retries_total`, **fora** do limite de tentativas; o loop entra no [modo "banco fora"](#modo-banco-fora) |
+| Outra `TransientFailure` (`lock_timeout`, `deadlock`, `serialization`, `pool_exhausted`, `version_conflict`), na pré-checagem ou no use case, ou exceção inesperada (bug) | retry: `ChangeMessageVisibility` com backoff + `wagering_retries_total`; na 5ª tentativa → DLQ `MAX_ATTEMPTS_EXCEEDED` |
 
 - **DLQ:** primeiro `SendMessage` na `wager-transactions-dlq.fifo`, depois `DeleteMessage` na principal. Atributos: `dlqReason` (um dos 4 códigos acima), `dlqDetail` (até 256 caracteres, sem valores do payload), `sourceMessageId` e `receiveCount`. O `MessageGroupId` é o original, e o `MessageDeduplicationId` é o MessageId do SQS: se o delete falhar, a reentrega reenvia para a DLQ e o broker deduplica (testado). Conta em `wagering_dlq_messages_total`.
 - **Erro inesperado** é tratado como transitório até o limite: um bug não descarta a mensagem na primeira falha, e ela acaba na DLQ com motivo, para análise.
@@ -479,10 +501,28 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | Backoff do retry | `30s·2^(n−1)`, teto 300s: 30/60/120/240 | `n` = `ApproximateReceiveCount` |
 | `VisibilityTimeout` no receive | 60s | pior caso de um lote: 10 mensagens do mesmo grupo em sequência × ~5s (`lock_timeout` 2s + releitura) |
 | `WaitTimeSeconds` | 20 | long polling: menos chamadas vazias |
-| Pausa do polling (banco ou SQS fora) | `1s·2^(n−1)`, até 30s | não drenar a fila contra um banco fora do ar |
+| Pausa do polling (SQS falhou no receive) | `1s·2^(n−1)`, até 30s | não martelar um SQS fora do ar |
+| Sonda no modo "banco fora" | `1s·2^(n−1)`, até 30s, com `HEALTH_CHECK_TIMEOUT_MS` (2s) por sonda | volta a receber em até ~30s depois que o banco volta |
 | `SQS_SHUTDOWN_TIMEOUT_MS` | 8s | um dos três prazos de shutdown, que rodam em sequência (ver [Estratégia de testes](#estratégia-de-testes)) |
 
-**Tolerância a falha transitória:** uma mensagem tem 5 tentativas, separadas por 30+60+120+240 = 450s, ou seja, **~7,5 min** desde o primeiro recebimento até a DLQ. Quando a falha é `unavailable` (banco fora, pool esgotado) ou o próprio SQS falha, o loop também pausa o polling (1s, 2s, 4s… até 30s, zerando no primeiro lote sem falha de conexão). Assim a instância não sai recebendo e queimando tentativas de mensagens novas enquanto o banco está fora; as mensagens já recebidas seguem o backoff normal.
+**Tolerância a falha transitória da mensagem** (lock, deadlock, pool esgotado, bug): 5 tentativas, separadas por 30+60+120+240 = 450s, ou seja, **~7,5 min** desde o primeiro recebimento até a DLQ. Se o próprio SQS falha no receive, o loop pausa (1s, 2s, 4s… até 30s, zerando no primeiro ciclo bom).
+
+#### Modo "banco fora"
+
+Antes, uma queda do Postgres era tratada como qualquer transitório: a mensagem gastava as 5 tentativas, e uma queda de mais de ~7,5 min mandava mensagens financeiras válidas para a DLQ com `MAX_ATTEMPTS_EXCEEDED`. A pausa do polling ia só até 30s, então o consumidor continuava recebendo, e cada recebimento soma no `ApproximateReceiveCount`.
+
+**Agora**, só um erro de **conexão** com o banco (`TransientPersistenceError('unavailable')`: `ConnectionException` ou erro de rede, na pré-checagem da inbox ou no use case) ativa o modo. Pool esgotado (`pool_exhausted`), lock timeout, deadlock e serialização **não** ativam, porque o banco está de pé e a falha é de contenção (testado).
+
+1. A mensagem que acusou a queda volta **já** (visibilidade 0) e não conta para o limite do consumidor, porque a falha não é dela. As mensagens do lote que ainda não foram tentadas, de qualquer grupo, também voltam com visibilidade 0, sem tentativa, e o grupo mantém a ordem.
+2. O loop **para de receber**. Ele registra o log `warn` `sqs_consumer_db_unavailable` e põe `wagering_consumer_db_unavailable = 1`.
+3. Em seguida, espera com backoff (1s, 2s, 4s… até 30s) e **sonda** o Postgres com o mesmo `select 1` do `/health/ready` (`PostgresReadinessCheck`, com prazo de 2s).
+4. Quando a sonda passa, registra o log `info` `sqs_consumer_db_available` (com `downMs` e `probes`), põe o gauge em 0 e volta a receber.
+5. O `stop()` interrompe a espera e aborta a sonda, dentro do prazo de shutdown (log `sqs_consumer_db_wait_stopped`, testado).
+
+**Tolerância resultante:**
+- A duração da queda não importa mais. Cada queda custa no máximo **um** recebimento por mensagem para cada instância que a perceber: a mensagem que acusou a queda e, no máximo, as que outra instância recebeu antes de também entrar no modo. Com 3 instâncias, isso dá até 3 recebimentos por queda, no pior caso.
+- Como o limite do consumidor não se aplica a `unavailable`, a rede de segurança é o `maxReceiveCount` 10 da fila: a mensagem só vai para a DLQ (pelo redrive nativo, sem motivo) se algumas quedas seguidas a atingirem antes de ela ser processada.
+- O `test:chaos` para o Postgres por 40s, acima dos 22s que as 5 tentativas cobririam com os números da suíte. O teste exige que os consumidores entrem e saiam do modo, a DLQ fique vazia e tudo seja aplicado uma vez. A saída está em [`docs/carga/chaos.txt`](docs/carga/chaos.txt).
 
 **Por que 5 no consumidor e 10 na fila:** o SQS incrementa o `ApproximateReceiveCount` a cada **recebimento**, mesmo sem processamento. As mensagens que esperam atrás de uma que falhou no mesmo grupo são recebidas de novo a cada ciclo, e a contagem delas sobe junto (o mesmo vale para mensagens devolvidas no shutdown). Com redrive em 5, a fila mandaria essas mensagens válidas, nunca tentadas, para a DLQ sem motivo nem métrica. Com 5 no consumidor e 10 na fila:
 - a mensagem que falha vai para a DLQ pelo consumidor, com motivo, na 5ª tentativa, e as seguintes do grupo são processadas em seguida, no mesmo lote (testado);
@@ -707,6 +747,7 @@ Abertos, sem autenticação (CHALLENGE §2).
 | `wagering_reconciliation_divergences_total` | counter | — | reconciliações divergentes |
 | `wagering_retries_total` | counter | — | cada `ChangeMessageVisibility` de retry no consumidor |
 | `wagering_dlq_messages_total` | counter | — | mensagens enviadas à DLQ pelo consumidor (não conta o redrive nativo) |
+| `wagering_consumer_db_unavailable` | gauge | — | 1 enquanto o consumidor está no modo "banco fora" (sem receber, sondando o Postgres) |
 | `wagering_outbox_lag_seconds` | gauge | — | agora − `occurred_at` do pendente mais antigo |
 | `wagering_outbox_published_total` | counter | — | eventos publicados e commitados |
 | `wagering_outbox_publish_failures_total` | counter | scope (`batch`, `entry`) | chamada inteira falhou × entrada recusada |
@@ -732,7 +773,7 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
 | Concorrência | `bun run test:concurrency` | paralelismo real num processo: 80+80 sobre 100; a mesma BET 50x → 1 débito; mesma key em wallets diferentes; esgotar o saldo sem ficar negativo; dois publishers sobre a mesma outbox; dois workers de pendentes, e worker + use case na mesma wallet | ~10s |
 | Multi-instância | `bun run test:multi` | itens 1, 4, 5 e 8 do CHALLENGE §13 com **processos reais** (abaixo); e processo morto **antes** do commit (SIGKILL com a transação aberta num trigger de teste: nada persiste, a mensagem volta e é aplicada uma vez) | ~45s |
 | Carga | `bun run test:load` | throughput, latência e efeitos colaterais (lock, retries, DLQ, outbox lag) com 3 processos reais, em 3 cenários × níveis de concorrência, e consistência completa ao fim de cada rodada (abaixo). Fora do `bun test` (só com `LOAD=1`) | ~10 min |
-| Chaos | `bun run test:chaos` | §3 "PostgreSQL e SQS temporariamente indisponíveis" com 2 processos sob carga: Postgres **parado** (`docker compose stop`/`start`) → API 503 com `Retry-After`, consumidor em retry sem DLQ, tudo retoma; LocalStack **pausado** → eventos confirmados ficam na outbox até publicar, consumidor e publisher retomam sem perder nada. Verificação só por comportamento (retries > 0, DLQ vazia, consistência por SQL) | ~40s |
+| Chaos | `bun run test:chaos` | §3 "PostgreSQL e SQS temporariamente indisponíveis" com 2 processos sob carga: Postgres **parado** por ~40s (`docker compose stop`/`start`) → API 503 com `Retry-After`, consumidor no modo "banco fora" sem DLQ, tudo retoma; LocalStack **pausado** → eventos confirmados ficam na outbox até publicar, consumidor e publisher retomam sem perder nada. Verificação só por comportamento (retries > 0, DLQ vazia, consistência por SQL) | ~1,5 min |
 
 \* Máquina de desenvolvimento (Windows 11, Docker Desktop).
 
@@ -740,7 +781,7 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
 
 **Rastreabilidade:** cada exigência do `CHALLENGE.md` ligada ao teste que a prova, e o teste de mutação manual (8 mutações, todas pegas), em [`docs/RASTREABILIDADE.md`](docs/RASTREABILIDADE.md).
 
-**Chaos fora do `bun test`:** a suíte só roda com `CHAOS=1` (o script define) porque derruba containers compartilhados. O Postgres é **parado**, não pausado: com pause, as conexões abertas ficam penduradas em vez de recusadas, e não daria para provar o 503 nem o retry pelo comportamento. O LocalStack é **pausado**, porque um stop apagaria as filas da suíte (não há persistência). Backoff, visibilidade e prazos curtos valem só para a suíte; a tolerância do consumidor (5 tentativas, 2/4/8/8s) cobre a queda de ~12s. O `afterAll` restaura os containers mesmo em falha.
+**Chaos fora do `bun test`:** a suíte só roda com `CHAOS=1` (o script define) porque derruba containers compartilhados. O Postgres é **parado**, não pausado: com pause, as conexões abertas ficam penduradas em vez de recusadas, e não daria para provar o 503 nem o retry pelo comportamento. O LocalStack é **pausado**, porque um stop apagaria as filas da suíte (não há persistência). Backoff, visibilidade e prazos curtos valem só para a suíte. O Postgres fica parado ~40s, acima dos 22s que 5 tentativas com backoff 2/4/8/8s cobririam: quem impede a DLQ é o [modo "banco fora"](#modo-banco-fora), e o teste confere a entrada e a saída dele. O LocalStack fica pausado ~12s. O `afterAll` restaura os containers mesmo em falha.
 
 **Invariante final:** `wallet.balance == saldo reconstruído pelo ledger`, verificado por `expectLedgerConsistent` nos testes que movem saldo (no `wagering-http`, por um `afterEach` sobre todas as wallets, exceto no teste que corrompe o saldo de propósito) e, no multi e na carga, por SQL sobre todas as wallets (`test/multi/consistency.ts`, compartilhado pelas duas suítes). No banco, o constraint trigger saldo × último lançamento também barra a divergência no commit.
 
@@ -925,7 +966,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **Autenticação não implementada:** qualquer cliente que alcance a API submete em nome de qualquer provider e lê transações, saldos e ledgers. O desenho está em [Autenticação](#autenticação).
 - **Wallet sem vínculo com provider:** qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. O vínculo (`wallet_providers`) faz parte do desenho de autenticação, não implementado.
 - **REFUND de BET que já tem WIN PROCESSED é aceito.** A spec não proíbe, e o provedor pode estornar uma rodada cancelada depois de liquidada; o jogador fica com o prêmio e com o valor da aposta. Barrar exige definir a prioridade entre liquidação e estorno (decisão de negócio).
-- **O banco não garante tudo do ledger:** compara o saldo com o **último** lançamento, não com a soma; não verifica o encadeamento `balance_before` = `balance_after` anterior, nem que só transação PROCESSED tenha lançamento, nem que o valor do lançamento seja o da transação. Garantem o domínio, o use case e o lock por wallet; a reconciliação detecta em produção, e `expectLedgerConsistent` verifica nos testes.
+- **O banco não garante tudo do ledger:** compara o saldo com o **último** lançamento, não com a soma; não verifica o encadeamento `balance_before` = `balance_after` anterior, nem que só transação PROCESSED que move saldo tenha lançamento, nem que valor e direção do lançamento sejam os da transação. Garantem o domínio, o use case e o lock por wallet. Em produção, a [reconciliação](#reconciliação) detecta: lançamento sem transação PROCESSED que move saldo, valor ou direção divergentes, transação PROCESSED sem lançamento (ou com mais de um) e saldo ≠ soma. O encadeamento não é conferido lançamento a lançamento (ver "O que ela não detecta"). Nos testes, `expectLedgerConsistent` verifica tudo isso.
 - **Sem retenção da inbox:** `inbox_messages` cresce sem limite (ver [Idempotência](#idempotência) → "Retenção").
 - **TRUNCATE não é bloqueado** pelos triggers: em produção, o usuário da aplicação não deve ter essa permissão.
 - **C4a — mensagem não registrada na inbox:** se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, nenhuma linha de inbox é gravada. Uma mensagem posterior com o mesmo `messageId` e outro payload válido é processada normalmente (com a própria idempotency key, sem duplicar efeito). Fechar exige gravar a inbox também nesses desfechos, o que muda o use case.

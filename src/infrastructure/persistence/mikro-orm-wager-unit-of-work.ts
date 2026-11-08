@@ -73,10 +73,12 @@ export function translatePersistenceError(error: unknown): unknown {
   if (typeof code === 'string' && Object.hasOwn(TRANSIENT_SQLSTATES, code)) {
     return new TransientPersistenceError(TRANSIENT_SQLSTATES[code as keyof typeof TRANSIENT_SQLSTATES], { cause: error });
   }
-  // Pool esgotado (tarn/knex) ou banco fora do ar.
-  if (name === 'KnexTimeoutError' || name === 'ConnectionException' || isNetworkError(error)) {
+  // Banco fora do ar: o knex propaga o erro de criação da conexão (propagateCreateError).
+  if (name === 'ConnectionException' || isNetworkError(error)) {
     return new TransientPersistenceError('unavailable', { cause: error });
   }
+  // Pool esgotado (tarn/knex): o banco responde, mas não houve conexão livre a tempo.
+  if (name === 'KnexTimeoutError') return new TransientPersistenceError('pool_exhausted', { cause: error });
   return error;
 }
 

@@ -17,6 +17,8 @@ import { loadConfig, type AppConfig } from '../../../src/infrastructure/config/a
 import { InstrumentedProcessWagerTransaction } from '../../../src/infrastructure/observability/instrumented-process-wager-transaction';
 import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
 import { WagerQueueClient, type ReceivedMessage } from '../../../src/infrastructure/sqs/wager-queue.client';
+import type { ReadinessCheck } from '../../../src/application/ports/readiness-check';
+import { PostgresReadinessCheck } from '../../../src/infrastructure/persistence/postgres-readiness.check';
 import { buildInstrumentedProcess } from '../../../src/infrastructure/wagering-core.module';
 
 export interface TestQueues {
@@ -170,6 +172,23 @@ export interface ConsumerAppOptions {
   wrapProcess?: (real: Process) => Process;
   /** Substitui o cliente da fila — só para injetar falha no teste. */
   queueClient?: (sqs: SQSClient, config: AppConfig) => WagerQueueClient;
+  /** Substitui a sonda do Postgres (modo "banco fora" do consumidor e /health/ready). */
+  databaseProbe?: Pick<ReadinessCheck, 'check'>;
+}
+
+/** Sonda do banco controlada pelo teste: `down` decide se falha; registra cada chamada. */
+export function controlledProbe(down = false): { probe: Pick<ReadinessCheck, 'check'>; calls: number[]; setDown: (value: boolean) => void } {
+  const state = { down, calls: [] as number[] };
+  return {
+    calls: state.calls,
+    setDown: (value) => (state.down = value),
+    probe: {
+      async check() {
+        state.calls.push(Date.now());
+        if (state.down) throw new Error('sonda: banco fora');
+      },
+    },
+  };
 }
 
 /** Sobe a aplicação inteira (Nest) com o consumidor ligado, apontando para as filas do teste. */
@@ -208,6 +227,7 @@ export async function startConsumerApp(options: ConsumerAppOptions): Promise<INe
       factory: (sqs: SQSClient) => create(sqs, config),
     });
   }
+  if (options.databaseProbe) builder = builder.overrideProvider(PostgresReadinessCheck).useValue(options.databaseProbe);
   const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication({ logger: false });
   await app.init();

@@ -93,7 +93,11 @@ export class UniqueViolationError extends Error {
   }
 }
 
-export type TransientPersistenceReason = 'lock_timeout' | 'deadlock' | 'serialization' | 'unavailable';
+/**
+ * `unavailable` = sem conexão com o banco (só erro de conexão/rede); o consumidor SQS pausa o
+ * polling nesse caso. `pool_exhausted` = banco de pé, mas sem conexão livre no pool a tempo.
+ */
+export type TransientPersistenceReason = 'lock_timeout' | 'deadlock' | 'serialization' | 'pool_exhausted' | 'unavailable';
 
 /** Falha que pode passar sozinha: o chamador pode reenviar a mesma requisição. */
 export class TransientPersistenceError extends Error {
