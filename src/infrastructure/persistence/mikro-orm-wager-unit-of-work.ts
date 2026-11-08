@@ -10,11 +10,13 @@ import {
   type WagerUnitOfWork,
 } from '../../application/ports/wager-unit-of-work';
 import type { InboxMessage } from '../../domain/inbox-message';
+import type { JournalEntry } from '../../domain/journal-entry';
 import type { OutboxMessage } from '../../domain/outbox-message';
 import { REVERSAL_KINDS, WagerTransactionStatus, type WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
 import type { WalletLedgerEntry } from '../../domain/wallet-ledger-entry';
 import { isNetworkError } from '../network-errors';
+import { insertJournalEntry } from './journal.persistence';
 import { InboxMessageRecord, OutboxMessageRecord, toInboxMessageRecord, toOutboxMessageRecord } from './messages.persistence';
 import { WagerTransactionRecord, toWagerTransaction, toWagerTransactionRecord } from './wager-transaction.persistence';
 import { LedgerEntryRecord, toLedgerEntryRecord } from './wallet-ledger-entry.persistence';
@@ -151,6 +153,10 @@ class MikroOrmWagerProcessingRepository implements WagerProcessingRepository {
 
   async insertLedgerEntry(entry: WalletLedgerEntry): Promise<void> {
     await this.em.insert(LedgerEntryRecord, toLedgerEntryRecord(entry));
+  }
+
+  async insertJournalEntry(entry: JournalEntry): Promise<void> {
+    await insertJournalEntry(this.em, entry);
   }
 
   async insertOutbox(messages: readonly OutboxMessage[]): Promise<void> {

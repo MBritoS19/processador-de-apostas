@@ -1,4 +1,5 @@
 import type { InboxMessage } from '../../domain/inbox-message';
+import type { JournalEntry } from '../../domain/journal-entry';
 import type { OutboxMessage } from '../../domain/outbox-message';
 import type { WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
@@ -26,6 +27,11 @@ export interface WagerProcessingRepository {
   /** `UPDATE ... WHERE id = ? AND version = ?`; lança `WalletVersionConflictError` se nenhuma linha mudar. */
   updateWallet(wallet: Wallet, expectedVersion: number): Promise<void>;
   insertLedgerEntry(entry: WalletLedgerEntry): Promise<void>;
+  /**
+   * Lançamento de diário (partidas dobradas) com as pernas; cria as contas que faltarem. Débito = crédito
+   * e a coerência com o ledger são conferidos no COMMIT (`trg_journal_balanced`).
+   */
+  insertJournalEntry(entry: JournalEntry): Promise<void>;
   insertOutbox(messages: readonly OutboxMessage[]): Promise<void>;
   insertInbox(message: InboxMessage): Promise<void>;
   /**
