@@ -74,6 +74,11 @@ Todas as suítes, exceto a de unidade, usam Postgres e LocalStack **reais**: rod
 | `bun run test:concurrency` | paralelismo real num processo (80+80, a mesma BET 50x, publishers e workers concorrentes) | ~10s |
 | `bun run test:multi` | 3 processos reais da aplicação, SIGKILL depois do commit e antes do ack, SIGKILL de todas no meio da carga | ~40s |
 | `bun test` | todas as suítes acima | ~2 min |
+| `bun run test:chaos` | **para o Postgres e pausa o LocalStack** (~12s cada) com 2 processos sob carga; fora do `bun test` (só roda com `CHAOS=1`, que o script define) | ~40s |
+
+O `test:chaos` mexe nos containers compartilhados do `docker compose` (`stop`/`start` do Postgres, `pause`/`unpause` do LocalStack) e os restaura no fim, mesmo se falhar. Não rode outra suíte junto.
+
+A matriz que liga cada exigência do `CHALLENGE.md` ao teste que a prova, e o teste de mutação, estão em [`docs/RASTREABILIDADE.md`](docs/RASTREABILIDADE.md).
 
 O `test:multi` sobe processos `bun src/main.ts` locais (não containers), em portas livres escolhidas na hora, cada um com API, consumidor, publisher e worker. A carga é gerada por uma seed, impressa no início e na falha. Para reproduzir a carga de uma execução:
 
@@ -145,7 +150,7 @@ src/
   infrastructure/  config, MikroORM (registros, migrations, unit of work), SQS, outbox, logs e métricas
   interfaces/      controllers HTTP, consumidor SQS, outbox publisher e worker de pendentes
 test/
-  unit/  integration/  concurrency/  multi/
+  unit/  integration/  concurrency/  multi/  chaos/
 docker/            init do Postgres (banco de testes) e do LocalStack (filas)
 docker-compose.yml Postgres + LocalStack; profile `multi` com 3 réplicas
 Dockerfile         imagem da aplicação (oven/bun:1.4)

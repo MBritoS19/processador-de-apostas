@@ -110,6 +110,11 @@ Concorrência (paralelismo real):
 - [x] `README.md`: setup e comandos (provado num clone limpo)
 - [x] `ARCHITECTURE.md`: ORM, mapeamento de `Money`, estratégia transacional e de concorrência, transições de estado, `failureCode`, status HTTP, algoritmo de hash, TTL das pendências, autenticação, trade-offs e limitações
 
+## Varredura de requisitos (2026-11-08)
+- [x] Matriz exigência → teste para todo o `CHALLENGE.md` (`docs/RASTREABILIDADE.md`): 137 cobertas, 1 não testável
+- [x] Lacunas fechadas: morte antes do commit (multi), Postgres/SQS fora do ar (`test:chaos`), evento antes do commit, sem lock global, tipos monetários no schema, fronteira do domínio, OPENING pela fila, health fora do guard, logs do consumidor, log da reconciliação, latência
+- [x] Teste de mutação manual: 8 mutações, todas pegas por pelo menos um teste
+
 ## Opcionais (só depois de tudo acima)
 - [ ] Autenticação com Keycloak ou Zitadel
 - [ ] Teste de carga (`bun run test:load`) com p50/p95/p99, erros, conflitos e outbox lag

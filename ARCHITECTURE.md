@@ -274,7 +274,7 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 8. `INSERT outbox_messages` (1 ou 2 eventos) e, com contexto de inbox, `INSERT inbox_messages`.
 9. `COMMIT`. As FKs deferidas e o trigger saldo × ledger são checados aqui.
 
-**Comprovação:** `test/concurrency/process-wager-transaction.test.ts` usa 3 instâncias de MikroORM (pools separados) com `Promise.all`: 80+80 sobre saldo 100 (uma PROCESSED, uma `INSUFFICIENT_BALANCE`, saldo 20, um débito); a mesma BET 50x (1 débito, 1 linha, 49 replays); 30 BETs disputando o saldo; a mesma key em wallets diferentes. Falhas transitórias são reenviadas idênticas, com backoff curto, como faria um provedor. O caminho `23505 → conflito` tem um teste determinístico, em que uma transação externa segura o INSERT. Entre processos reais, ver [Estratégia de testes](#estratégia-de-testes).
+**Comprovação:** `test/concurrency/process-wager-transaction.test.ts` usa 3 instâncias de MikroORM (pools separados) com `Promise.all`: 80+80 sobre saldo 100 (uma PROCESSED, uma `INSUFFICIENT_BALANCE`, saldo 20, um débito); a mesma BET 50x (1 débito, 1 linha, 49 replays); 30 BETs disputando o saldo; a mesma key em wallets diferentes; e, com uma transação do use case parada no lock da wallet A, 12 outras wallets processadas em paralelo (sem lock global). Falhas transitórias são reenviadas idênticas, com backoff curto, como faria um provedor. O caminho `23505 → conflito` tem um teste determinístico, em que uma transação externa segura o INSERT. Entre processos reais, ver [Estratégia de testes](#estratégia-de-testes).
 
 ## Idempotência
 
@@ -727,9 +727,14 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
 | Unidade | `bun run test:unit` | `Money`, invariantes da `Wallet`, regras BET/WIN/LOSS/REFUND/ROLLBACK, conflito de moeda, payload divergente, máquina de estados, config (inclusive a recusa do `FAULT_INJECTION` fora de `NODE_ENV=test` e o orçamento de shutdown) | ~5s |
 | Integração | `bun run test:integration` | migrations e constraints; **atomicidade** (trigger real que derruba uma gravação no meio do commit, no use case e no worker de pendentes: nada persiste, e o reenvio aplica uma vez); inbox e redelivery; retry e DLQ; worker morto depois do commit e antes do ack (no processo); publishers concorrentes; recuperação de sessão morta (`pg_terminate_backend`, idle timeout); shutdown gracioso, inclusive com long polling em andamento | ~1 min |
 | Concorrência | `bun run test:concurrency` | paralelismo real num processo: 80+80 sobre 100; a mesma BET 50x → 1 débito; mesma key em wallets diferentes; esgotar o saldo sem ficar negativo; dois publishers sobre a mesma outbox; dois workers de pendentes, e worker + use case na mesma wallet | ~10s |
-| Multi-instância | `bun run test:multi` | itens 1, 4, 5 e 8 do CHALLENGE §13 com **processos reais** (abaixo) | ~40s |
+| Multi-instância | `bun run test:multi` | itens 1, 4, 5 e 8 do CHALLENGE §13 com **processos reais** (abaixo); e processo morto **antes** do commit (SIGKILL com a transação aberta num trigger de teste: nada persiste, a mensagem volta e é aplicada uma vez) | ~45s |
+| Chaos | `bun run test:chaos` | §3 "PostgreSQL e SQS temporariamente indisponíveis" com 2 processos sob carga: Postgres **parado** (`docker compose stop`/`start`) → API 503 com `Retry-After`, consumidor em retry sem DLQ, tudo retoma; LocalStack **pausado** → eventos confirmados ficam na outbox até publicar, consumidor e publisher retomam sem perder nada. Verificação só por comportamento (retries > 0, DLQ vazia, consistência por SQL) | ~40s |
 
 \* Máquina de desenvolvimento (Windows 11, Docker Desktop).
+
+**Rastreabilidade:** cada exigência do `CHALLENGE.md` ligada ao teste que a prova, e o teste de mutação manual (8 mutações, todas pegas), em [`docs/RASTREABILIDADE.md`](docs/RASTREABILIDADE.md).
+
+**Chaos fora do `bun test`:** a suíte só roda com `CHAOS=1` (o script define) porque derruba containers compartilhados. O Postgres é **parado**, não pausado: com pause, as conexões abertas ficam penduradas em vez de recusadas, e não daria para provar o 503 nem o retry pelo comportamento. O LocalStack é **pausado**, porque um stop apagaria as filas da suíte (não há persistência). Backoff, visibilidade e prazos curtos valem só para a suíte; a tolerância do consumidor (5 tentativas, 2/4/8/8s) cobre a queda de ~12s. O `afterAll` restaura os containers mesmo em falha.
 
 **Invariante final:** `wallet.balance == saldo reconstruído pelo ledger`, verificado por `expectLedgerConsistent` nos testes que movem saldo (no `wagering-http`, por um `afterEach` sobre todas as wallets, exceto no teste que corrompe o saldo de propósito) e, no multi, por SQL sobre todas as wallets. No banco, o constraint trigger saldo × último lançamento também barra a divergência no commit.
 
