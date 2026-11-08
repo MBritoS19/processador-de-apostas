@@ -34,3 +34,6 @@ test/load/results/
 
 # Banca avaliadora local (não versionar)
 banca/
+
+# Saídas brutas da rodada final (trazem hostname); o resumo versionado é docs/carga/final/RESUMO.md
+docs/carga/final/*.txt

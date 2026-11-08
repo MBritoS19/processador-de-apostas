@@ -125,16 +125,19 @@ Concorrência (paralelismo real):
 ## Fechamento
 - [x] Banca avaliadora (~82/100, nenhuma eliminatória; relatório local em `banca/`)
 - [x] Correções da banca (lotes 1 a 3 e ajustes finais)
-- [ ] Comentários de "porquê" nos 10–15 pontos críticos, com referência à spec
-- [ ] Checklist de entrega: `.env` fora do git, histórico organizado, push, teste a partir do clone remoto
+- [x] Comentários de "porquê" nos 10–15 pontos críticos, com referência à spec (commit `90ad45e`)
+- [x] Checklist de entrega (2026-11-08): `.env` e `CLAUDE.md` fora do git; clone limpo do remoto seguindo só o README (compose isolado, install, migration:up, `bun test`: 611 pass, 13 skip, 0 fail); README completado (URL real, `skip` explicado, demo); push junto com este fechamento
 - [ ] Preparação da apresentação
-- [ ] Ledger de partidas dobradas: planejar em etapas; implementar de forma aditiva em branch separado, só se houver tempo
+- [x] Rodada final (2026-11-08), resumo em `docs/carga/final/RESUMO.md`: typecheck ok, unit 296, integração 304 (3 rodadas seguidas, 0 falha), concorrência 9, multi 2, chaos 2 (Postgres parado 40s: 2 entradas e 2 saídas do modo "banco fora", DLQ 0; LocalStack pausado 12s: 46 eventos retidos na outbox, DLQ 0)
+- [x] `bun run demo`: cenário obrigatório (saldo 100, duas BETs de 80 em paralelo → uma PROCESSED, uma REJECTED `INSUFFICIENT_BALANCE`, saldo 20, reconciliação consistente)
+- [x] README: badge de CI e diagrama Mermaid do fluxo; ARCHITECTURE.md → "Evolução futura" (partidas dobradas, onde entra o `AuthGuard`, limitações e o que fecharia cada uma)
+- [x] Ledger de partidas dobradas: planejado em etapas (diário paralelo e aditivo) em ARCHITECTURE.md → "Evolução futura"; não implementado
 - [x] Mutex local por wallet: implementado no branch `feat/mutex-local` (não mesclado) e medido com o cenário `quente-frias` (3 rodadas antes + 3 depois, alternadas). Frias p95 −96%, mas quente PROCESSED/s −47% e 503 de 0 para 40: critério de merge não atingido. Resultado em `docs/CARGA.md` → "Mutex local por wallet: medido, não adotado"; JSONs em `docs/carga/mutex/`
 
 ## Opcionais (só depois de tudo acima)
 - [ ] Autenticação com Keycloak ou Zitadel — não implementada por decisão: não vale pontos (CHALLENGE §2, "Autenticação — a cargo do candidato"); `AuthGuard` no-op e desenho (Keycloak client credentials, vínculo `wallet_providers`) documentados em ARCHITECTURE.md → "Autenticação"
 - [x] Teste de carga (`bun run test:load`) com p50/p95/p99, erros, conflitos e outbox lag (concluído em 2026-11-08; metodologia em ARCHITECTURE.md → "Estratégia de testes"; análise do outbox lag e do acúmulo na fila, com propostas não implementadas, em `docs/CARGA.md`; dados em `docs/carga/`)
-- [ ] Ledger de partidas dobradas (plano em "Fechamento")
+- [ ] Ledger de partidas dobradas (plano em ARCHITECTURE.md → "Evolução futura")
 
 ---
 
@@ -238,3 +241,4 @@ Concorrência (paralelismo real):
 - 2026-11-07 — Fase 10 concluída: auditoria da documentação contra o código (variáveis, scripts, failureCodes, métricas e números batendo); ARCHITECTURE.md reorganizado por tema e sem números de seção (índice, visão geral em 1 minuto, estratégia transacional, configuração, interpretações, decisões/trade-offs/limitações); desenho de autenticação com leitura de wallet/ledger e vínculo `wallet_providers` (AuthGuard segue no-op); citações "§N" trocadas pelo nome da seção no código, nas configs e nas listas acima (este registro mantém os números antigos); README reescrito e provado num clone limpo com compose isolado (install, up, migrations, unit 281, integração 282, exemplos curl). Typecheck e unit verdes no repositório. — Próximo: opcionais, só com pedido.
 - 2026-11-08 — Banca avaliadora (clone limpo do GitHub, um subagente por área da §14 do CHALLENGE + eliminatórias): nota estimada ~82/100, nenhuma falha eliminatória; relatório local em `banca/` (fora do git). Correções em 3 lotes e 4 commits (main verde + CI + docs; reconciliação completa + consumidor resiliente a queda do banco; ajustes de custo baixo; evidências). Fechamento: typecheck ok, unit 295, integração 304, concorrência 9, multi 2, chaos 2 (Postgres parado 40s: 2 entradas e 2 saídas do modo "banco fora", 2 retries, DLQ 0; saída em `docs/carga/chaos.txt`). — Próximo: revisão e push pelo autor.
 - 2026-11-08 — Fechamento: itens registrados no PROGRESSO; cenário de carga `quente-frias` (50 clientes numa wallet + 10 em 300 wallets, medido por grupo). Mutex local por wallet implementado em `feat/mutex-local` (unit 309, integração 304 em 3 de 4 rodadas (1 falha intermitente não identificada), concorrência 9, multi 2) e medido A/B alternado 3×3: frias p95 2.148→88ms, mas quente 55,7→29,3 PROCESSED/s e 0→40 respostas 503; não mesclado, documentado em docs/CARGA.md e ARCHITECTURE.md. — Próximo: comentários de "porquê" nos pontos críticos.
+- 2026-11-08 — Fechamento final da main: rodada completa com resumo em `docs/carga/final/RESUMO.md` (unit 296, integração 304 ×3, concorrência 9, multi 2, chaos 2, tudo verde); clone limpo do remoto pelo README (611 pass, 13 skip); `bun run demo`; ARCHITECTURE.md → "Evolução futura"; README com badge de CI, Mermaid e lacunas do clone corrigidas. — Próximo: preparação da apresentação.

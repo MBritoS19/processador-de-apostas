@@ -28,6 +28,7 @@ As seções não são numeradas: código e configuração citam uma seção pelo
 20. [Interpretações adotadas](#interpretações-adotadas)
 21. [Pontos da especificação que geraram dúvida](#pontos-da-especificação-que-geraram-dúvida)
 22. [Decisões, trade-offs e limitações](#decisões-trade-offs-e-limitações)
+23. [Evolução futura](#evolução-futura)
 
 ---
 
@@ -993,3 +994,59 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **`InvalidInput` com código único:** o motivo vem em texto; códigos por campo ficam para quando um consumidor precisar.
 - **Rate limit** por provider ou wallet não existe; seria feito na borda.
 - **Testes:** a sobreposição real na hot wallet do `test:multi` não é provada (o resultado não depende da ordem; a disputa no lock é provada pelo 80+80 e pela suíte de concorrência); "pegou trabalho em andamento" no item 8 é sanidade, e o ponto entre commit e ack é provado de forma determinística só pelo item 5; a distribuição da fila entre instâncias depende do broker (`SQS_MAX_MESSAGES=1` e grupos distintos tornam isso praticamente certo); a seed reproduz a carga, não a intercalação; o vínculo `SIGTERM` → shutdown hooks (`enableShutdownHooks`) foi verificado só manualmente, no profile `multi`.
+
+## Evolução futura
+
+Nada desta seção está implementado. É o que viria a seguir e onde cada peça entraria sem mexer no que já está provado.
+
+### Ledger de partidas dobradas (diário paralelo e aditivo)
+
+**Por quê:** o `wallet_ledger_entries` é um ledger de partida simples, por wallet. Ele prova o saldo de cada jogador, mas não diz para onde foi o dinheiro: a BET de 80 sai da wallet e não entra em conta nenhuma. Contabilidade, fechamento por provider e auditoria externa pedem que todo movimento tenha contrapartida.
+
+**Desenho:** um diário **paralelo** ao ledger atual, gravado na mesma transação SQL, sem alterar nem substituir nada do que existe.
+
+- **Tabelas novas** (migration própria, com `down`):
+  - `accounts (id, kind, owner_id, currency)`: `PLAYER` (uma por wallet), `PROVIDER_HOUSE` (uma por provider e moeda, contrapartida de apostas e prêmios) e `FUNDING` (contrapartida do `OPENING`).
+  - `journal_entries (id, wager_transaction_id UNIQUE, created_at)`: um lançamento de diário por transação que move saldo.
+  - `journal_postings (id, journal_entry_id, account_id, direction, amount numeric(20,2), currency)`: as pernas.
+- **Mapeamento por kind:**
+
+| Kind | Débito | Crédito |
+|---|---|---|
+| `OPENING` | `FUNDING` | `PLAYER` |
+| `BET` | `PLAYER` | `PROVIDER_HOUSE` |
+| `WIN` | `PROVIDER_HOUSE` | `PLAYER` |
+| `REFUND` | `PROVIDER_HOUSE` | `PLAYER` |
+| `ROLLBACK` | inverso da referência | inverso da referência |
+| `LOSS` | não move saldo, sem lançamento | |
+
+- **Garantias no schema**, no mesmo espírito de [Garantias no schema](#garantias-no-schema): triggers append-only nas duas tabelas; constraint trigger **deferida** que, no commit, exige soma dos débitos = soma dos créditos por `journal_entry_id`, numa moeda só; `UNIQUE (wager_transaction_id)` para nunca lançar duas vezes.
+- **Onde entra no código:** o `WagerSettlement` já é a fonte única de "aplicar regras + gravar" (use case e worker de pendentes). Ele passaria a montar também o lançamento de diário, ao lado do `WalletLedgerEntry`. A concorrência não muda: o lock continua sendo o da wallet. As contas `PROVIDER_HOUSE` **não** têm saldo materializado, para não virarem hot row; o saldo delas é soma sob demanda.
+- **Rollout aditivo:** (1) migration cria as tabelas; (2) backfill a partir de `wallet_ledger_entries`, em lotes por `seq`; (3) gravação dupla pelo `WagerSettlement`; (4) a [reconciliação](#reconciliação) ganha uma checagem: saldo da conta `PLAYER` no diário = `wallets.balance` = soma do ledger atual. O ledger por wallet continua sendo a fonte do saldo e do cursor da API; o diário é a visão contábil.
+- **Trade-off:** mais 3 linhas por transação no caminho quente e mais uma constraint deferida no commit, em troca de um balanço fechado por provider e de uma segunda prova, independente, do saldo de cada wallet.
+
+### Autenticação
+
+O desenho completo está em [Autenticação](#autenticação). O que muda no código:
+
+- **`AuthGuard`** (`src/interfaces/http/auth.guard.ts`, hoje no-op e já aplicado a todo o `WageringController`): valida o JWT (JWKS do IdP em cache, `iss`, `aud`, `exp`) e anexa à requisição `{ providerId, scopes }`. Health e `/metrics` continuam fora.
+- **Escopos por rota:** um decorator de escopos lido pelo mesmo guard.
+- **Amarração do `providerId`:** no controller, antes do use case: `payload.providerId` diferente do token → `403`. O use case continua sem saber de autenticação.
+- **Vínculo wallet ↔ provider:** migration com `wallet_providers`; a leitura da wallet sob lock ganha `AND EXISTS (...)`; sem vínculo, `WALLET_NOT_FOUND`.
+- **SQS:** continua canal interno; o vínculo wallet ↔ provider vale para ele também, porque é checado no use case.
+
+### Limitações conhecidas e o que fecharia cada uma
+
+A lista completa está em [Limitações](#limitações). As que mais pesam em produção:
+
+| Limitação | O que fecharia |
+|---|---|
+| Sem autenticação; wallet sem vínculo com provider | o desenho acima |
+| O banco não confere encadeamento nem "só PROCESSED tem lançamento" | o diário de partidas dobradas dá uma segunda prova; reconciliação por faixa de `seq` confere o encadeamento |
+| `inbox_messages` sem retenção | expurgo por idade, com janela maior que a de redelivery do SQS |
+| C4a: `IdempotencyConflict`/`InvalidInput` na primeira entrega não grava inbox | gravar a inbox também nesses desfechos (muda o use case) |
+| Uma wallet quente ocupa o pool e atrasa as frias da mesma instância | pool separado ou fila por wallet quente na borda (o mutex local foi medido e recusado, ver [Decisões e trade-offs](#decisões-e-trade-offs)) |
+| Contadores do worker de pendentes em memória | contadores persistidos na própria transação pendente |
+| Sem heartbeat de visibilidade no consumidor | `ChangeMessageVisibility` periódico em lotes longos |
+| Sem rate limit por provider ou wallet | na borda (gateway) |
+| REFUND depois de WIN é aceito | decisão de negócio sobre a prioridade entre liquidação e estorno |

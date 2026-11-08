@@ -1,6 +1,30 @@
 # Processador de Apostas
 
+[![CI](https://github.com/MBritoS19/processador-de-apostas/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MBritoS19/processador-de-apostas/actions/workflows/ci.yml)
+
 Serviço financeiro que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) recebidas de provedores por HTTP e por SQS. Saldo, ledger, inbox e outbox são gravados na mesma transação SQL, os eventos saem depois do commit por um outbox publisher, e o serviço funciona com várias instâncias em paralelo.
+
+```mermaid
+flowchart LR
+    P[Provedor] -->|POST /wagering/transactions<br/>Idempotency-Key| H[API HTTP]
+    P -->|mensagem| Q[(wager-transactions.fifo)]
+    Q --> C[Consumidor SQS]
+    H --> U[ProcessWagerTransaction]
+    C --> U
+    subgraph TX [Uma transação SQL]
+        direction TB
+        L[FOR UPDATE na wallet] --> R[regras + idempotência]
+        R --> W[transação + saldo + ledger<br/>+ inbox + outbox]
+    end
+    U --> TX
+    TX -->|COMMIT| DB[(PostgreSQL)]
+    DB -->|SKIP LOCKED, depois do commit| O[Outbox publisher]
+    O --> E[(wager-events.fifo)]
+    C -.->|ack só depois do commit| Q
+    C -.->|falha permanente| D[(DLQ)]
+```
+
+Qualquer número de instâncias roda o mesmo processo (API, consumidor, outbox publisher e worker de referências pendentes) sobre o mesmo Postgres. Detalhes em `ARCHITECTURE.md` → "Visão geral em 1 minuto".
 
 - Especificação: [`CHALLENGE.md`](CHALLENGE.md)
 - Arquitetura, decisões, trade-offs e limitações: [`ARCHITECTURE.md`](ARCHITECTURE.md) (comece pela "Visão geral em 1 minuto")
@@ -20,13 +44,16 @@ Stack: Bun 1.x, TypeScript estrito, NestJS, PostgreSQL 16 com MikroORM 6, AWS SQ
 ## Setup do zero
 
 ```bash
-git clone <url-do-repositório> processador-de-apostas
+git clone https://github.com/MBritoS19/processador-de-apostas.git
 cd processador-de-apostas
 bun install
 cp .env.example .env                  # PowerShell: Copy-Item .env.example .env
 docker compose up -d --wait           # Postgres 16 + LocalStack; espera os healthchecks (as filas são criadas no init)
 bun run migration:up                  # aplica as migrations no banco de desenvolvimento
+bun run demo                          # cenário obrigatório: saldo 100, duas BETs de 80 em paralelo
 ```
+
+A demo sobe a aplicação no próprio processo, numa porta livre, e termina com `OK: uma PROCESSED, uma REJECTED, saldo 20.00` (saída 0) ou `FALHOU` (saída 1). Pode rodar quantas vezes quiser: cada execução usa uma wallet nova.
 
 O `--wait` só volta quando o Postgres aceita conexões e o script de criação das filas terminou com sucesso. O banco de testes `wagering_test` é criado pelo init do Postgres, e as suítes aplicam as migrations nele sozinhas.
 
@@ -80,7 +107,7 @@ Todas as suítes, exceto a de unidade, usam Postgres e LocalStack **reais**: rod
 | `bun run test:integration` | migrations, constraints, atomicidade, inbox e redelivery, retry e DLQ, outbox, recuperação | ~1 min |
 | `bun run test:concurrency` | paralelismo real num processo (80+80, a mesma BET 50x, publishers e workers concorrentes) | ~10s |
 | `bun run test:multi` | 3 processos reais da aplicação, SIGKILL depois do commit e antes do ack, SIGKILL de todas no meio da carga | ~45s |
-| `bun test` | todas as suítes acima | ~2 min |
+| `bun test` | todas as suítes acima; termina com 13 `skip` (chaos e load, que só rodam pelos próprios scripts); os logs JSON no meio da saída são esperados | ~2,5 min |
 | `bun run test:chaos` | **para o Postgres (~40s) e pausa o LocalStack (~12s)** com 2 processos sob carga; fora do `bun test` (só roda com `CHAOS=1`, que o script define) | ~1,5 min |
 | `bun run test:load` | teste de carga: 3 instâncias, 3 cenários × níveis `10,50` mais o quente-frias (50 clientes numa wallet + 10 em wallets frias) (`LOAD_LEVELS=10,50,100` opcional, ~15 min), consistência ao fim de cada rodada; resumo no terminal e JSON em `test/load/results/`; fora do `bun test` (só com `LOAD=1`) | ~10 min |
 
@@ -159,7 +186,8 @@ src/
   interfaces/      controllers HTTP, consumidor SQS, outbox publisher e worker de pendentes
 test/
   unit/  integration/  concurrency/  multi/  chaos/  load/
-docs/              RASTREABILIDADE.md (exigência → teste), CARGA.md e carga/ (resultados do teste de carga)
+scripts/           demo.ts (bun run demo)
+docs/              RASTREABILIDADE.md (exigência → teste), CARGA.md e carga/ (resultados do teste de carga; final/RESUMO.md com a rodada final)
 docker/            init do Postgres (banco de testes) e do LocalStack (filas)
 .github/workflows/ CI: typecheck, unidade e integração
 docker-compose.yml Postgres + LocalStack; profile `multi` com 3 réplicas
