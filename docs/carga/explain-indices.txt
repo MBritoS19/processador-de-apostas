@@ -1,0 +1,129 @@
+# EXPLAIN ANALYZE dos caminhos de leitura, antes e depois de Migration20261109100000_read_path_indexes
+# wagering_test logo após o test:load (16.048 transações, 13.212 lançamentos, 29.890 eventos na outbox); wallet com 80 transações
+
+## ANTES (planner padrão)
+ANALYZE
+ANALYZE
+ANALYZE
+--- reconciliação: lançamentos + transações
+Sort (actual time=0.425..0.429 rows=64 loops=1)
+  Sort Key: l.seq
+  Sort Method: quicksort  Memory: 28kB
+  ->  Nested Loop Left Join (actual time=0.158..0.401 rows=64 loops=1)
+        ->  Nested Loop Left Join (actual time=0.148..0.373 rows=64 loops=1)
+              ->  Bitmap Heap Scan on wallet_ledger_entries l (actual time=0.128..0.178 rows=64 loops=1)
+                    Recheck Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+                    Heap Blocks: exact=42
+                    ->  Bitmap Index Scan on uq_ledger_wallet_seq (actual time=0.112..0.113 rows=64 loops=1)
+                          Index Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+              ->  Index Scan using wager_transactions_pkey on wager_transactions t (actual time=0.003..0.003 rows=1 loops=64)
+                    Index Cond: (id = l.transaction_id)
+        ->  Index Scan using wager_transactions_pkey on wager_transactions r (actual time=0.000..0.000 rows=0 loops=64)
+              Index Cond: (id = t.reference_transaction_id)
+Planning Time: 1.023 ms
+Execution Time: 0.558 ms
+--- reconciliação: PROCESSED x lançamentos
+GroupAggregate (actual time=1.988..2.025 rows=73 loops=1)
+  Group Key: t.id
+  ->  Sort (actual time=1.983..2.003 rows=73 loops=1)
+        Sort Key: t.id
+        Sort Method: quicksort  Memory: 29kB
+        ->  Hash Right Join (actual time=0.510..1.950 rows=73 loops=1)
+              Hash Cond: (l.transaction_id = t.id)
+              ->  Seq Scan on wallet_ledger_entries l (actual time=0.003..0.652 rows=13212 loops=1)
+              ->  Hash (actual time=0.451..0.451 rows=73 loops=1)
+                    Buckets: 1024  Batches: 1  Memory Usage: 12kB
+                    ->  Bitmap Heap Scan on wager_transactions t (actual time=0.366..0.431 rows=73 loops=1)
+                          Recheck Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+                          Filter: (status = 'PROCESSED'::text)
+                          Rows Removed by Filter: 7
+                          Heap Blocks: exact=56
+                          ->  Bitmap Index Scan on uq_wager_tx_id_wallet (actual time=0.352..0.352 rows=82 loops=1)
+                                Index Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+Planning Time: 0.550 ms
+Execution Time: 2.137 ms
+--- findPendingReferenceEventId
+Limit (actual time=4.674..4.675 rows=0 loops=1)
+  ->  Sort (actual time=4.673..4.673 rows=0 loops=1)
+        Sort Key: seq
+        Sort Method: quicksort  Memory: 25kB
+        ->  Seq Scan on outbox_messages (actual time=4.665..4.665 rows=0 loops=1)
+              Filter: ((aggregate_id = 'ff010b51-95d7-4d82-bea9-8ca433805db5'::uuid) AND (event_type = 'WagerTransactionPendingReference'::text))
+              Rows Removed by Filter: 29890
+Planning Time: 0.168 ms
+Execution Time: 4.702 ms
+
+## ANTES (enable_seqscan=off, índices novos removidos numa transação desfeita): join PROCESSED x lançamentos
+Index Scan using uq_wager_tx_id_wallet on wager_transactions t (wallet_id é a 2a coluna: percorre o índice inteiro)
+Index Scan using uq_ledger_wallet_transaction on wallet_ledger_entries l (transaction_id é a 2a coluna)
+Execution Time: 11.319 ms
+
+## DEPOIS (planner padrão)
+ANALYZE
+ANALYZE
+ANALYZE
+--- reconciliação: lançamentos + transações
+Sort (actual time=0.356..0.358 rows=64 loops=1)
+  Sort Key: l.seq
+  Sort Method: quicksort  Memory: 28kB
+  ->  Nested Loop Left Join (actual time=0.038..0.326 rows=64 loops=1)
+        ->  Nested Loop Left Join (actual time=0.033..0.300 rows=64 loops=1)
+              ->  Bitmap Heap Scan on wallet_ledger_entries l (actual time=0.020..0.065 rows=64 loops=1)
+                    Recheck Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+                    Heap Blocks: exact=42
+                    ->  Bitmap Index Scan on uq_ledger_wallet_seq (actual time=0.011..0.011 rows=64 loops=1)
+                          Index Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+              ->  Index Scan using wager_transactions_pkey on wager_transactions t (actual time=0.003..0.003 rows=1 loops=64)
+                    Index Cond: (id = l.transaction_id)
+        ->  Index Scan using wager_transactions_pkey on wager_transactions r (actual time=0.000..0.000 rows=0 loops=64)
+              Index Cond: (id = t.reference_transaction_id)
+Planning Time: 1.050 ms
+Execution Time: 0.442 ms
+--- reconciliação: PROCESSED x lançamentos
+GroupAggregate (actual time=1.496..1.515 rows=73 loops=1)
+  Group Key: t.id
+  ->  Sort (actual time=1.491..1.494 rows=73 loops=1)
+        Sort Key: t.id
+        Sort Method: quicksort  Memory: 29kB
+        ->  Hash Right Join (actual time=0.115..1.472 rows=73 loops=1)
+              Hash Cond: (l.transaction_id = t.id)
+              ->  Seq Scan on wallet_ledger_entries l (actual time=0.002..0.643 rows=13212 loops=1)
+              ->  Hash (actual time=0.100..0.101 rows=73 loops=1)
+                    Buckets: 1024  Batches: 1  Memory Usage: 12kB
+                    ->  Bitmap Heap Scan on wager_transactions t (actual time=0.031..0.088 rows=73 loops=1)
+                          Recheck Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+                          Filter: (status = 'PROCESSED'::text)
+                          Rows Removed by Filter: 7
+                          Heap Blocks: exact=56
+                          ->  Bitmap Index Scan on ix_wager_tx_wallet (actual time=0.023..0.023 rows=80 loops=1)
+                                Index Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+Planning Time: 0.472 ms
+Execution Time: 1.587 ms
+--- findPendingReferenceEventId
+Limit (actual time=0.079..0.079 rows=0 loops=1)
+  ->  Index Scan using ix_outbox_aggregate on outbox_messages (actual time=0.078..0.078 rows=0 loops=1)
+        Index Cond: (aggregate_id = 'ff010b51-95d7-4d82-bea9-8ca433805db5'::uuid)
+        Filter: (event_type = 'WagerTransactionPendingReference'::text)
+        Rows Removed by Filter: 75
+Planning Time: 0.238 ms
+Execution Time: 0.116 ms
+
+## DEPOIS (enable_seqscan=off): join PROCESSED x lançamentos
+SET
+GroupAggregate (actual time=0.727..0.763 rows=73 loops=1)
+  Group Key: t.id
+  ->  Sort (actual time=0.721..0.725 rows=73 loops=1)
+        Sort Key: t.id
+        Sort Method: quicksort  Memory: 29kB
+        ->  Nested Loop Left Join (actual time=0.101..0.676 rows=73 loops=1)
+              ->  Bitmap Heap Scan on wager_transactions t (actual time=0.027..0.234 rows=73 loops=1)
+                    Recheck Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+                    Filter: (status = 'PROCESSED'::text)
+                    Rows Removed by Filter: 7
+                    Heap Blocks: exact=56
+                    ->  Bitmap Index Scan on ix_wager_tx_wallet (actual time=0.017..0.018 rows=80 loops=1)
+                          Index Cond: (wallet_id = 'd734d06d-4cfc-4b6a-9463-b4a25090d5a7'::uuid)
+              ->  Index Scan using ix_ledger_transaction on wallet_ledger_entries l (actual time=0.006..0.006 rows=1 loops=73)
+                    Index Cond: (transaction_id = t.id)
+Planning Time: 2.673 ms
+Execution Time: 0.889 ms

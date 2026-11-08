@@ -211,6 +211,27 @@ describe('migrations', () => {
     await knex.raw('truncate outbox_messages');
   });
 
+  it('índices dos caminhos de leitura: up cria, down remove só eles', async () => {
+    const migrator = orm.getMigrator();
+    await migrator.up();
+    const READ_PATH = ['ix_ledger_transaction', 'ix_outbox_aggregate', 'ix_wager_tx_wallet'];
+    const present = async () =>
+      (
+        await orm.em.getConnection().execute<{ name: string }[]>(
+          `select indexname as name from pg_indexes where indexname in (${READ_PATH.map(() => '?').join(', ')}) order by name`,
+          READ_PATH,
+        )
+      ).map((row) => row.name);
+    expect(await present()).toEqual(READ_PATH);
+
+    await migrator.down({ to: 'Migration20261109100000_read_path_indexes' });
+    expect(await present()).toEqual([]);
+    expect(await appliedNames()).toContain('Migration20261109000000_double_entry_journal');
+
+    await migrator.up();
+    expect(await present()).toEqual(READ_PATH);
+  });
+
   describe('diário de partidas dobradas', () => {
     const JOURNAL = 'Migration20261109000000_double_entry_journal';
     const JOURNAL_TABLES = ['accounts', 'journal_entries', 'journal_postings'];
