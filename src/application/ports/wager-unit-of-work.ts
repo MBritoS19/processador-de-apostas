@@ -37,7 +37,10 @@ export interface WagerProcessingRepository {
   lockTransaction(id: string): Promise<WagerTransaction | undefined>;
   /** Grava o novo estado de uma PENDING_REFERENCE. Lança se a linha não estiver mais pendente (bug: o chamador segura o lock). */
   updatePendingTransaction(tx: WagerTransaction): Promise<void>;
-  /** PENDING_REFERENCE vencidas (`next_reference_check_at <= now`), as mais antigas primeiro. Sem lock. */
+  /**
+   * PENDING_REFERENCE vencidas (`next_reference_check_at <= now`), sem lock, em ordem total e determinística:
+   * `next_reference_check_at`, depois `created_at` (ordem de chegada), depois `id`.
+   */
   findDuePendingReferences(now: Date, limit: number): Promise<PendingReferenceCandidate[]>;
   countPendingReferences(): Promise<number>;
   /**

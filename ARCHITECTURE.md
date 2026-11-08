@@ -652,8 +652,9 @@ Transações que chegam antes da referência (ROLLBACK/REFUND antes da BET, WIN/
    ```sql
    select id, wallet_id, player_id from wager_transactions
    where status = 'PENDING_REFERENCE' and next_reference_check_at <= $now
-   order by next_reference_check_at limit $batch   -- 10
+   order by next_reference_check_at, created_at, id limit $batch   -- 10
    ```
+   **Ordem total, de propósito.** O desfecho de uma pendente que referencia outra pendente depende de qual das duas é resolvida antes. Exemplo: um ROLLBACK que referencia um REFUND, que referencia uma BET que nunca chega. Se o ROLLBACK é resolvido primeiro, o REFUND ainda está pendente e o ROLLBACK expira como `REFERENCE_NOT_FOUND`. Se o REFUND é resolvido primeiro, ele vira REJECTED, e o ROLLBACK sai `REFERENCE_NOT_PROCESSED`. Os dois códigos são verdadeiros e nenhum move saldo. Ordenando só por `next_reference_check_at`, as pendentes que vencem no mesmo instante saíam em ordem indefinida, e o mesmo estado podia dar códigos diferentes (era a causa de um teste intermitente). O desempate `created_at` (ordem de chegada) e depois `id` torna a ordem do lote determinística; o índice parcial continua filtrando e entrega a primeira coluna já ordenada; com backlog grande de vencidas, o esperado é o Postgres completar a ordem com incremental sort (não medido aqui; com a tabela de teste vazia o plano é um sort simples). Com várias instâncias, a ordem entre workers continua sujeita a quem trava a wallet primeiro. Como todas leem a mesma ordem e a wallet é a unidade do lock, as pendentes de uma wallet saem na mesma sequência. Provas: `pending-references.test.ts` → "empate em next_reference_check_at".
 2. **Por candidata**, uma transação SQL própria (com o `lock_timeout` de 2s):
    1. wallet com `FOR UPDATE SKIP LOCKED` (ocupada → pula, `skipped{wallet_busy}`);
    2. a transação com `FOR UPDATE`, relida;
