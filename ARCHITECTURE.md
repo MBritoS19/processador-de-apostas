@@ -107,7 +107,7 @@ Provedores enviam `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK` por HTTP ou pela f
 
 - **Nomes:** `SQS_WAGER_QUEUE_NAME`, `SQS_WAGER_DLQ_NAME` e `SQS_WAGER_EVENTS_QUEUE_NAME` são lidos pela aplicação **e** repassados pelo compose ao script de init, com os mesmos defaults (os nomes do CHALLENGE §10). Com uma fonte só, a aplicação não procura uma fila que o init nunca criou.
 - **Sem dedup por conteúdo:** o produtor informa um `MessageDeduplicationId` explícito. A dedup do broker é só **otimização**; a garantia é a inbox persistente no Postgres.
-- **`maxReceiveCount=10`:** rede de segurança acima do limite do consumidor, que é 5 (era 5 na Fase 0 e foi revisto na Fase 5; motivo em [Consumidor SQS](#consumidor-sqs)). É configurável por `SQS_MAX_RECEIVE_COUNT`, lido só pelo compose; mudar exige recriar o container do LocalStack.
+- **`maxReceiveCount=10`:** rede de segurança acima do limite do consumidor, que é 5 (o valor inicial era 5 e foi revisto junto com o consumidor; motivo em [Consumidor SQS](#consumidor-sqs)). É configurável por `SQS_MAX_RECEIVE_COUNT`, lido só pelo compose; mudar exige recriar o container do LocalStack.
 - **`VisibilityTimeout=30s`** é só o default da fila. O consumidor pede 60s em cada `ReceiveMessage` e não estende a visibilidade durante o processamento.
 - **Criação:** o script `docker/localstack/init/ready.d/01-create-queues.sh` valida nomes e `maxReceiveCount` antes de usá-los. Ele é idempotente para os mesmos atributos. Com atributos diferentes numa fila existente, a criação falha; isso não ocorre hoje, porque o compose não persiste o estado do LocalStack.
 
@@ -150,7 +150,7 @@ O replay devolve o saldo daquele momento (CHALLENGE §7.7), mas `LOSS` e as reje
 - **Escritas à mão em SQL** (`snapshot: false`, sem geração por diff). O schema (constraints, índices, triggers) é parte do que é avaliado e precisa ser explícito e revisável, não derivado das entidades.
 - `transactional: true` e `allOrNothing: true`: um lote de migrations aplica inteiro ou nada.
 - Toda migration tem `down`. O ciclo up → down → up é testado em `test/integration/infrastructure/migrations.test.ts`, e o CLI, em `migrate-cli.test.ts`. A migration `baseline` é vazia de propósito; as tabelas nascem em `…100000_schema`.
-- Uma migration aplicada nunca é editada: mudanças entram em migrations novas (`…200000_one_reversal_per_reference`, `…300000_idempotency_per_provider`, `…310000_balance_limit_failure_code`, `…400000_outbox_seq`, `…500000_correlation_id`), cada uma com `down` que restaura o estado anterior.
+- Uma migration aplicada nunca é editada: mudanças entram em migrations novas (`…200000_one_reversal_per_reference`, `…300000_idempotency_per_provider`, `…310000_balance_limit_failure_code`, `…400000_outbox_seq`, `…500000_correlation_id`, `…20261109000000_double_entry_journal`), cada uma com `down` que restaura o estado anterior.
 
 ## Modelo de domínio
 
@@ -272,7 +272,7 @@ Migration `Migration20261109000000_double_entry_journal`, com `down` que remove 
 
 - **Balanço no COMMIT:** constraint trigger deferido, disparado pelo INSERT do lançamento e de cada perna (uma perna avulsa num lançamento antigo também é pega). Exige débito = crédito com ≥ 2 pernas, transação `PROCESSED` que move saldo com o mesmo valor e moeda, exatamente uma perna `PLAYER` da wallet da transação, contrapartida certa e perna `PLAYER` igual (valor e direção) ao lançamento da wallet. **Só lê** o `wallet_ledger_entries`.
 - **Sem saldo materializado em conta nenhuma:** a HOUSE seria uma hot row compartilhada por todas as wallets do provider. Saldo de conta é soma sob demanda (`ix_postings_account`).
-- **FUNDING** criadas pela migration para BRL, USD e as moedas já existentes em `wallets`. O sistema aceita qualquer ISO de 3 letras, então uma moeda nova cria a sua FUNDING sob demanda, pelo mesmo mecanismo da HOUSE (decisão do autor: não restringir moedas).
+- **FUNDING** criadas pela migration para BRL, USD e as moedas já existentes em `wallets`. O sistema aceita qualquer ISO de 3 letras, então uma moeda nova cria a sua FUNDING sob demanda, pelo mesmo mecanismo da HOUSE (decisão: não restringir moedas).
 - **Backfill** na própria migration, a partir do `wallet_ledger_entries`, num INSERT…SELECT por tabela; o trigger deferido valida tudo no COMMIT da migration. Serve para este volume; em produção seria em lotes por `seq`.
 
 ### Gravação e concorrência
@@ -301,7 +301,7 @@ O banco garante **diário → ledger** (todo lançamento de diário bate com um 
 
 ### Custo e medição
 
-Por transação que move saldo: +1 consulta de contas, +1 INSERT (lançamento e pernas) e o trigger deferido (3 execuções no COMMIT, cada uma com consultas por índice). Medido com o cenário `quente-frias` contra a `main` (3 + 3 rodadas alternadas, medianas): p95 geral +18,7% (critério do autor: até +20%, sem erros novos; atingido), nenhum erro novo, e vazão −18% na wallet disputada e no total, porque o custo cai dentro da seção crítica do lock da wallet. Dados em `docs/CARGA.md` → "Diário de partidas dobradas: medição".
+Por transação que move saldo: +1 consulta de contas, +1 INSERT (lançamento e pernas) e o trigger deferido (3 execuções no COMMIT, cada uma com consultas por índice). Medido com o cenário `quente-frias` contra a `main` (3 + 3 rodadas alternadas, medianas): p95 geral +18,7% (critério de adoção: até +20%, sem erros novos; atingido), nenhum erro novo, e vazão −18% na wallet disputada e no total, porque o custo cai dentro da seção crítica do lock da wallet. Dados em `docs/CARGA.md` → "Diário de partidas dobradas: medição".
 
 **Se o custo precisar cair** (não implementado; cada opção exige nova medição com o mesmo cenário):
 
@@ -353,8 +353,9 @@ Por transação que move saldo: +1 consulta de contas, +1 INSERT (lançamento e 
 5. Se há referência: `SELECT * FROM wager_transactions WHERE provider_id = $p AND external_transaction_id = $ref` e depois `SELECT count(*) … WHERE reference_transaction_id = $id AND kind IN ('REFUND','ROLLBACK') AND status = 'PROCESSED'`.
 6. `INSERT wager_transactions`, já no status final (PROCESSED, REJECTED ou PENDING_REFERENCE).
 7. Se o saldo mudou: `UPDATE wallets … WHERE id = $w AND version = $v` e `INSERT wallet_ledger_entries`.
-8. `INSERT outbox_messages` (1 ou 2 eventos) e, com contexto de inbox, `INSERT inbox_messages`.
-9. `COMMIT`. As FKs deferidas e o trigger saldo × ledger são checados aqui.
+8. Se o saldo mudou, o diário ([Diário de partidas dobradas](#diário-de-partidas-dobradas)): `SELECT … FROM accounts` pelas chaves naturais (PLAYER da wallet e HOUSE do provider, ou FUNDING na abertura); a conta que falta entra com `INSERT … ON CONFLICT DO NOTHING` e é relida; depois, um único statement `WITH entry AS (INSERT journal_entries …) INSERT journal_postings …` grava o lançamento e as pernas.
+9. `INSERT outbox_messages` (1 ou 2 eventos) e, com contexto de inbox, `INSERT inbox_messages`.
+10. `COMMIT`. As FKs deferidas, o trigger saldo × ledger e o balanço do diário (`trg_journal_balanced`) são checados aqui.
 
 **Comprovação:** `test/concurrency/process-wager-transaction.test.ts` usa 3 instâncias de MikroORM (pools separados) com `Promise.all`. Os casos:
 - **80+80 sobre saldo 100:** uma PROCESSED, uma `INSUFFICIENT_BALANCE`, saldo 20 e um débito. A **sobreposição é provada**: uma transação externa segura o lock, e o teste só a libera quando o `pg_stat_activity` mostra as duas BETs esperando ao mesmo tempo. Depois, as duas são reenviadas e devolvem o resultado original como replay, sem novo débito.
@@ -827,6 +828,13 @@ Abertos, sem autenticação (CHALLENGE §2).
 - **Campos:** `correlationId`, `providerId`, `walletId` e `transactionId` quando existem; `messageId` e `sqsMessageId` nas entradas por SQS. O log de requisição usa o template da rota (`/wallets/:id`), não a URL.
 - **Nunca entram nos logs:** payload financeiro completo, valores, mensagens do Postgres.
 
+Exemplo real de uma BET de 25.00 processada por HTTP (`bun src/main.ts`, `X-Correlation-Id: corr-exemplo-1`; só o `hostname` foi trocado). O use case e o middleware HTTP emitem uma linha cada, ligadas pelo `correlationId`; nenhuma tem valor nem saldo:
+
+```json
+{"level":30,"time":1794181307493,"pid":13964,"hostname":"<host>","name":"ProcessWagerTransaction","correlationId":"corr-exemplo-1","providerId":"provider-a","walletId":"f84b28dd-dd25-4b4d-bff5-5b6b4756076e","transactionId":"1e9ff520-171e-4ffe-917a-b36a649b3591","status":"PROCESSED","event":"wager_transaction_processed","msg":"wager transaction processed"}
+{"level":30,"time":1794181307493,"pid":13964,"hostname":"<host>","name":"HTTP","correlationId":"corr-exemplo-1","method":"POST","route":"/wagering/transactions","statusCode":200,"durationMs":49,"msg":"http request completed"}
+```
+
 ### Métricas
 
 - `GET /metrics` (formato Prometheus), aberto como os health checks. Em produção ficaria numa porta interna ou atrás da rede do scraper.
@@ -1070,7 +1078,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **Sem retenção da inbox:** `inbox_messages` cresce sem limite (ver [Idempotência](#idempotência) → "Retenção").
 - **Modo "banco fora":** o consumidor volta a receber até ~5s depois de o banco voltar (teto da sonda). Várias quedas seguidas podem levar uma mensagem ao `maxReceiveCount` 10 da fila, e ela iria para a DLQ pelo redrive nativo, sem motivo nem métrica do consumidor. A sonda vê só o Postgres desta instância.
 - **TRUNCATE não é bloqueado** pelos triggers: em produção, o usuário da aplicação não deve ter essa permissão.
-- **C4a — mensagem não registrada na inbox:** se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, nenhuma linha de inbox é gravada. Uma mensagem posterior com o mesmo `messageId` e outro payload válido é processada normalmente (com a própria idempotency key, sem duplicar efeito). Fechar exige gravar a inbox também nesses desfechos, o que muda o use case.
+- **Mensagem não registrada na inbox:** se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, nenhuma linha de inbox é gravada. Uma mensagem posterior com o mesmo `messageId` e outro payload válido é processada normalmente (com a própria idempotency key, sem duplicar efeito). Fechar exige gravar a inbox também nesses desfechos, o que muda o use case.
 - **Sem heartbeat de visibilidade no consumidor:** um lote acima de 60s pode ser reentregue em paralelo; é seguro, mas desperdiça trabalho.
 - **Outbox:** cada publisher ocupa uma conexão por lote (com N instâncias, até N conexões além do tráfego). Não existe consumidor de `wager-events` neste sistema, então a dedup por `eventId` do lado de lá é contrato, não testada aqui.
 - **Worker de pendentes:** os contadores de erro e de `wallet_busy` são em memória por instância (zeram no restart; com N instâncias, encerrar como FAILED pode levar mais de 5 erros no total). Erros inesperados em mais de `batchSize` candidatas ao mesmo tempo seguram o lote até cada uma virar FAILED. Uma pendente cuja referência está em outra wallet não é antecipada pelo caminho rápido (é rejeitada no check normal). `start()` logo depois de um `stop()` que estourou o prazo é ignorado enquanto o loop antigo termina.
@@ -1111,7 +1119,7 @@ A lista completa está em [Limitações](#limitações). As que mais pesam em pr
 | O banco não confere encadeamento nem "só PROCESSED tem lançamento" | reconciliação por faixa de `seq` confere o encadeamento; o diário de partidas dobradas já exige, no banco, que todo lançamento de diário seja de transação PROCESSED e bata com o ledger |
 | Lançamento da wallet sem lançamento de diário só é pego pela reconciliação | trigger em `wallets` exigindo diário para o último lançamento (desenho acima) |
 | `inbox_messages` sem retenção | expurgo por idade, com janela maior que a de redelivery do SQS |
-| C4a: `IdempotencyConflict`/`InvalidInput` na primeira entrega não grava inbox | gravar a inbox também nesses desfechos (muda o use case) |
+| `IdempotencyConflict`/`InvalidInput` na primeira entrega não grava inbox | gravar a inbox também nesses desfechos (muda o use case) |
 | Uma wallet quente ocupa o pool e atrasa as frias da mesma instância | pool separado ou fila por wallet quente na borda (o mutex local foi medido e recusado, ver [Decisões e trade-offs](#decisões-e-trade-offs)) |
 | Contadores do worker de pendentes em memória | contadores persistidos na própria transação pendente |
 | Sem heartbeat de visibilidade no consumidor | `ChangeMessageVisibility` periódico em lotes longos |

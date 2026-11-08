@@ -28,7 +28,6 @@ Qualquer número de instâncias roda o mesmo processo (API, consumidor, outbox p
 
 - Especificação: [`CHALLENGE.md`](CHALLENGE.md)
 - Arquitetura, decisões, trade-offs e limitações: [`ARCHITECTURE.md`](ARCHITECTURE.md) (comece pela "Visão geral em 1 minuto")
-- Andamento por fase: [`PROGRESSO.md`](PROGRESSO.md)
 
 Stack: Bun 1.x, TypeScript estrito, NestJS, PostgreSQL 16 com MikroORM 6, AWS SQS via LocalStack e Docker Compose.
 
@@ -91,6 +90,18 @@ curl -s -X POST http://localhost:3000/wagering/transactions -H 'Content-Type: ap
 
 Endpoints e status HTTP: `ARCHITECTURE.md` → "API HTTP". A autenticação não está implementada (desenho em `ARCHITECTURE.md` → "Autenticação").
 
+## Limitações conhecidas
+
+Resumo. A lista completa, com o que fecharia cada uma, está em `ARCHITECTURE.md` → "Limitações" e "Evolução futura".
+
+- **Sem autenticação:** qualquer cliente que alcance a API age em nome de qualquer provider; wallets não têm vínculo com provider. O desenho está pronto, não implementado.
+- **Wallet muito disputada:** a espera pelo lock tem orçamento de ~2s; acima disso, a resposta é `503` com `Retry-After`, e o provider reenvia (a requisição é idempotente).
+- **Outbox sem DLQ:** um evento que nunca publica trava só o próprio agregado; fica visível por métrica e log (`outbox_event_stuck`), sem descarte.
+- **Sem heartbeat de visibilidade no consumidor SQS:** um lote acima de 60s pode ser reentregue em paralelo; a inbox e o lock evitam efeito duplo.
+- **Sem retenção da inbox:** `inbox_messages` cresce sem limite.
+- **Regras de reversão:** REFUND depois de WIN é aceito (`ARCHITECTURE.md` → "Regras de negócio").
+- **O schema não garante tudo do ledger** (encadeamento `balance_before`, "só PROCESSED tem lançamento"); a reconciliação detecta.
+
 ## Testes
 
 Todas as suítes, exceto a de unidade, usam Postgres e LocalStack **reais**: rode `docker compose up -d --wait` antes. Elas usam o banco `wagering_test`, configurado em `.env.test`, que o `bun test` carrega sozinho (com `NODE_ENV=test`); não dependem do seu `.env`. Não rode duas suítes ao mesmo tempo: elas compartilham esse banco.
@@ -109,9 +120,15 @@ Todas as suítes, exceto a de unidade, usam Postgres e LocalStack **reais**: rod
 | `bun run test:multi` | 3 processos reais da aplicação, SIGKILL depois do commit e antes do ack, SIGKILL de todas no meio da carga | ~45s |
 | `bun test` | todas as suítes acima; termina com 13 `skip` (chaos e load, que só rodam pelos próprios scripts); os logs JSON no meio da saída são esperados | ~2,5 min |
 | `bun run test:chaos` | **para o Postgres (~40s) e pausa o LocalStack (~12s)** com 2 processos sob carga; fora do `bun test` (só roda com `CHAOS=1`, que o script define) | ~1,5 min |
-| `bun run test:load` | teste de carga: 3 instâncias, 3 cenários × níveis `10,50` mais o quente-frias (50 clientes numa wallet + 10 em wallets frias) (`LOAD_LEVELS=10,50,100` opcional, ~15 min), consistência ao fim de cada rodada; resumo no terminal e JSON em `test/load/results/`; fora do `bun test` (só com `LOAD=1`) | ~10 min |
+| `bun run test:load` | teste de carga: 3 instâncias, 3 cenários × níveis `10,50` mais o quente-frias (50 clientes numa wallet + 10 em wallets frias) (`LOAD_LEVELS=10,50,100` opcional, ~15 min), consistência ao fim de cada rodada; resumo no terminal e JSON em `test/load/results/`; fora do `bun test` (só com `LOAD=1`) | ~11 min |
 
 O `test:chaos` mexe nos containers compartilhados do `docker compose` (`stop`/`start` do Postgres, `pause`/`unpause` do LocalStack) e os restaura no fim, mesmo se falhar. Não rode outra suíte junto.
+
+**O `test:chaos` atua no stack principal:** ele chama `docker compose` **sem** `-p`, então age no projeto `processador-de-apostas`. Se você subiu o stack com outro nome (`docker compose -p outro-nome …`, ver "Setup do zero"), defina o mesmo nome em `COMPOSE_PROJECT_NAME` antes de rodar; sem isso, o teste para e pausa os containers do projeto errado:
+
+```bash
+COMPOSE_PROJECT_NAME=outro-nome bun run test:chaos     # PowerShell: $env:COMPOSE_PROJECT_NAME="outro-nome"; bun run test:chaos
+```
 
 A matriz que liga cada exigência do `CHALLENGE.md` ao teste que a prova, e o teste de mutação, estão em [`docs/RASTREABILIDADE.md`](docs/RASTREABILIDADE.md).
 
@@ -193,3 +210,7 @@ docker/            init do Postgres (banco de testes) e do LocalStack (filas)
 docker-compose.yml Postgres + LocalStack; profile `multi` com 3 réplicas
 Dockerfile         imagem da aplicação (oven/bun:1.4)
 ```
+
+## Uso de IA
+
+O projeto foi desenvolvido com assistência de IA (Claude Code). As decisões de arquitetura foram revisadas por mim e estão registradas, com motivo e trade-off, no `ARCHITECTURE.md`. A validação é feita por testes contra Postgres e LocalStack reais, e os números citados nos documentos (testes, carga, caos) vêm de execuções reais. A entrega também passou por uma avaliação independente feita a partir de um clone limpo, seguindo só este README.
