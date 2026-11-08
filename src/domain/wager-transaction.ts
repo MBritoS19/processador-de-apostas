@@ -27,7 +27,7 @@ export const INTERNAL_PROVIDER_ID = 'internal';
 /** Prefixo da idempotency key (e do id externo) da OPENING. Reservado para providers externos. */
 export const OPENING_KEY_PREFIX = 'opening:';
 
-/** Backoff entre tentativas de resolver a referência. O prazo (TTL) é do settlement (ARCHITECTURE §20). */
+/** Backoff entre tentativas de resolver a referência. O prazo (TTL) é do settlement (ARCHITECTURE.md → "Worker de referências pendentes"). */
 export const REFERENCE_RETRY_BASE_MS = 5_000;
 export const REFERENCE_RETRY_MAX_MS = 10 * 60_000;
 

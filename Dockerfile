@@ -15,5 +15,5 @@ EXPOSE 3000
 
 USER bun
 
-# O SIGTERM do `docker stop` aciona o shutdown gracioso (ARCHITECTURE §18/§19/§20); o compose dá 30s.
+# O SIGTERM do `docker stop` aciona o shutdown gracioso (ARCHITECTURE.md → "Consumidor SQS", "Outbox publisher" e "Worker de referências pendentes"); o compose dá 30s.
 CMD ["bun", "src/main.ts"]

@@ -1,6 +1,6 @@
 /**
  * Códigos de falha estáveis e legíveis por máquina (contrato público: nunca renomeie,
- * só acrescente). Significado e ação esperada do provedor em ARCHITECTURE.md.
+ * só acrescente). Significado e ação esperada do provedor em ARCHITECTURE.md → "Taxonomia de failureCode".
  */
 export enum FailureCode {
   /** BET sem saldo suficiente. */
@@ -10,7 +10,7 @@ export enum FailureCode {
   WalletNotFound = 'WALLET_NOT_FOUND',
   WalletPlayerMismatch = 'WALLET_PLAYER_MISMATCH',
   CurrencyMismatch = 'CURRENCY_MISMATCH',
-  /** Referência não apareceu dentro do limite de tentativas de PENDING_REFERENCE. */
+  /** Prazo (TTL a partir do createdAt) de PENDING_REFERENCE esgotado sem a referência resolvida: ausente ou ainda pendente. */
   ReferenceNotFound = 'REFERENCE_NOT_FOUND',
   /** Referência terminou REJECTED ou FAILED (PENDING/PENDING_REFERENCE significam aguardar). */
   ReferenceNotProcessed = 'REFERENCE_NOT_PROCESSED',

@@ -33,7 +33,7 @@ export interface WagerProcessingRepository {
    * transação segura o lock (as pendentes sempre têm wallet do player, garantido pela FK).
    */
   tryLockWallet(walletId: string, playerId: string): Promise<Wallet | undefined>;
-  /** `SELECT ... FOR UPDATE` da transação. Só depois do lock da wallet (ordem de locks, ARCHITECTURE §20). */
+  /** `SELECT ... FOR UPDATE` da transação. Só depois do lock da wallet (ordem de locks, ARCHITECTURE.md → "Worker de referências pendentes"). */
   lockTransaction(id: string): Promise<WagerTransaction | undefined>;
   /** Grava o novo estado de uma PENDING_REFERENCE. Lança se a linha não estiver mais pendente (bug: o chamador segura o lock). */
   updatePendingTransaction(tx: WagerTransaction): Promise<void>;

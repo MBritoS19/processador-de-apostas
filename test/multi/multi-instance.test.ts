@@ -14,7 +14,7 @@ import { callWithRetry, cents, eventually, freePort, Instance, prng, seedFromEnv
  * pendentes) sobre o mesmo Postgres e o mesmo LocalStack, com carga mista e determinística
  * (seed fixa, `MULTI_SEED` para reproduzir), SIGKILL no ponto "depois do commit, antes do ack"
  * e SIGKILL de todas as instâncias no meio da carga. Todas as verificações finais são SQL
- * direto no banco. Estratégia e limitações: ARCHITECTURE.md §21.
+ * direto no banco. Estratégia e limitações: ARCHITECTURE.md → "Estratégia de testes".
  */
 
 const SEED = seedFromEnv(process.env['MULTI_SEED'], 20261107);
@@ -86,7 +86,7 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
       body: { playerId, initialBalance: { amount: cents(start), currency: 'BRL' } },
     });
     // POST /wallets não tem Idempotency-Key: se a 1ª tentativa commitou e a resposta se perdeu, o
-    // reenvio do cliente recebe 409 com o id da wallet já criada (ARCHITECTURE §16).
+    // reenvio do cliente recebe 409 com o id da wallet já criada (ARCHITECTURE.md → "API HTTP").
     const retriedConflict = response.status === 409 && response.attempts > 1 && typeof response.body['error']?.['walletId'] === 'string';
     expect(response.status === 201 || retriedConflict, `POST /wallets ${label}: ${response.status} ${JSON.stringify(response.body)}`).toBe(true);
     const id = (retriedConflict ? response.body['error']['walletId'] : response.body['id']) as string;

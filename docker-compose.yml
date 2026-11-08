@@ -59,7 +59,7 @@ services:
       replicas: 3
     # Os três *_SHUTDOWN_TIMEOUT_MS (8s cada) rodam em sequência; o loadConfig recusa soma acima de
     # SHUTDOWN_BUDGET_MS (25s), que fica abaixo destes 30s: o SIGTERM termina antes do SIGKILL do
-    # Docker (ARCHITECTURE §21).
+    # Docker (ARCHITECTURE.md → "Estratégia de testes").
     stop_grace_period: 30s
     environment:
       NODE_ENV: production

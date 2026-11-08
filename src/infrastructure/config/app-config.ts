@@ -18,7 +18,7 @@ export interface AppConfig {
     /** Destino do outbox publisher (Fase 6). FIFO, sem DLQ. */
     readonly wagerEventsQueueName: string;
   };
-  /** Outbox publisher (Fase 6). Números justificados no ARCHITECTURE.md §19. */
+  /** Outbox publisher (Fase 6). Números justificados no ARCHITECTURE.md → "Outbox publisher". */
   readonly outboxPublisher: {
     readonly enabled: boolean;
     /** Até 10: limite do SendMessageBatch. */
@@ -33,7 +33,7 @@ export interface AppConfig {
     readonly stuckAttempts: number;
     readonly shutdownTimeoutMs: number;
   };
-  /** Consumidor da fila de transações (Fase 5). Números justificados no ARCHITECTURE.md §18. */
+  /** Consumidor da fila de transações (Fase 5). Números justificados no ARCHITECTURE.md → "Consumidor SQS". */
   readonly sqsConsumer: {
     readonly enabled: boolean;
     /** Chave da inbox: `(consumerName, messageId)`. */
@@ -47,7 +47,7 @@ export interface AppConfig {
     readonly maxAttempts: number;
     readonly shutdownTimeoutMs: number;
   };
-  /** Worker de referências pendentes (Fase 7). Números justificados no ARCHITECTURE.md §20. */
+  /** Worker de referências pendentes (Fase 7). Números justificados no ARCHITECTURE.md → "Worker de referências pendentes". */
   readonly pendingReferences: {
     readonly workerEnabled: boolean;
     readonly batchSize: number;
@@ -62,7 +62,7 @@ export interface AppConfig {
   readonly healthCheckTimeoutMs: number;
   /**
    * Injeção de falha SÓ para testes (Fase 9). Desligada por padrão e aceita apenas com
-   * `NODE_ENV=test` (lista de permissão). Documentada no ARCHITECTURE.md §21.
+   * `NODE_ENV=test` (lista de permissão). Documentada no ARCHITECTURE.md → "Estratégia de testes".
    */
   readonly faultInjection: FaultInjection;
 }
@@ -81,7 +81,7 @@ export class InvalidConfigError extends Error {
 /**
  * Os três `beforeApplicationShutdown` (consumidor, outbox, pendentes) rodam em SEQUÊNCIA no Nest:
  * a soma dos timeouts é o pior caso do shutdown e precisa caber antes do SIGKILL do orquestrador
- * (`stop_grace_period` de 30s no compose). Padrão 8s cada; orçamento 25s (ARCHITECTURE §21).
+ * (`stop_grace_period` de 30s no compose). Padrão 8s cada; orçamento 25s (ARCHITECTURE.md → "Estratégia de testes").
  */
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8_000;
 export const DEFAULT_SHUTDOWN_BUDGET_MS = 25_000;

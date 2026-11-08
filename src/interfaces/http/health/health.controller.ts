@@ -2,7 +2,7 @@ import { Controller, Get, HttpStatus, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { ReadinessService, type ReadinessReport } from '../../../application/health/readiness.service';
 
-/** Health checks. Abertos por definição (CHALLENGE §2 e §9). Contrato em ARCHITECTURE.md §6. */
+/** Health checks. Abertos por definição (CHALLENGE §2 e §9). Contrato em ARCHITECTURE.md → "Observabilidade". */
 @Controller('health')
 export class HealthController {
   constructor(private readonly readiness: ReadinessService) {}

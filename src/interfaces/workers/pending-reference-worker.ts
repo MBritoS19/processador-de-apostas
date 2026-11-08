@@ -25,7 +25,7 @@ const MAX_TRACKED = 10_000;
 /**
  * Worker agendado das PENDING_REFERENCE (CHALLENGE §7.1). Cada ciclo busca candidatas vencidas
  * sem lock e trata uma por vez, cada uma na sua transação (`ResolvePendingReferences.resolve`).
- * No shutdown para entre candidatas: a transação em andamento termina. Decisões no ARCHITECTURE §20.
+ * No shutdown para entre candidatas: a transação em andamento termina. Decisões no ARCHITECTURE.md → "Worker de referências pendentes".
  */
 export class PendingReferenceWorker {
   private running = false;
@@ -34,7 +34,7 @@ export class PendingReferenceWorker {
   private lastGaugeAt = 0;
   /**
    * Heurística operacional, por instância e em memória (zera no restart; cada instância conta a
-   * sua parte). Não é garantia: a correção vem do lock e da releitura no banco. ARCHITECTURE §20.
+   * sua parte). Não é garantia: a correção vem do lock e da releitura no banco. ARCHITECTURE.md → "Worker de referências pendentes".
    */
   private readonly consecutiveErrors = new Map<string, number>();
   private readonly consecutiveBusy = new Map<string, number>();

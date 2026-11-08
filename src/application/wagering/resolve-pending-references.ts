@@ -42,7 +42,7 @@ type Locked = { type: 'locked'; wallet: Wallet; tx: WagerTransaction } | Extract
  * Reprocessa transações PENDING_REFERENCE (CHALLENGE §7.1) com as mesmas regras da entrada
  * (`WagerSettlement`). Ordem de locks igual à do use case: wallet → transação. Seguro com N
  * instâncias: a candidata é relida sob lock e só é tratada se ainda estiver pendente (e vencida).
- * Fluxo e números no ARCHITECTURE §20.
+ * Fluxo e números no ARCHITECTURE.md → "Worker de referências pendentes".
  */
 export class ResolvePendingReferences {
   constructor(

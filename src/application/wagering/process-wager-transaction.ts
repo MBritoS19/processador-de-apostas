@@ -108,7 +108,7 @@ export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 /**
  * Processa uma transação de aposta (BET, WIN, LOSS, REFUND, ROLLBACK) com idempotência
  * persistida e lock pessimista por wallet. Usado pela entrada HTTP (Fase 4) e SQS (Fase 5).
- * Estratégia e SQL exato no ARCHITECTURE.md §12.
+ * Estratégia e SQL exato no ARCHITECTURE.md → "Concorrência".
  */
 export class ProcessWagerTransaction {
   constructor(

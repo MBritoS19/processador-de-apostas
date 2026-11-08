@@ -23,7 +23,7 @@ export interface SettlementContext {
 
 /**
  * Prazo para a referência aparecer, contado do `createdAt` da transação dependente. Esgotado:
- * REJECTED com REFERENCE_NOT_FOUND (justificativa no ARCHITECTURE §20).
+ * REJECTED com REFERENCE_NOT_FOUND (justificativa no ARCHITECTURE.md → "Worker de referências pendentes").
  */
 export const PENDING_REFERENCE_TTL_MS = 60 * 60_000;
 

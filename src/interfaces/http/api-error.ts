@@ -5,7 +5,7 @@ import { rootLogger } from '../../infrastructure/observability/logger';
 import { translatePersistenceError } from '../../infrastructure/persistence/mikro-orm-wager-unit-of-work';
 import { ensureCorrelationId } from './correlation.middleware';
 
-/** Códigos estáveis do envelope de erro (ARCHITECTURE §16). */
+/** Códigos estáveis do envelope de erro (ARCHITECTURE.md → "API HTTP"). */
 export type ApiErrorCode =
   | 'INVALID_INPUT'
   | 'NOT_FOUND'

@@ -211,7 +211,7 @@ export interface HttpResult {
 
 /**
  * Cliente de provedor: reenvia a MESMA requisição (mesma Idempotency-Key) em erro de rede e
- * em 503, como o contrato manda (ARCHITECTURE §16). Em qualquer outra resposta, para.
+ * em 503, como o contrato manda (ARCHITECTURE.md → "API HTTP"). Em qualquer outra resposta, para.
  */
 export async function callWithRetry(
   instances: readonly Instance[],

@@ -510,7 +510,7 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     expect(events, 'sem shutdown_timeout nem poll_failed').toEqual([]);
     // Mensagem enviada depois do stop: não é processada nem perdida. Abortar no cliente não cancela o
     // poll no servidor, que pode entregá-la à conexão abortada; aí ela fica em voo até a visibilidade
-    // expirar e volta para outra instância (mesmo efeito de um processo que cai; ARCHITECTURE §18).
+    // expirar e volta para outra instância (mesmo efeito de um processo que cai; ARCHITECTURE.md → "Consumidor SQS").
     await send(sqs, queues.queueUrl, envelope(wallet));
     expect(await queueDepth(sqs, queues.queueUrl)).toBe(1);
     expect(await debits(wallet.walletId)).toBe(0);

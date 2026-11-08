@@ -52,7 +52,7 @@ export function pollPauseMs(consecutiveFailures: number): number {
 /**
  * Consumidor de `wager-transactions.fifo`. Reutiliza o use case da entrada HTTP (via o
  * wrapper instrumentado) com contexto de inbox. Ack só depois que o use case retorna (commit);
- * classificação e números no ARCHITECTURE.md §18.
+ * classificação e números no ARCHITECTURE.md → "Consumidor SQS".
  */
 export class WagerConsumer {
   private readonly logger = rootLogger.child({ name: 'WagerConsumer' });

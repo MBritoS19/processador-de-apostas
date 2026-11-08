@@ -72,11 +72,11 @@ Fase atual: **10 — Documentação** (aguardando plano)
 - [x] Worker com `FOR UPDATE SKIP LOCKED` (ou equivalente)
 - [x] Backoff e retry
 - [x] Seguro com múltiplos publishers
-- [x] Publicação duplicada continua segura para o consumidor (mesmo `eventId`; dedup por `eventId` é contrato do consumidor, ARCHITECTURE §19)
+- [x] Publicação duplicada continua segura para o consumidor (mesmo `eventId`; dedup por `eventId` é contrato do consumidor, ARCHITECTURE.md → "Outbox publisher")
 
 ## Fase 7 — Worker de referências pendentes (§7.1)
 - [x] Reprocessamento com backoff exponencial (mesmas regras via `WagerSettlement`; lock wallet → transação)
-- [x] Limite de tentativas ou TTL definido e justificado (TTL 1h do `createdAt`, ARCHITECTURE §20)
+- [x] Limite de tentativas ou TTL definido e justificado (TTL 1h do `createdAt`, ARCHITECTURE.md → "Worker de referências pendentes")
 - [x] Ao esgotar: `REJECTED` + evento publicado (`REFERENCE_NOT_FOUND` + `WagerTransactionRejected` na outbox, mesmo commit)
 
 ## Fase 8 — Observabilidade (§12)
@@ -119,85 +119,85 @@ Concorrência (paralelismo real):
 
 ## Decisões tomadas
 <!-- Uma linha por decisão; o detalhe vai no ARCHITECTURE.md -->
-- MikroORM 6 com `EntitySchema` em infrastructure (domínio sem ORM) — ARCHITECTURE §2
-- Migrations em SQL escrito à mão, CLI próprio via `getMigrator()` — §3
-- LocalStack fixado em 4.9.2 (sem auth token); MiniStack como alternativa — §4
-- Filas FIFO sem dedup por conteúdo; redrive para DLQ com `maxReceiveCount=10` (rede de segurança; revisto na Fase 5) — §5, §18
-- Liveness não toca dependências; readiness com porta `ReadinessCheck`, 503 e `reason` fechado (timeout|unreachable|error) — §6
-- Contexto do ORM explícito em todas as entradas (`allowGlobalContext:false`, `registerRequestContext:false`) — §2
-- Conexão preguiçosa no app: sobe com o Postgres fora e reporta not_ready (sem crash loop) — §2
-- Módulos Nest por responsabilidade (Config global, Persistence, Messaging, Health) — §1
-- `Money` em `bigint` de centavos, escala fixa 2, até 18 dígitos inteiros; "25"/"25.5" aceitos e serializados com 2 casas — §7
-- Domínio recebe ids e datas do chamador (não gera UUID nem lê relógio) — §7
-- `Wallet.open` devolve a wallet (version 1) + lançamento OPENING; saldo inicial zero não gera lançamento; `debit`/`credit` devolvem o lançamento — §8
-- `markPendingReference(now)` cobre PENDING→PENDING_REFERENCE e as novas tentativas (`referenceAttempts`, `nextReferenceCheckAt`, backoff 5s·2^(n−1) até 10min) — §8
-- Backoff da outbox determinístico 1s·2^(n−1) até 5min; id da outbox = `eventId` — §8
-- `FailureCode` com 14 códigos estáveis; erros de domínio não carregam código (o use case da Fase 3 mapeia) — §9
-- Referência PENDING/PENDING_REFERENCE → aguardar; só referência REJECTED/FAILED gera `REFERENCE_NOT_PROCESSED` — §9
-- Mapeamento por registros de persistência (`EntitySchema`) + mappers que chamam `rehydrate`; `numeric` como string direto para `Money.from` — §10
-- `WagerTransaction.observedBalance` (coluna `observed_balance`): obrigatório em `markProcessed`, opcional em `reject`; o replay devolve o saldo original — §10
-- Todas as FKs entre tabelas `DEFERRABLE INITIALLY DEFERRED`: a ordem do flush não importa — §10
-- FK `(wallet_id, currency)` da transação via coluna gerada, nula em REJECTED/FAILED (auditar `WALLET_NOT_FOUND`/`CURRENCY_MISMATCH`) — §10
-- Rejeições `REFERENCE_*_MISMATCH` gravam só `reference_external_transaction_id` — §10
-- FKs compostas garantem referência e lançamento na mesma wallet (`uq_wager_tx_id_wallet`) — §11
-- Constraint trigger deferido saldo × último lançamento, nos dois sentidos — §11
-- Triggers: transação nunca é apagada, terminal não muda, identidade/payload imutáveis; ledger append-only (SQLSTATE 23001) — §11
-- TRUNCATE não bloqueado (administrativo; testes usam) — §10
-- Lock pessimista por wallet (`FOR UPDATE` filtrando também `player_id`), `SET LOCAL lock_timeout` 2s, `version` no UPDATE como segunda barreira; timeout, deadlock e version → `TransientFailure` com log e contador — §12
-- Idempotência checada sob o lock; `23505` só das constraints esperadas (idempotência, inbox) é relido como replay/conflito; o resto é bug — §13
-- Idempotency key única por `(provider_id, idempotency_key)` (migration nova) — §13
-- `payloadHash`: SHA-256 hex do JSON canônico só com campos de negócio; amount normalizado, walletId minúsculo, referência ausente = `null` — §14
-- Uma reversão no total por transação (índice `ux_wager_tx_one_reversal`); WIN/LOSS sobre BET estornada → `REFERENCE_ALREADY_REVERSED` — §15
-- WIN/LOSS podem referenciar a BET (mesmas validações, sem valor igual); auto-referência e BET com referência → `InvalidInput` — §15
-- Novo `FailureCode` `BALANCE_LIMIT_EXCEEDED` (crédito além do `numeric(20,2)`) — §9
-- Rejeições no nível da wallet não devolvem saldo — §9
-- Resultado do use case como união tipada com `status`; `Rejected` cobre REJECTED e FAILED (decidir por `status`) — §13
-- `causationId`: messageId da inbox ou idempotency key; no `WalletBalanceChanged`, o eventId do `WagerTransactionProcessed` — §13
-- Ids e textos limitados a 256 caracteres (`InvalidInput`) — §13
-- Status HTTP: 400/404/409/422/503/500, 503 só para transitório; `FAILED` → 422 — §16
-- Envelope de erro único `{ error: { code, message } }` via filtro global (inclui erros do Nest; sem mensagens do Postgres) — §16
-- Abertura de wallet como use case `OpenWallet`; OPENING por factory própria, grava `WalletBalanceChanged` (sem `WagerTransactionProcessed`) — §16
-- 409 de wallet duplicada devolve o `walletId` existente — §16
-- `providerId` `internal` e keys `opening:` reservados (400) — §16
-- Cursor do ledger = base64url de `v1:<seq>`; `limit` 50 / teto 200; `nextCursor` null na última página — §16
-- Reconciliação num statement, `difference = stored − calculated`, nunca corrige — §16
-- Autenticação não implementada; `AuthGuard` no-op + desenho com Keycloak client credentials registrado — §16
-- Logs pino JSON (inclusive logger do Nest); `X-Correlation-Id` aceito só se `^[A-Za-z0-9._:-]{1,128}$` — §17
-- Métricas em registry próprio; labels `status`, `kind` (enum ou `UNKNOWN`), `failure_code` — §17
-- Consumidor SQS reutiliza o use case instrumentado (`WageringCoreModule`, compartilhado com o HTTP); ligado por `SQS_CONSUMER_ENABLED` — §18
-- Hash da inbox = SHA-256 do JSON canônico de `{ type, data }` (sem messageId/occurredAt); pré-checagem da inbox + releitura no conflito — §18
-- Classificação: negócio → ack; transitório/bug → retry; envelope/payload inválido e inbox divergente → DLQ com `dlqReason` — §18
-- Limite 5 no consumidor, redrive 10 na fila; backoff 30/60/120/240 (teto 300s); visibilidade 60s; long polling 20s; pausa do polling até 30s com banco fora — §18
-- Ordem do grupo preservada sem depender do broker (as seguintes recebem a mesma visibilidade da que falhou) — §18
-- Shutdown em `beforeApplicationShutdown`, timeout 25s, devolve visibilidade 0 do que não terminou — §18
-- `WagerSettlement` é a fonte única das regras + gravação (use case `insert`, worker `update`) — §20
-- Worker de pendentes: candidatas sem lock; por candidata wallet `SKIP LOCKED` → transação `FOR UPDATE`, relida — §20
-- Expiração por TTL de 1h a partir do `createdAt` (sem limite de tentativas); próxima checagem limitada ao prazo — §20
-- No prazo, referência ausente ou ainda pendente → `REFERENCE_NOT_FOUND` — §20
-- Caminho rápido: transação terminal antecipa as pendentes da mesma wallet que a referenciam (só com a wallet travada) — §20
-- Coluna `correlation_id` imutável; fallback `tx.id`; `causationId` = evento de pendência (fallback `tx.id`) — §20
-- 5 erros inesperados seguidos → FAILED `INFRASTRUCTURE_FAILURE`; 5 `wallet_busy` seguidos → espera o lock; contadores em memória por instância (heurística) — §20
-- `WagerTransactionRejected` aceita FAILED (`failureCode` distingue) — §20
-- Teste multi-instância com processos `bun src/main.ts` reais (não containers), contadores por vida do processo, seed `MULTI_SEED` — §21
-- `FAULT_INJECTION=exit_after_commit_before_ack` aceita só com `NODE_ENV=test` (lista de permissão) — §21
-- `sqs_message_acked` só depois do `DeleteMessage` bem-sucedido — §18
-- Shutdown: os 3 hooks são sequenciais no Nest; padrão 8s cada, soma ≤ `SHUTDOWN_BUDGET_MS` (25s) < `stop_grace_period` (30s), validado no boot — §21
-- `stop()` do consumidor aborta o long polling (mensagem entregue ao poll abortado volta após a visibilidade) — §18
-- Docker: imagem `oven/bun:1.4`, profile `multi` com `migrate` + 3 réplicas em `127.0.0.1:3000-3002` — §21
+- MikroORM 6 com `EntitySchema` em infrastructure (domínio sem ORM) — ARCHITECTURE.md → "Persistência"
+- Migrations em SQL escrito à mão, CLI próprio via `getMigrator()` — "Persistência"
+- LocalStack fixado em 4.9.2 (sem auth token); MiniStack como alternativa — "Infraestrutura local"
+- Filas FIFO sem dedup por conteúdo; redrive para DLQ com `maxReceiveCount=10` (rede de segurança; revisto na Fase 5) — "Infraestrutura local", "Consumidor SQS"
+- Liveness não toca dependências; readiness com porta `ReadinessCheck`, 503 e `reason` fechado (timeout|unreachable|error) — "Observabilidade"
+- Contexto do ORM explícito em todas as entradas (`allowGlobalContext:false`, `registerRequestContext:false`) — "Persistência"
+- Conexão preguiçosa no app: sobe com o Postgres fora e reporta not_ready (sem crash loop) — "Persistência"
+- Módulos Nest por responsabilidade (Config global, Persistence, Messaging, Health) — "Stack e estrutura"
+- `Money` em `bigint` de centavos, escala fixa 2, até 18 dígitos inteiros; "25"/"25.5" aceitos e serializados com 2 casas — "Modelo de domínio"
+- Domínio recebe ids e datas do chamador (não gera UUID nem lê relógio) — "Modelo de domínio"
+- `Wallet.open` devolve a wallet (version 1) + lançamento OPENING; saldo inicial zero não gera lançamento; `debit`/`credit` devolvem o lançamento — "Modelo de domínio"
+- `markPendingReference(now)` cobre PENDING→PENDING_REFERENCE e as novas tentativas (`referenceAttempts`, `nextReferenceCheckAt`, backoff 5s·2^(n−1) até 10min) — "Modelo de domínio"
+- Backoff da outbox determinístico 1s·2^(n−1) até 5min; id da outbox = `eventId` — "Modelo de domínio"
+- `FailureCode` com 14 códigos estáveis; erros de domínio não carregam código (o use case da Fase 3 mapeia) — "Taxonomia de failureCode"
+- Referência PENDING/PENDING_REFERENCE → aguardar; só referência REJECTED/FAILED gera `REFERENCE_NOT_PROCESSED` — "Taxonomia de failureCode"
+- Mapeamento por registros de persistência (`EntitySchema`) + mappers que chamam `rehydrate`; `numeric` como string direto para `Money.from` — "Persistência"
+- `WagerTransaction.observedBalance` (coluna `observed_balance`): obrigatório em `markProcessed`, opcional em `reject`; o replay devolve o saldo original — "Persistência"
+- Todas as FKs entre tabelas `DEFERRABLE INITIALLY DEFERRED`: a ordem do flush não importa — "Persistência"
+- FK `(wallet_id, currency)` da transação via coluna gerada, nula em REJECTED/FAILED (auditar `WALLET_NOT_FOUND`/`CURRENCY_MISMATCH`) — "Persistência"
+- Rejeições `REFERENCE_*_MISMATCH` gravam só `reference_external_transaction_id` — "Persistência"
+- FKs compostas garantem referência e lançamento na mesma wallet (`uq_wager_tx_id_wallet`) — "Garantias no schema"
+- Constraint trigger deferido saldo × último lançamento, nos dois sentidos — "Garantias no schema"
+- Triggers: transação nunca é apagada, terminal não muda, identidade/payload imutáveis; ledger append-only (SQLSTATE 23001) — "Garantias no schema"
+- TRUNCATE não bloqueado (administrativo; testes usam) — "Persistência"
+- Lock pessimista por wallet (`FOR UPDATE` filtrando também `player_id`), `SET LOCAL lock_timeout` 2s, `version` no UPDATE como segunda barreira; timeout, deadlock e version → `TransientFailure` com log e contador — "Concorrência"
+- Idempotência checada sob o lock; `23505` só das constraints esperadas (idempotência, inbox) é relido como replay/conflito; o resto é bug — "Idempotência"
+- Idempotency key única por `(provider_id, idempotency_key)` (migration nova) — "Idempotência"
+- `payloadHash`: SHA-256 hex do JSON canônico só com campos de negócio; amount normalizado, walletId minúsculo, referência ausente = `null` — "Idempotência"
+- Uma reversão no total por transação (índice `ux_wager_tx_one_reversal`); WIN/LOSS sobre BET estornada → `REFERENCE_ALREADY_REVERSED` — "Regras de negócio"
+- WIN/LOSS podem referenciar a BET (mesmas validações, sem valor igual); auto-referência e BET com referência → `InvalidInput` — "Regras de negócio"
+- Novo `FailureCode` `BALANCE_LIMIT_EXCEEDED` (crédito além do `numeric(20,2)`) — "Taxonomia de failureCode"
+- Rejeições no nível da wallet não devolvem saldo — "Taxonomia de failureCode"
+- Resultado do use case como união tipada com `status`; `Rejected` cobre REJECTED e FAILED (decidir por `status`) — "Idempotência"
+- `causationId`: messageId da inbox ou idempotency key; no `WalletBalanceChanged`, o eventId do `WagerTransactionProcessed` — "Idempotência"
+- Ids e textos limitados a 256 caracteres (`InvalidInput`) — "Idempotência"
+- Status HTTP: 400/404/409/422/503/500, 503 só para transitório; `FAILED` → 422 — "API HTTP"
+- Envelope de erro único `{ error: { code, message } }` via filtro global (inclui erros do Nest; sem mensagens do Postgres) — "API HTTP"
+- Abertura de wallet como use case `OpenWallet`; OPENING por factory própria, grava `WalletBalanceChanged` (sem `WagerTransactionProcessed`) — "API HTTP"
+- 409 de wallet duplicada devolve o `walletId` existente — "API HTTP"
+- `providerId` `internal` e keys `opening:` reservados (400) — "API HTTP"
+- Cursor do ledger = base64url de `v1:<seq>`; `limit` 50 / teto 200; `nextCursor` null na última página — "API HTTP"
+- Reconciliação num statement, `difference = stored − calculated`, nunca corrige — "API HTTP"
+- Autenticação não implementada; `AuthGuard` no-op + desenho com Keycloak client credentials registrado — "Autenticação"
+- Logs pino JSON (inclusive logger do Nest); `X-Correlation-Id` aceito só se `^[A-Za-z0-9._:-]{1,128}$` — "Observabilidade"
+- Métricas em registry próprio; labels `status`, `kind` (enum ou `UNKNOWN`), `failure_code` — "Observabilidade"
+- Consumidor SQS reutiliza o use case instrumentado (`WageringCoreModule`, compartilhado com o HTTP); ligado por `SQS_CONSUMER_ENABLED` — "Consumidor SQS"
+- Hash da inbox = SHA-256 do JSON canônico de `{ type, data }` (sem messageId/occurredAt); pré-checagem da inbox + releitura no conflito — "Consumidor SQS"
+- Classificação: negócio → ack; transitório/bug → retry; envelope/payload inválido e inbox divergente → DLQ com `dlqReason` — "Consumidor SQS"
+- Limite 5 no consumidor, redrive 10 na fila; backoff 30/60/120/240 (teto 300s); visibilidade 60s; long polling 20s; pausa do polling até 30s com banco fora — "Consumidor SQS"
+- Ordem do grupo preservada sem depender do broker (as seguintes recebem a mesma visibilidade da que falhou) — "Consumidor SQS"
+- Shutdown em `beforeApplicationShutdown`, timeout 25s (8s desde a Fase 9), devolve visibilidade 0 do que não terminou — "Consumidor SQS"
+- `WagerSettlement` é a fonte única das regras + gravação (use case `insert`, worker `update`) — "Worker de referências pendentes"
+- Worker de pendentes: candidatas sem lock; por candidata wallet `SKIP LOCKED` → transação `FOR UPDATE`, relida — "Worker de referências pendentes"
+- Expiração por TTL de 1h a partir do `createdAt` (sem limite de tentativas); próxima checagem limitada ao prazo — "Worker de referências pendentes"
+- No prazo, referência ausente ou ainda pendente → `REFERENCE_NOT_FOUND` — "Worker de referências pendentes"
+- Caminho rápido: transação terminal antecipa as pendentes da mesma wallet que a referenciam (só com a wallet travada) — "Worker de referências pendentes"
+- Coluna `correlation_id` imutável; fallback `tx.id`; `causationId` = evento de pendência (fallback `tx.id`) — "Worker de referências pendentes"
+- 5 erros inesperados seguidos → FAILED `INFRASTRUCTURE_FAILURE`; 5 `wallet_busy` seguidos → espera o lock; contadores em memória por instância (heurística) — "Worker de referências pendentes"
+- `WagerTransactionRejected` aceita FAILED (`failureCode` distingue) — "Worker de referências pendentes"
+- Teste multi-instância com processos `bun src/main.ts` reais (não containers), contadores por vida do processo, seed `MULTI_SEED` — "Estratégia de testes"
+- `FAULT_INJECTION=exit_after_commit_before_ack` aceita só com `NODE_ENV=test` (lista de permissão) — "Estratégia de testes"
+- `sqs_message_acked` só depois do `DeleteMessage` bem-sucedido — "Consumidor SQS"
+- Shutdown: os 3 hooks são sequenciais no Nest; padrão 8s cada, soma ≤ `SHUTDOWN_BUDGET_MS` (25s) < `stop_grace_period` (30s), validado no boot — "Estratégia de testes"
+- `stop()` do consumidor aborta o long polling (mensagem entregue ao poll abortado volta após a visibilidade) — "Consumidor SQS"
+- Docker: imagem `oven/bun:1.4`, profile `multi` com `migrate` + 3 réplicas em `127.0.0.1:3000-3002` — "Estratégia de testes"
 
 ## Pendências e bloqueios
 - `README.md` criado na Fase 9 com setup, comandos, testes e profile `multi`; a Fase 10 completa (visão da API, exemplos).
-- Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor do lançamento = valor da transação, nem o encadeamento `balance_before` (ARCHITECTURE §11). O use case garante, e `expectLedgerConsistent` verifica nos testes; a reconciliação da Fase 4 cobre em produção.
-- Decisão pendente: amarrar `payload.providerId` ao provider autenticado e escopar as consultas por provider (desenho em ARCHITECTURE §16). Sem isso, qualquer cliente submete em nome de qualquer provider e lê transações e saldos alheios.
-- Decisão pendente: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. Decidir se é intencional.
+- Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor do lançamento = valor da transação, nem o encadeamento `balance_before` (ARCHITECTURE.md → "Garantias no schema"). O use case garante, e `expectLedgerConsistent` verifica nos testes; a reconciliação da Fase 4 cobre em produção.
+- Decisão pendente: amarrar `payload.providerId` ao provider autenticado e escopar as consultas por provider (desenho em ARCHITECTURE.md → "Autenticação"). Sem isso, qualquer cliente submete em nome de qualquer provider e lê transações e saldos alheios.
+- Limitação: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. O vínculo (`wallet_providers`) está no desenho de ARCHITECTURE.md → "Autenticação", não implementado.
 - Lock da wallet antes da checagem de dono: resolvido na Fase 3 (`FOR UPDATE ... AND player_id`); rate limit por provider/wallet na borda continua recomendado.
 - `InvalidInput` tem código único (`INVALID_INPUT`) e motivo em texto; códigos por campo ficam para quando um consumidor precisar.
-- Limitação conhecida: REFUND de BET que já tem WIN PROCESSED é aceito (ARCHITECTURE §15).
+- Limitação conhecida: REFUND de BET que já tem WIN PROCESSED é aceito (ARCHITECTURE.md → "Regras de negócio").
 - Deploy: usuário da aplicação sem permissão de TRUNCATE.
-- Resolvido (Fase 9): `stop_grace_period: 30s` no serviço `app` do profile `multi`, com a soma dos prazos de shutdown validada no boot (ARCHITECTURE §21).
-- Limitação (C4a, ARCHITECTURE §18): se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, a inbox não é gravada; o mesmo `messageId` com outro payload válido depois é processado. Fechar exige mudar o use case.
+- Resolvido (Fase 9): `stop_grace_period: 30s` no serviço `app` do profile `multi`, com a soma dos prazos de shutdown validada no boot (ARCHITECTURE.md → "Estratégia de testes").
+- Limitação (C4a, ARCHITECTURE.md → "Consumidor SQS"): se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, a inbox não é gravada; o mesmo `messageId` com outro payload válido depois é processado. Fechar exige mudar o use case.
 - O vínculo `SIGTERM` → shutdown hooks (`enableShutdownHooks`) não tem teste automatizado (os testes usam `app.close()`); verificado manualmente no `down` do profile `multi` (3 réplicas, saída 0, sem timeout).
-- Limitações do `test:multi` (ARCHITECTURE §21): a sobreposição na hot wallet não é provada; "pegou trabalho em andamento" no item 8 é sanidade; a distribuição da fila entre instâncias depende do broker; a seed reproduz a carga, não a intercalação.
+- Limitações do `test:multi` (ARCHITECTURE.md → "Estratégia de testes"): a sobreposição na hot wallet não é provada; "pegou trabalho em andamento" no item 8 é sanidade; a distribuição da fila entre instâncias depende do broker; a seed reproduz a carga, não a intercalação.
 
 ## Registro de sessões
 <!-- Data — o que foi feito — próximo passo -->

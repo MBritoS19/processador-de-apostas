@@ -27,7 +27,7 @@ export function errorPauseMs(consecutiveFailures: number): number {
  * Publica a outbox em `wager-events.fifo`. Cada ciclo: claim com `FOR UPDATE SKIP LOCKED`,
  * `SendMessageBatch` ainda com o lock, e published_at / retry gravados no mesmo commit.
  * Seguro com N instâncias; entrega at-least-once (o consumidor deduplica por eventId).
- * Decisões no ARCHITECTURE.md §19.
+ * Decisões no ARCHITECTURE.md → "Outbox publisher".
  */
 export class OutboxPublisher {
   private running = false;
