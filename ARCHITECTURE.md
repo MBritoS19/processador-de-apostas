@@ -965,6 +965,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **FKs deferidas:** a ordem do flush não importa, mas a violação de FK só aparece no commit, não no statement.
 - **`Money` em `bigint` com escala fixa 2:** moedas com outra escala (JPY, BHD) ou operações com divisão exigiriam introduzir escala por moeda e arredondamento.
 - **Lock pessimista por wallet:** uma conexão fica ocupada esperando o lock (2 tentativas de `lock_timeout` 1s: no máximo ~2s antes do 503 reenviável), em troca de não reexecutar transações inteiras sob contenção.
+- **Sem mutex local por wallet antes do `FOR UPDATE`:** numa wallet disputada, até o pool inteiro de uma instância fica esperando o lock, e as wallets frias da mesma instância esperam conexão (p95 de ~2,1s no cenário quente-frias). Um mutex em memória foi implementado num branch e medido (3 rodadas antes e 3 depois, alternadas): o p95 das frias caiu 96%, mas o throughput da wallet disputada caiu 47% e surgiram 503. Ficou de fora pelo critério fixado antes da medição. Dados e análise em `docs/CARGA.md`, seção "Mutex local por wallet: medido, não adotado".
 - **Porta própria de readiness**, sem `@nestjs/terminus`: ~80 linhas nossas em vez de uma dependência.
 - **Portas em loopback e LocalStack fixado em 4.9.2:** sem correções de versões futuras do LocalStack.
 - **Filas sem dedup por conteúdo:** todo produtor precisa gerar o dedup id; em troca, dois payloads idênticos legítimos não são descartados por coincidência.

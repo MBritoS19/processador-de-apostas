@@ -9,6 +9,7 @@ Este documento investiga dois sintomas da execução oficial do `bun run test:lo
    - **Muitas wallets e misto (vazão do publisher):** cada instância tem **um único laço sequencial**, com ~14 idas e voltas ao banco e 1 chamada ao SQS a cada 10 eventos. Esse laço disputa o event loop, o pool e a CPU com a API. Com a máquina ociosa, a capacidade fica em 400–550 eventos/s, só um pouco acima da demanda de 10 clientes (~480/s). Sob CPU a 100%, cai para 350/s com 10 clientes, 146/s com 50 e 51/s no misto/50, em que o LocalStack também está saturado.
 2. **O acúmulo na fila do misto/50 é sobrecarga absorvida pela fila, como projetado.** Os produtores SQS têm taxa fixa (alvo de 125 msg/s; o LocalStack lento limitou a 75). Os clientes HTTP estão em laço fechado e se autolimitam quando o sistema fica lento; os produtores SQS, não. Durante a carga, o consumo cai para **~7–14 msg/s**. Sem carga HTTP, os mesmos consumidores fazem **~50–110 msg/s**. A queda vem da barreira por lote do consumidor (o próximo receive espera a mensagem mais lenta do lote e o `DeleteMessage` dela), de um LocalStack preso em 1 núcleo (RTT de 150–290ms contra ~5ms ocioso) e da CPU do host em 100%. Parte da queda **não está explicada** pelos dados que temos (ver "O que não está explicado").
 3. **A correção não foi afetada.** Não houve DLQ, retry, conflito de lock nem perda de evento, e todas as rodadas passaram nas verificações de consistência. O que piora é só o tempo até o efeito chegar ao downstream.
+4. **Mutex local por wallet: medido e não adotado.** Ele derruba o p95 das wallets frias de 2,1s para 88ms, mas reduz o throughput da wallet disputada em 47% e cria 503. O critério fixado antes da medição não foi atingido. Ver "Mutex local por wallet: medido, não adotado".
 
 ## Evidências
 
@@ -217,3 +218,36 @@ O risco é baixo: são só labels de conjunto fechado, seguindo a regra de ARCHI
 ### Ordem sugerida
 
 Primeiro a **0**, que mostra quanto do problema é ambiente. Depois a **2**, barata e sem efeito colateral, e a **5**, que é só configuração. Em seguida a **6** ou a **3**, conforme o que a 0 mostrar. A **1** vem por último, só se uma wallet com dezenas de transações/s for um caso real de negócio, porque ela troca simplicidade da garantia de ordem por vazão.
+
+## Mutex local por wallet: medido, não adotado
+
+**Hipótese.** Numa wallet disputada, até 10 requisições por instância (o pool inteiro) ficam presas no `FOR UPDATE`, e as wallets frias da mesma instância esperam conexão livre. Um mutex assíncrono por `walletId`, em memória, antes da transação, deixaria no máximo 1 conexão por instância esperando aquela wallet. A correção continuaria garantida pelo `FOR UPDATE`.
+
+**Implementação** (branch `feat/mutex-local`, commit `db65407`, **não mesclado**): mutex FIFO por wallet e por processo, compartilhado por HTTP e SQS, só no `ProcessWagerTransaction`, depois da leitura de replay sem lock. A espera no mutex conta no mesmo orçamento de ~2s; se ele acaba no mutex, ou sobram menos de 100ms, sai 503 com `local_lock_timeout` em `wagering_lock_conflicts_total`, sem abrir transação. O mutex só é devolvido depois do COMMIT/ROLLBACK. Unitários, integração, concorrência e multi passaram no branch.
+
+**Método.** Cenário `quente-frias` do `test:load` (commit `4bccffc`): 50 clientes HTTP numa wallet disputada e 10 em 300 wallets frias, ao mesmo tempo, 3 instâncias, aquecimento de 10s e janela de 45s, seed fixa. Foram 3 rodadas antes (`main`, `4bccffc`) e 3 depois (branch), **alternadas** (antes, depois, antes, …) na mesma sessão da máquina, e a comparação usa as **medianas**. JSONs em [`docs/carga/mutex/`](carga/mutex/) (`antes-N.json`, `depois-N.json`).
+
+**Critério de merge, fixado antes da medição:** p95 das frias pelo menos 20% menor; throughput da wallet quente (PROCESSED/s pelo banco) sem queda maior que 10%; total de 503 sem aumento.
+
+| Métrica (mediana de 3) | Antes | Depois | Δ |
+|---|---:|---:|---:|
+| Frias p50 (ms) | 43,5 | 58,1 | +34% |
+| Frias p95 (ms) | 2.148 | 88 | **−96%** |
+| Frias p99 (ms) | 2.414 | 128 | −95% |
+| Frias ops/s | 14,3 | 163,5 | ×11 |
+| Quente p50 (ms) | 88 | 1.680 | ×19 |
+| Quente p95 (ms) | 2.861 | 1.987 | −31% |
+| Quente p99 (ms) | 3.181 | 2.054 | −35% |
+| **Quente PROCESSED/s** | 55,7 | 29,3 | **−47%** |
+| **503 (todos da quente; `local_lock_timeout`)** | 0 | 40 (7 / 157 / 40) | **aumento** |
+| Transações processadas/s (total) | 70,0 | 192,9 | ×2,8 |
+| Consistência ao fim | ok ×3 | ok ×3 | — |
+
+**Resultado: critério não atingido.** O p95 das frias passou com folga, mas o throughput da quente caiu 47% e os 503 apareceram. Por isso o branch não foi mesclado.
+
+**Por que a quente piorou** (leitura dos dados, sem experimento isolando cada fator):
+- **A fila mudou de lugar e passou a contar no orçamento.** Antes, as requisições quentes esperavam conexão no pool (acquire timeout de 10s, fora do orçamento de 2s) e depois o lock com a transação já aberta. Por isso não havia 503, mas as frias pagavam a fila (p95 de 2,1s). Com o mutex, ~17 clientes quentes por instância esperam no mutex, e essa espera conta nos 2s: a cauda estoura (`local_lock_timeout`).
+- **Sem pipeline no lock da linha.** Antes, o próximo da fila já estava dentro do Postgres com a transação aberta, e recebia o lock no COMMIT do anterior. Com o mutex, só 1 por instância (3 no total) disputa a linha. Depois do COMMIT, o próximo da mesma instância ainda abre a transação, faz o `SET LOCAL lock_timeout` e o `SELECT … FOR UPDATE`. São idas e voltas em que a linha fica livre e ninguém a pega.
+- **Competição por CPU.** As frias passaram a fazer 11× mais operações na mesma máquina (gerador, 3 instâncias e Postgres juntos, ver "Fatores do ambiente"), o que também deixa mais lento cada ciclo da quente. O p50 das frias subiu (+34%) pelo mesmo motivo.
+
+**Se o assunto voltar** (não implementado): trocar o mutex por um semáforo de 2–3 vagas por wallet e por instância. Isso mantém o pipeline no lock da linha e ainda limita a fatia do pool que uma wallet ocupa. Também dá para descontar do orçamento só o tempo no banco, não a espera local. As duas opções precisam ser medidas com o mesmo cenário e o mesmo critério.
