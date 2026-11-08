@@ -123,12 +123,18 @@ Concorrência (paralelismo real):
 - [x] Ajustes finais: orçamento de espera pelo lock mantido em ~2s (2 tentativas de 1s); sonda do modo "banco fora" com teto de 5s
 
 ## Fechamento
+- [x] Banca avaliadora (~82/100, nenhuma eliminatória; relatório local em `banca/`)
+- [x] Correções da banca (lotes 1 a 3 e ajustes finais)
+- [ ] Comentários de "porquê" nos 10–15 pontos críticos, com referência à spec
+- [ ] Checklist de entrega: `.env` fora do git, histórico organizado, push, teste a partir do clone remoto
+- [ ] Preparação da apresentação
+- [ ] Ledger de partidas dobradas: planejar em etapas; implementar de forma aditiva em branch separado, só se houver tempo
 - [ ] Mutex local por wallet (otimização de desempenho sobre o FOR UPDATE): reduz conexões presas esperando o lock numa wallet disputada (no máximo 1 por instância). Medir antes e depois com test:load (wallet-disputada); só entra se houver ganho medido. A correção continua garantida pelo FOR UPDATE.
 
 ## Opcionais (só depois de tudo acima)
-- [ ] Autenticação com Keycloak ou Zitadel
+- [ ] Autenticação com Keycloak ou Zitadel — não implementada por decisão: não vale pontos (CHALLENGE §2, "Autenticação — a cargo do candidato"); `AuthGuard` no-op e desenho (Keycloak client credentials, vínculo `wallet_providers`) documentados em ARCHITECTURE.md → "Autenticação"
 - [x] Teste de carga (`bun run test:load`) com p50/p95/p99, erros, conflitos e outbox lag (concluído em 2026-11-08; metodologia em ARCHITECTURE.md → "Estratégia de testes"; análise do outbox lag e do acúmulo na fila, com propostas não implementadas, em `docs/CARGA.md`; dados em `docs/carga/`)
-- [ ] Ledger de partidas dobradas
+- [ ] Ledger de partidas dobradas (plano em "Fechamento")
 
 ---
 
