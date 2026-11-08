@@ -5,6 +5,7 @@ import { loadConfig } from '../../src/infrastructure/config/app-config';
 import { openOrm, truncateAll } from '../integration/persistence/db';
 import { createQueues, deleteQueues, queueDepth, send, type TestQueues } from '../integration/interfaces/sqs-harness';
 import { createEventsQueue, deleteQueue, drain } from '../integration/workers/outbox-harness';
+import { expectConsistent, waitQuiescence } from './consistency';
 import { callWithRetry, cents, eventually, freePort, Instance, prng, seedFromEnv, type HttpResult } from './harness';
 
 /**
@@ -135,34 +136,6 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
   async function balanceOf(wallet: TestWallet): Promise<string> {
     const [row] = await rows<{ balance: string }>('select balance::text as balance from wallets where id = ?', [wallet.id]);
     return row?.balance ?? 'ausente';
-  }
-
-  /** Fila principal vazia (inclui em voo e atrasadas), outbox sem pendentes e nenhuma pendência. */
-  async function quiescentOnce(): Promise<void> {
-    const depth = await queueDepth(sqs, queues.queueUrl);
-    if (depth !== 0) throw new Error(`fila principal ainda tem ${depth} mensagens (visíveis + em voo + atrasadas)`);
-    const [pending] = await rows<{ outbox: string; waiting: string; overdue: string }>(
-      `select (select count(*) from outbox_messages where published_at is null)::text as outbox,
-              (select count(*) from wager_transactions where status in ('PENDING','PENDING_REFERENCE'))::text as waiting,
-              (select count(*) from wager_transactions
-                where status = 'PENDING_REFERENCE' and next_reference_check_at <= now())::text as overdue`,
-    );
-    if (pending?.outbox !== '0') throw new Error(`outbox com ${pending?.outbox} pendentes`);
-    if (pending?.waiting !== '0') throw new Error(`${pending?.waiting} transações ainda em PENDING/PENDING_REFERENCE (vencidas: ${pending?.overdue})`);
-  }
-
-  async function waitQuiescence(timeoutMs = 90_000): Promise<void> {
-    await eventually(
-      'sistema quiescente (fila vazia, nada em voo, outbox sem pendentes, nenhuma pendência)',
-      async () => {
-        // Duas leituras seguidas: "ApproximateNumberOf…" do SQS é aproximado.
-        await quiescentOnce();
-        await Bun.sleep(300);
-        await quiescentOnce();
-      },
-      timeoutMs,
-      250,
-    );
   }
 
   beforeAll(async () => {
@@ -453,7 +426,7 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
 
         // ───────────────────────── Quiescência
         mark('quiescência (a órfã expira pelo TTL de 25s)');
-        await waitQuiescence();
+        await waitQuiescence(rows, sqs, queues.queueUrl);
 
         // Depois do reinício (contadores zerados no start): cada instância atendeu HTTP e confirmou SQS.
         for (const instance of live) {
@@ -464,109 +437,16 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
         // ───────────────────────── Verificações finais, todas por SQL
         mark('verificações finais por SQL');
 
-        // 1. Invariante: wallet.balance == saldo reconstruído pelo ledger, para todas as wallets.
-        expect(
-          await rows(
-            `select w.id, w.balance::text as balance,
-                    coalesce(sum(case l.direction when 'CREDIT' then l.amount else -l.amount end), 0)::numeric(20,2)::text as ledger
-               from wallets w left join wallet_ledger_entries l on l.wallet_id = w.id
-              group by w.id, w.balance
-             having w.balance <> coalesce(sum(case l.direction when 'CREDIT' then l.amount else -l.amount end), 0)`,
-          ),
-          'wallet.balance == saldo do ledger',
-        ).toEqual([]);
-
-        // 2. Nenhum saldo negativo.
-        expect(await rows('select id from wallets where balance < 0'), 'saldo negativo').toEqual([]);
-
-        // 3. Uma linha por idempotency key e no máximo um lançamento por transação.
-        expect(
-          await rows('select provider_id, idempotency_key from wager_transactions group by 1, 2 having count(*) > 1'),
-          'idempotency key duplicada',
-        ).toEqual([]);
-        expect(
-          await rows('select wallet_id, transaction_id from wallet_ledger_entries group by 1, 2 having count(*) > 1'),
-          'mais de um lançamento por transação',
-        ).toEqual([]);
-
-        // 4. Nenhuma referência revertida duas vezes.
-        expect(
-          await rows(
-            `select reference_transaction_id from wager_transactions
-              where status = 'PROCESSED' and kind in ('REFUND','ROLLBACK')
-              group by 1 having count(*) > 1`,
-          ),
-          'referência revertida mais de uma vez',
-        ).toEqual([]);
-
-        // 5. Quem move saldo tem exatamente um lançamento; LOSS, REJECTED e FAILED, nenhum.
-        expect(
-          await rows(
-            `select t.id, t.kind, t.status, count(l.id) as entries
-               from wager_transactions t left join wallet_ledger_entries l on l.transaction_id = t.id
-              group by t.id, t.kind, t.status
-             having (t.status = 'PROCESSED' and t.kind <> 'LOSS' and count(l.id) <> 1)
-                 or ((t.status <> 'PROCESSED' or t.kind = 'LOSS') and count(l.id) <> 0)`,
-          ),
-          'lançamentos fora da regra (1 por transação que move saldo, 0 em LOSS/REJECTED/FAILED)',
-        ).toEqual([]);
-        expect(
-          await rows(`select l.id from wallet_ledger_entries l join wager_transactions t on t.id = l.transaction_id where t.amount <> l.amount`),
-          'valor do lançamento diferente do valor da transação',
-        ).toEqual([]);
-
-        // 6. Outbox toda publicada, e cada eventId da outbox chegou à fila de eventos (duplicata pode, perda não).
-        const outboxIds = (await rows<{ id: string }>('select id from outbox_messages')).map((row) => row.id);
-        expect(outboxIds.length, 'houve eventos').toBeGreaterThan(0);
-        expect(await rows('select id from outbox_messages where published_at is null'), 'evento não publicado').toEqual([]);
+        // 1–7. Invariantes de todo o banco (test/multi/consistency.ts, compartilhadas com o test:load).
         const delivered = await drain(sqs, events.url, 5);
         const deliveredIds = new Set(delivered.map((event) => event.body['eventId'] as string));
-        expect(
-          outboxIds.filter((id) => !deliveredIds.has(id)),
-          'eventos da outbox que NÃO chegaram à fila de eventos (perda)',
-        ).toEqual([]);
-        expect(
-          [...deliveredIds].filter((id) => !outboxIds.includes(id)),
-          'eventIds na fila que não existem na outbox',
-        ).toEqual([]);
-        expect(deliveredIds.size, 'eventIds distintos na fila == linhas da outbox').toBe(outboxIds.length);
+        const { outboxEvents } = await expectConsistent(rows, {
+          deliveredEventIds: deliveredIds,
+          dlqDepth: await queueDepth(sqs, queues.dlqUrl),
+        });
         console.log(
-          `[multi seed=${SEED}] eventos: outbox=${outboxIds.length}, mensagens na fila=${delivered.length} (duplicatas: ${delivered.length - deliveredIds.size})`,
+          `[multi seed=${SEED}] eventos: outbox=${outboxEvents}, mensagens na fila=${delivered.length} (duplicatas: ${delivered.length - deliveredIds.size})`,
         );
-
-        // 6b. Nenhum evento faltando na ORIGEM: toda transação terminal (exceto OPENING) tem exatamente
-        // um evento terminal do tipo certo, e todo lançamento tem exatamente um WalletBalanceChanged.
-        expect(
-          await rows(
-            `select t.id, t.kind, t.status,
-                    count(o.id) filter (where o.event_type = 'WagerTransactionProcessed') as processed_events,
-                    count(o.id) filter (where o.event_type = 'WagerTransactionRejected') as rejected_events
-               from wager_transactions t
-               left join outbox_messages o on o.aggregate_id::text = t.id::text
-              where t.kind <> 'OPENING'
-              group by t.id, t.kind, t.status
-             having not (
-                   (t.status = 'PROCESSED' and count(o.id) filter (where o.event_type = 'WagerTransactionProcessed') = 1
-                                           and count(o.id) filter (where o.event_type = 'WagerTransactionRejected') = 0)
-                or (t.status in ('REJECTED', 'FAILED') and count(o.id) filter (where o.event_type = 'WagerTransactionProcessed') = 0
-                                                       and count(o.id) filter (where o.event_type = 'WagerTransactionRejected') = 1))`,
-          ),
-          'transação terminal sem o evento terminal certo (ou com mais de um)',
-        ).toEqual([]);
-        expect(
-          await rows(
-            `select l.id, l.transaction_id, count(o.id) as balance_events
-               from wallet_ledger_entries l
-               left join outbox_messages o
-                 on o.event_type = 'WalletBalanceChanged' and o.payload->'data'->>'transactionId' = l.transaction_id::text
-              group by l.id, l.transaction_id
-             having count(o.id) <> 1`,
-          ),
-          'lançamento sem exatamente um WalletBalanceChanged',
-        ).toEqual([]);
-
-        // 7. Nada na DLQ (todas as mensagens enviadas eram válidas; rejeição de negócio é ack).
-        expect(await queueDepth(sqs, queues.dlqUrl), 'DLQ vazia').toBe(0);
 
         // 8. Reconciliação por HTTP consistente para todas as wallets, em instâncias diferentes.
         const reconciliations = await Promise.all(

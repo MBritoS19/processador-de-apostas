@@ -729,6 +729,7 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
 | Integração | `bun run test:integration` | migrations e constraints; **atomicidade** (trigger real que derruba uma gravação no meio do commit, no use case e no worker de pendentes: nada persiste, e o reenvio aplica uma vez); inbox e redelivery; retry e DLQ; worker morto depois do commit e antes do ack (no processo); publishers concorrentes; recuperação de sessão morta (`pg_terminate_backend`, idle timeout); shutdown gracioso, inclusive com long polling em andamento | ~1 min |
 | Concorrência | `bun run test:concurrency` | paralelismo real num processo: 80+80 sobre 100; a mesma BET 50x → 1 débito; mesma key em wallets diferentes; esgotar o saldo sem ficar negativo; dois publishers sobre a mesma outbox; dois workers de pendentes, e worker + use case na mesma wallet | ~10s |
 | Multi-instância | `bun run test:multi` | itens 1, 4, 5 e 8 do CHALLENGE §13 com **processos reais** (abaixo); e processo morto **antes** do commit (SIGKILL com a transação aberta num trigger de teste: nada persiste, a mensagem volta e é aplicada uma vez) | ~45s |
+| Carga | `bun run test:load` | throughput, latência e efeitos colaterais (lock, retries, DLQ, outbox lag) com 3 processos reais, em 3 cenários × níveis de concorrência, e consistência completa ao fim de cada rodada (abaixo). Fora do `bun test` (só com `LOAD=1`) | ~10 min |
 | Chaos | `bun run test:chaos` | §3 "PostgreSQL e SQS temporariamente indisponíveis" com 2 processos sob carga: Postgres **parado** (`docker compose stop`/`start`) → API 503 com `Retry-After`, consumidor em retry sem DLQ, tudo retoma; LocalStack **pausado** → eventos confirmados ficam na outbox até publicar, consumidor e publisher retomam sem perder nada. Verificação só por comportamento (retries > 0, DLQ vazia, consistência por SQL) | ~40s |
 
 \* Máquina de desenvolvimento (Windows 11, Docker Desktop).
@@ -737,7 +738,7 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
 
 **Chaos fora do `bun test`:** a suíte só roda com `CHAOS=1` (o script define) porque derruba containers compartilhados. O Postgres é **parado**, não pausado: com pause, as conexões abertas ficam penduradas em vez de recusadas, e não daria para provar o 503 nem o retry pelo comportamento. O LocalStack é **pausado**, porque um stop apagaria as filas da suíte (não há persistência). Backoff, visibilidade e prazos curtos valem só para a suíte; a tolerância do consumidor (5 tentativas, 2/4/8/8s) cobre a queda de ~12s. O `afterAll` restaura os containers mesmo em falha.
 
-**Invariante final:** `wallet.balance == saldo reconstruído pelo ledger`, verificado por `expectLedgerConsistent` nos testes que movem saldo (no `wagering-http`, por um `afterEach` sobre todas as wallets, exceto no teste que corrompe o saldo de propósito) e, no multi, por SQL sobre todas as wallets. No banco, o constraint trigger saldo × último lançamento também barra a divergência no commit.
+**Invariante final:** `wallet.balance == saldo reconstruído pelo ledger`, verificado por `expectLedgerConsistent` nos testes que movem saldo (no `wagering-http`, por um `afterEach` sobre todas as wallets, exceto no teste que corrompe o saldo de propósito) e, no multi e na carga, por SQL sobre todas as wallets (`test/multi/consistency.ts`, compartilhado pelas duas suítes). No banco, o constraint trigger saldo × último lançamento também barra a divergência no commit.
 
 ### Multi-instância (`test/multi`)
 
@@ -750,6 +751,37 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
   5. **Quiescência** e verificações finais, todas por SQL: saldo == ledger e nenhum saldo negativo; uma linha por idempotency key e no máximo um lançamento por transação; nenhuma referência revertida duas vezes; lançamentos só em PROCESSED que move saldo, com valor igual ao da transação; toda transação terminal com exatamente um evento terminal do tipo certo, e todo lançamento com exatamente um `WalletBalanceChanged`; outbox toda publicada, todo `eventId` na fila de eventos e nada a mais; DLQ vazia e reconciliação HTTP consistente; saldos finais iguais aos calculados **pelo teste**, de forma independente. Algumas dessas verificações repetem garantias do schema de propósito: o teste não confia no schema para afirmar o resultado.
 - **Por que o resultado não depende da ordem:** nas wallets aleatórias, a soma das 6 BETs pequenas cabe no saldo e as 2 grandes passam do saldo máximo possível; na hot wallet, o saldo comporta exatamente 100 BETs. Qualquer intercalação dá o mesmo resultado final.
 - **Docker:** o profile `multi` do compose valida empacotamento e shutdown; a suíte usa processos locais, que permitem SIGKILL e leitura de log por instância. Validação manual em 2026-11-07: build e `migrate` com saída 0; 3 réplicas `healthy` com `/health/ready` 200 em 3000, 3001 e 3002; `StopTimeout=30` e `NODE_ENV=production` nas três; no `down`, cada réplica registrou `pending_reference_worker_stopped`, `outbox_publisher_stopped` e `sqs_consumer_stopped` (nessa ordem) e saiu com código 0, sem `shutdown_timeout`, em ~4s no total, com o long polling de 20s abortado.
+
+### Teste de carga (`test/load`)
+
+CHALLENGE §14, "Diferenciais opcionais". Esta seção descreve **como** se mede. Os números e a análise estão em `docs/CARGA.md`, e a execução bruta usada lá em `docs/carga/resultado.json`. As demais execuções vão para `test/load/results/`, fora do git.
+
+- **Sistema sob teste:** as 3 `Instance` do harness do multi (API + consumidor + outbox publisher + worker de pendentes), sobre o Postgres e o LocalStack do compose, com filas próprias da suíte. As configs são as de produção, exceto o backoff de retry do consumidor (1–5s em vez de 30–300s), para um `lock_timeout` eventual não segurar a quiescência por minutos. `src/` não tem nada específico para carga.
+- **Cenários:**
+  - **wallet-disputada:** 1 wallet, BET/WIN 50/50, só HTTP. Mede o custo da serialização por wallet.
+  - **muitas-wallets:** 300 wallets, BET/WIN/LOSS em wallet aleatória, só HTTP, em rodízio pelas 3 instâncias.
+  - **misto:** 200 wallets; metade dos clientes por HTTP e metade como produtores SQS. Inclui 10% de reenvios duplicados (no HTTP com a mesma key; no SQS com o mesmo messageId e outro dedup do broker, ou com um messageId novo e a mesma key), 5% de REFUND/ROLLBACK enviados antes da BET referenciada (no SQS, no mesmo grupo FIFO) e 5% de BETs acima do saldo (422 esperado).
+- **Rodada (cenário × nível):** começa com as tabelas **vazias** (TRUNCATE), para que o volume da rodada anterior não contamine a medição. As wallets são abertas fora da janela. Depois vêm o aquecimento (`LOAD_WARMUP_S`, padrão 10s, descartado) e a janela de medição (`LOAD_DURATION_S`, padrão 45s). Então a rodada espera a **quiescência** e roda as mesmas verificações de consistência do multi. A rodada falha se alguma verificação falhar, se aparecer uma resposta 4xx que não seja 422 ou se alguma instância não tiver atendido HTTP (e SQS, no misto).
+- **Níveis:** `LOAD_LEVELS`, padrão `10,50` (~10 min medidos, sendo boa parte esperando a quiescência). `LOAD_LEVELS=10,50,100` é opcional e leva mais (~15 min estimados, não medido). `LOAD_SCENARIOS` filtra cenários; `LOAD_SEED` fixa a sequência de operações de cada cliente. A intercalação entre clientes não é determinística.
+- **Geração:**
+  - **Clientes HTTP:** laço fechado. Cada um envia, espera a resposta e envia de novo, em rodízio entre as instâncias. Um 503 ou uma falha de rede é reenviado com a mesma key (contrato do provedor) e conta como retry do cliente.
+  - **Produtores SQS:** taxa fixa (`LOAD_SQS_RATE` mensagens/s por produtor, padrão 5), ou seja, chegada aberta.
+- **Métricas:**
+  - **Latência HTTP:** por tentativa, medida no cliente. Entram só as tentativas iniciadas na janela.
+  - **Status:** 2xx, 422 (rejeição de negócio, separada por `failureCode`), outros 4xx e erro (5xx e rede).
+  - **Throughput:** req/s pelo cliente; transações/s (`created_at` na janela) e processadas/s (`processed_at` na janela) pelo banco.
+  - **Ponta a ponta da fila:** do início do `SendMessage` até `inbox_messages.processed_at`, ou seja, o commit do consumidor (uma reversão pendente conta até o `PENDING_REFERENCE`, não até a resolução).
+  - **Contadores de /metrics:** delta das 3 instâncias, para lock conflicts por `reason`, retries, DLQ, replays, outbox e pendentes, tanto na janela quanto na rodada inteira.
+  - **Amostragem a cada 1s:** outbox lag (`agora − min(occurred_at)` das não publicadas, por SQL) e profundidade da fila, com máximo e p95 na janela e máximo até a quiescência.
+  - **Relógio:** todos os instantes vêm do relógio do host (a aplicação grava as datas pelo `Clock`, não por `now()` do Postgres), então não há diferença de relógio entre o host e o container.
+- **Downstream:** 4 consumidores de fundo leem a fila de eventos durante a rodada. A verificação de outbox (todo `eventId` entregue, nada a mais) usa esse conjunto.
+- **Ambiente registrado automaticamente:** CPU, RAM, SO, versões do Bun, do Docker (e CPUs e memória da VM), do Postgres (`max_connections`, `shared_buffers`, `synchronous_commit`) e do LocalStack; pool por instância, `lock_timeout`, envs das instâncias e commit.
+- **Limitações conhecidas (valem para qualquer número):**
+  - Gerador, 3 instâncias, Postgres e LocalStack disputam a mesma CPU, e o Docker Desktop no Windows acrescenta uma VM e a rede dela.
+  - LocalStack não é SQS: latência e limites são outros.
+  - Clientes em laço fechado sofrem de *coordinated omission*: com o sistema lento, eles enviam menos, e os percentis subestimam a espera de uma chegada aberta.
+  - O harness lê e interpreta o log JSON de cada instância no processo do gerador, o que soma CPU ao gerador.
+  - A janela de 45s não exercita efeitos de longo prazo (crescimento de índices, autovacuum, tabelas grandes), já que cada rodada começa vazia.
 
 ### Injeção de falha
 

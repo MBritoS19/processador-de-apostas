@@ -28,3 +28,6 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Resultados brutos do teste de carga (a execução do relatório vai para docs/carga/)
+test/load/results/

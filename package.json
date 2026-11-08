@@ -35,6 +35,7 @@
     "test:concurrency": "bun test ./test/concurrency",
     "test:multi": "bun test ./test/multi",
     "test:chaos": "CHAOS=1 bun test ./test/chaos",
+    "test:load": "LOAD=1 bun test ./test/load",
     "typecheck": "tsc --noEmit"
   },
   "engines": {
