@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **10 — Documentação** (aguardando plano)
+Fase atual: **Concluído — opcionais** (Fases 0–10 concluídas em 2026-11-07)
 
 ---
 
@@ -106,9 +106,9 @@ Concorrência (paralelismo real):
 - [x] 8. Reinício do serviço com consistência final comprovada (SIGKILL das 3 no meio da carga + verificações por SQL)
 - [x] Invariante final em todos: `wallet.balance == saldo reconstruído pelo ledger`
 
-## Fase 10 — Documentação
-- [ ] `README.md`: setup e comandos
-- [ ] `ARCHITECTURE.md`: ORM, mapeamento de `Money`, estratégia transacional e de concorrência, transições de estado, `failureCode`, status HTTP, algoritmo de hash, TTL das pendências, autenticação, trade-offs e limitações
+## Fase 10 — Documentação (concluída em 2026-11-07)
+- [x] `README.md`: setup e comandos (provado num clone limpo)
+- [x] `ARCHITECTURE.md`: ORM, mapeamento de `Money`, estratégia transacional e de concorrência, transições de estado, `failureCode`, status HTTP, algoritmo de hash, TTL das pendências, autenticação, trade-offs e limitações
 
 ## Opcionais (só depois de tudo acima)
 - [ ] Autenticação com Keycloak ou Zitadel
@@ -186,7 +186,6 @@ Concorrência (paralelismo real):
 - Docker: imagem `oven/bun:1.4`, profile `multi` com `migrate` + 3 réplicas em `127.0.0.1:3000-3002` — "Estratégia de testes"
 
 ## Pendências e bloqueios
-- `README.md` criado na Fase 9 com setup, comandos, testes e profile `multi`; a Fase 10 completa (visão da API, exemplos).
 - Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor do lançamento = valor da transação, nem o encadeamento `balance_before` (ARCHITECTURE.md → "Garantias no schema"). O use case garante, e `expectLedgerConsistent` verifica nos testes; a reconciliação da Fase 4 cobre em produção.
 - Decisão pendente: amarrar `payload.providerId` ao provider autenticado e escopar as consultas por provider (desenho em ARCHITECTURE.md → "Autenticação"). Sem isso, qualquer cliente submete em nome de qualquer provider e lê transações e saldos alheios.
 - Limitação: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. O vínculo (`wallet_providers`) está no desenho de ARCHITECTURE.md → "Autenticação", não implementado.
@@ -213,3 +212,4 @@ Concorrência (paralelismo real):
 - 2026-11-07 — Fase 6 concluída: outbox publisher em `wager-events.fifo` (claim com `FOR UPDATE SKIP LOCKED` publicando ainda com o lock, ordem por agregado via `seq`, `SendMessageBatch` com falha por entrada, backoff sem descarte nem DLQ, timeouts do SQS abaixo do idle timeout, métricas published/failures/retries/stuck e outbox lag, shutdown gracioso). Revisão (correctness + test-evidence): 4 achados de código e 14 de testes corrigidos (backfill ordenado do `seq`, reenvio um a um em 4xx, SDK sem retries + folga de 2s, falha parcial real do LocalStack, `pg_terminate_backend`, idle timeout, shutdown com timeout). ARCHITECTURE §19. 513 testes passando (263 unit, 244 integração, 6 concorrência). Observação: uma execução da integração travou uma vez sem atividade no banco e não se repetiu em duas execuções seguidas. — Próximo: Fase 7 (referências pendentes), aguardando plano.
 - 2026-11-07 — Fase 7 concluída: `WagerSettlement` extraído (commit próprio), worker de referências pendentes (SKIP LOCKED na wallet, TTL 1h, caminho rápido, `correlation_id`, FAILED após 5 erros, espera do lock após 5 `wallet_busy`), métricas e flag. Corrigido o travamento intermitente da suíte de integração (`killClaimSession` agora espera o término do backend). Revisão (correctness + test-evidence): 3 achados de código e 12 de testes corrigidos. ARCHITECTURE §20. — Próximo: Fase 9 (testes de integração e concorrência), aguardando plano.
 - 2026-11-07 — Fase 9 validada e concluída (feita no Antigravity, revisada aqui com test-evidence + correctness): 5 achados apontados e 7 novos corrigidos (50 envios em paralelo HTTP+SQS nas 3 instâncias, prova de tráfego por instância antes e depois do reinício, contadores por vida do processo, ack logado só após o DeleteMessage, atomicidade da resolução pelo worker, checagens transação → evento, ledger no wagering-http/outbox, FAULT_INJECTION só com NODE_ENV=test, shutdown 8s ×3 com orçamento de 25s validado no boot, abort do long polling). Docker: build, profile multi com 3 réplicas ready, StopTimeout=30, down gracioso (saída 0, ~4s). 3 rodadas seguidas verdes: unit 281 (~4s), integração 282 (~57s), concorrência 8 (~8s), multi 1 (~40s). ARCHITECTURE §21 e README. — Próximo: Fase 10 (documentação), aguardando plano.
+- 2026-11-07 — Fase 10 concluída: auditoria da documentação contra o código (variáveis, scripts, failureCodes, métricas e números batendo); ARCHITECTURE.md reorganizado por tema e sem números de seção (índice, visão geral em 1 minuto, estratégia transacional, configuração, interpretações, decisões/trade-offs/limitações); desenho de autenticação com leitura de wallet/ledger e vínculo `wallet_providers` (AuthGuard segue no-op); citações "§N" trocadas pelo nome da seção no código, nas configs e nas listas acima (este registro mantém os números antigos); README reescrito e provado num clone limpo com compose isolado (install, up, migrations, unit 281, integração 282, exemplos curl). Typecheck e unit verdes no repositório. — Próximo: opcionais, só com pedido.
