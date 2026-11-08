@@ -26,7 +26,8 @@ As seções não são numeradas: código e configuração citam uma seção pelo
 18. [Estratégia de testes](#estratégia-de-testes)
 19. [Configuração](#configuração)
 20. [Interpretações adotadas](#interpretações-adotadas)
-21. [Decisões, trade-offs e limitações](#decisões-trade-offs-e-limitações)
+21. [Pontos da especificação que geraram dúvida](#pontos-da-especificação-que-geraram-dúvida)
+22. [Decisões, trade-offs e limitações](#decisões-trade-offs-e-limitações)
 
 ---
 
@@ -825,6 +826,34 @@ Pontos em que a especificação deixa margem, e o que foi escolhido. O detalhe e
 - **`providerId = "internal"` e keys `opening:`** são reservados para a OPENING — [API HTTP](#api-http).
 - **Ids e textos limitados a 256 caracteres**; `InvalidInput` tem código único — [Idempotência](#idempotência).
 - **A outbox não tem DLQ** e nunca descarta; um evento travado bloqueia só o próprio agregado — [Outbox publisher](#outbox-publisher).
+
+## Pontos da especificação que geraram dúvida
+
+Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou só puderam ser atendidos juntos com uma solução de contorno. Ficam registrados aqui no formato conflito → como foi resolvido, para discussão. As escolhas comuns de projeto, onde a especificação só deixa margem, estão em [Interpretações adotadas](#interpretações-adotadas).
+
+1. **Reversão dupla × crédito duplicado.**
+   - *Conflito:* o §7 (regra 4) só proíbe reverter a mesma referência duas vezes **pelo mesmo tipo**. Assim, um REFUND seguido de um ROLLBACK da mesma BET seria válido, mas creditaria a aposta duas vezes, o que o §3 proíbe ("não pode duplicar créditos").
+   - *Resolução:* cada transação pode ser revertida no máximo uma vez no total (REFUND **ou** ROLLBACK), garantido pelo índice único parcial `ux_wager_tx_one_reversal`. A invariante global prevaleceu sobre a regra mais permissiva. Ver [Regras de negócio](#regras-de-negócio).
+
+2. **`version` na abertura da wallet.**
+   - *Conflito:* o §6.2 diz que `version` incrementa sempre que o saldo muda. A abertura com saldo inicial muda o saldo (crédito OPENING), mas o exemplo do §9 devolve `version: 1`.
+   - *Resolução:* a abertura é parte da criação da wallet. `Wallet.open` já nasce com o saldo inicial e `version = 1`, e devolve o lançamento OPENING sem incrementar. Ver [Abertura de wallet](#abertura-de-wallet).
+
+3. **OPENING como `WagerTransaction`.**
+   - *Conflito:* o §6.3 exige em toda transação `providerId`, `roundId`, `gameId`, `idempotencyKey` e `payloadHash`, mas a OPENING é interna e não tem nenhum desses dados.
+   - *Resolução:* valores reservados para a transação interna (`providerId = "internal"`, `roundId = "opening"`, `gameId = "system"`, key `opening:<walletId>`). O provider `internal` e o kind OPENING são recusados na entrada, para nenhum provedor externo colidir com eles. Ver [API HTTP](#api-http).
+
+4. **Rejeição auditável × garantias no schema.**
+   - *Conflito:* a especificação pede que rejeições sejam persistidas (auditoria e replay) **e** que as garantias de consistência estejam no schema (§5.9). Uma rejeição por `WALLET_NOT_FOUND` ou `CURRENCY_MISMATCH` viola a FK composta `(wallet_id, currency) → wallets(id, currency)`, que é justamente a garantia de que transação e wallet têm a mesma moeda.
+   - *Resolução:* a coluna gerada `wallet_fk_currency` vale `NULL` quando a transação está REJECTED ou FAILED. Com `MATCH SIMPLE`, a FK não é checada só nessas linhas e continua valendo para todas as outras. Ver [Garantias no schema](#garantias-no-schema).
+
+5. **Limite de tentativas × fila FIFO.**
+   - *Conflito:* o §10 exige fila FIFO, limite de tentativas antes da DLQ e retry com backoff. O SQS conta cada **recebimento** como tentativa, e numa FIFO as mensagens seguintes de um grupo são recebidas de novo a cada retry da primeira, sem serem processadas. Com um limite único, mensagens válidas iriam para a DLQ sem nunca terem sido tentadas.
+   - *Resolução:* dois limites. O consumidor envia para a DLQ, com motivo e métrica, após 5 tentativas (`SQS_CONSUMER_MAX_ATTEMPTS`); a redrive policy da fila usa 10 (`SQS_MAX_RECEIVE_COUNT`), só como rede de segurança. O efeito colateral está em [Decisões e trade-offs](#decisões-e-trade-offs). Ver [Consumidor SQS](#consumidor-sqs).
+
+6. **`FAILED` como erro permanente de infraestrutura.**
+   - *Conflito:* o §6.3 define FAILED como estado terminal e auditável para "erro permanente de infraestrutura". Quando a infraestrutura que falha é o próprio banco, não há onde gravar esse estado.
+   - *Resolução:* FAILED (`INFRASTRUCTURE_FAILURE`) registra só falhas que ainda podem ser persistidas: uma pendência que erra de forma inesperada 5 vezes seguidas no reprocessamento. Indisponibilidade do banco é tratada como falha transitória (retry com backoff e, ao esgotar, DLQ), nunca como FAILED. Ver [Worker de referências pendentes](#worker-de-referências-pendentes) e [Consumidor SQS](#consumidor-sqs).
 
 ## Decisões, trade-offs e limitações
 
