@@ -1,8 +1,68 @@
-# Teste de carga: outbox lag e acúmulo na fila
+# Teste de carga
 
-Este documento investiga dois sintomas da execução oficial do `bun run test:load` ([`docs/carga/resultado.json`](carga/resultado.json), gerada sobre o commit `4dd9bd7` com o teste de carga ainda não commitado; o código do teste é o do commit `35e1619`): o **outbox lag alto mesmo com 10 clientes** e o **acúmulo na fila do cenário misto com 50 clientes**. No fim, propõe melhorias. **Nada foi implementado.** A metodologia do teste está em ARCHITECTURE.md → "Estratégia de testes".
+Resultados do `bun run test:load` e a análise deles. A metodologia (cenários, janela, o que é medido) está em ARCHITECTURE.md → "Estratégia de testes".
 
-## Resumo
+## Rodada oficial (commit `33f8049`, 2026-11-08)
+
+Execução completa, sobre o código entregue (com o diário de partidas dobradas): 3 instâncias, aquecimento de 10s e janela de 45s por rodada, seed fixa. Dados brutos em [`docs/carga/resultado.json`](carga/resultado.json) e saída do terminal em [`docs/carga/resultado.txt`](carga/resultado.txt). **7 rodadas, 7 com consistência ok** (saldo = ledger = diário, invariantes do banco inteiro), nenhum erro HTTP, nenhum 503, nenhum retry nem DLQ no SQS.
+
+**HTTP** (janela de medição; latência por tentativa, em ms):
+
+| Cenário | Clientes | req/s | tx/s | p50 | p95 | p99 | máx | 2xx | 422 | Erros | Conflitos de lock |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wallet-disputada | 10 | 43,2 | 43,2 | 74,7 | 335,0 | 4.599,5 | 12.237,5 | 1.943 | 0 | 0 | 0 |
+| wallet-disputada | 50 | 65,3 | 65,3 | 94,1 | 2.270,3 | 2.516,6 | 2.782,5 | 2.938 | 0 | 0 | 0 |
+| muitas-wallets | 10 | 175,8 | 175,8 | 54,6 | 82,4 | 112,9 | 189,6 | 7.913 | 0 | 0 | 0 |
+| muitas-wallets | 50 | 246,8 | 246,8 | 201,4 | 291,1 | 345,2 | 483,5 | 11.106 | 0 | 0 | 0 |
+| quente-frias | 50 + 10 | 70,9 | 70,9 | 75,2 | 2.916,3 | 4.124,6 | 4.769,8 | 3.191 | 0 | 0 | 0 |
+| misto | 10 | 102,0 | 114,9 | 48,9 | 79,6 | 99,1 | 144,5 | 4.352 | 237 | 0 | 0 |
+| misto | 50 | 206,8 | 200,5 | 117,6 | 193,9 | 266,3 | 437,1 | 8.800 | 506 | 0 | 0 |
+
+Os 422 do misto são todos `INSUFFICIENT_BALANCE`, rejeições de negócio que o gerador provoca de propósito; nenhum 4xx inesperado.
+
+**Assíncrono** (ms, salvo indicação):
+
+| Cenário | Clientes | Msgs SQS | e2e p50 | e2e p95 | Outbox lag p95 | Outbox lag máx | Fila máx | Retry | DLQ | Quiescência |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| wallet-disputada | 10 | — | — | — | 21.427 | 22.920 | 0 | 0 | 0 | 22,0s |
+| wallet-disputada | 50 | — | — | — | 17.938 | 18.892 | 0 | 0 | 0 | 20,7s |
+| muitas-wallets | 10 | — | — | — | 387 | 465 | 0 | 0 | 0 | 0,6s |
+| muitas-wallets | 50 | — | — | — | 36.683 | 38.080 | 0 | 0 | 0 | 25,8s |
+| quente-frias | 50 + 10 | — | — | — | 26.612 | 27.996 | 0 | 0 | 0 | 31,1s |
+| misto | 10 | 1.124 | 96 | 172 | 258 | 369 | 6 | 0 | 0 | 0,8s |
+| misto | 50 | 5.497 | 70.199 | 86.462 | 41.104 | 42.750 | 5.787 | 0 | 0 | 79,0s |
+
+**quente-frias por grupo:** quente 56,2 ops/s (p95 3.080 ms), frias 14,7 ops/s (p95 2.454 ms), 0 503. A wallet quente ocupa o pool e atrasa as frias da mesma instância, o mesmo quadro da medição do mutex (ver "Mutex local por wallet").
+
+**Leitura:**
+- **Correção:** nenhuma inconsistência, perda ou duplicidade em 7 rodadas, com 3 instâncias.
+- **Wallet disputada:** a vazão é limitada pela seção crítica do lock da wallet; o p99 de 4,6s com 10 clientes vem de poucas requisições que pegaram a fila do lock no início da janela (máximo 12,2s, sem pausa de amostragem: o maior intervalo entre amostras foi 1,0s). Nenhuma passou do orçamento de lock (0 conflitos, 0 503).
+- **Outbox lag** e **fila do misto/50**: mesmo comportamento analisado abaixo ("Análise do outbox lag e do acúmulo na fila"): serialização por agregado numa wallet quente e vazão do publisher sob CPU saturada; a fila absorve a sobrecarga dos produtores SQS e esvazia depois (quiescência 79s).
+
+### Comparação com a rodada anterior (`4dd9bd7`)
+
+| Cenário | tx/s antes | tx/s agora | Δ | p95 antes | p95 agora | p99 antes | p99 agora |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| wallet-disputada/10 | 63,6 | 43,2 | −32% | 260,5 | 335,0 | 600,2 | 4.599,5 |
+| wallet-disputada/50 | 93,8 | 65,3 | −30% | 1.061,6 | 2.270,3 | 1.188,8 | 2.516,6 |
+| muitas-wallets/10 | 250,9 | 175,8 | −30% | 58,3 | 82,4 | 72,6 | 112,9 |
+| muitas-wallets/50 | 389,5 | 246,8 | −37% | 195,0 | 291,1 | 232,5 | 345,2 |
+| misto/10 | 123,6 | 114,9 | −7% | 77,5 | 79,6 | 100,9 | 99,1 |
+| misto/50 | 204,9 | 200,5 | −2% | 182,5 | 193,9 | 219,6 | 266,3 |
+
+**Isto não é um A/B.** As duas rodadas foram feitas em sessões diferentes da mesma máquina, e entre elas entraram 29 commits: o diário de partidas dobradas, a reconciliação completa, o `lock_timeout` de 1s com uma tentativa extra (antes, 2s numa tentativa), o modo "banco fora" e o desempate das pendentes. A rodada anterior está em [`docs/carga/resultado-4dd9bd7.json`](carga/resultado-4dd9bd7.json). A queda de ~30% nos cenários só HTTP é maior que o custo isolado do diário (abaixo, −18% de vazão), e o resto não foi atribuído a uma causa: a máquina e o ambiente variam entre sessões (RAM livre no início: 0,6 GiB antes, 0,5 GiB agora; ver "Fatores do ambiente"). Os cenários mistos, limitados pelo LocalStack, quase não mudaram.
+
+## Custo do diário de partidas dobradas
+
+O custo do diário foi isolado por uma medição A/B própria, com rodadas alternadas na mesma sessão (detalhes em "Diário de partidas dobradas: medição", abaixo): no `quente-frias`, **p95 geral +18,7%** e **vazão −18%**, sem erros novos. Por transação que move saldo, o diário acrescenta 1 consulta de contas, 1 INSERT (lançamento e pernas) e 3 execuções do trigger deferido no COMMIT, todas dentro da seção crítica do lock da wallet. Por isso o efeito aparece mais nos cenários limitados pelo lock e pela CPU do Postgres (wallet disputada, muitas wallets) do que nos limitados pelo LocalStack (misto).
+
+---
+
+# Análise do outbox lag e do acúmulo na fila (rodada `4dd9bd7`)
+
+Esta análise foi feita sobre a rodada anterior ([`docs/carga/resultado-4dd9bd7.json`](carga/resultado-4dd9bd7.json), commit `4dd9bd7`; código do teste do commit `35e1619`). Os mecanismos descritos continuam valendo para a rodada oficial acima, que mostra os mesmos sintomas: o **outbox lag alto mesmo com 10 clientes** e o **acúmulo na fila do cenário misto com 50 clientes**. No fim, há propostas de melhoria. **Nenhuma foi implementada.**
+
+### Resumo
 
 1. **O outbox lag tem duas causas, e cada uma aparece num cenário.**
    - **Wallet disputada (causa estrutural):** a regra de ordem por agregado ("só o pendente de menor `seq` é elegível") serializa os `WalletBalanceChanged` de uma wallet. Eles saem **um por ciclo de claim**, qualquer que seja o número de publishers. O teto medido é ~37 eventos/s sob carga e ~45–57 eventos/s com a máquina ociosa. A wallet gera 63–94 eventos/s, então o atraso cresce linearmente durante toda a janela.
@@ -11,9 +71,9 @@ Este documento investiga dois sintomas da execução oficial do `bun run test:lo
 3. **A correção não foi afetada.** Não houve DLQ, retry, conflito de lock nem perda de evento, e todas as rodadas passaram nas verificações de consistência. O que piora é só o tempo até o efeito chegar ao downstream.
 4. **Mutex local por wallet: medido e não adotado.** Ele derruba o p95 das wallets frias de 2,1s para 88ms, mas reduz o throughput da wallet disputada em 47% e cria 503. O critério fixado antes da medição não foi atingido. Ver "Mutex local por wallet: medido, não adotado".
 
-## Evidências
+### Evidências
 
-### Execução oficial (janela de 45s)
+#### Rodada `4dd9bd7` (janela de 45s)
 
 A demanda de eventos é `publicados/s + crescimento dos pendentes/s`. O crescimento vem das amostras de 1s (`samples`) entre t=10s e t=55s.
 
@@ -28,9 +88,9 @@ A demanda de eventos é `publicados/s + crescimento dos pendentes/s`. O crescime
 
 `tx/s` e "publicados/s" vêm do delta de `/metrics` das 3 instâncias (`wagering_transactions_total` e `wagering_outbox_published_total`). Nos seis casos a demanda passa da vazão, e o lag, que é a idade do pendente mais antigo, cresce sem parar até a carga acabar. Por isso o p95 do lag fica quase igual ao máximo. Nenhuma rodada teve falha de publicação nem retry da outbox, a não ser 3 falhas de lote no misto/10, todas recuperadas.
 
-### Rodadas diagnósticas
+#### Rodadas diagnósticas
 
-Para separar as causas, rodei de novo, com janelas mais curtas, o misto/50 (5s + 30s) e o wallet-disputada/10 com o muitas-wallets/10 (5s + 20s). Junto rodaram duas sondas independentes, em [`test/load/diagnostics/`](../test/load/diagnostics/):
+Para separar as causas, foram feitas novas rodadas, com janelas mais curtas, do misto/50 (5s + 30s) e o wallet-disputada/10 com o muitas-wallets/10 (5s + 20s). Junto rodaram duas sondas independentes, em [`test/load/diagnostics/`](../test/load/diagnostics/):
 - **[`probe.ts`](../test/load/diagnostics/probe.ts), a cada 1s:** latência de `select 1` no Postgres, de `GetQueueAttributes` no LocalStack, CPU do host e `docker stats` de cada container.
 - **[`outbox-poll.ts`](../test/load/diagnostics/outbox-poll.ts), a cada 2s:** pendentes por `event_type`, com o número de agregados distintos.
 
@@ -41,7 +101,7 @@ Para separar as causas, rodei de novo, com janelas mais curtas, o misto/50 (5s +
 
 Os instantes `t` dos JSONL são epoch em ms do relógio do host, o mesmo dos `samples` do `test:load` (que são relativos ao início da rodada). Os trechos citados abaixo usam segundos desde a primeira linha da sonda.
 
-**Arquivo perdido:** o JSONL bruto da sonda de recursos do misto/50 foi apagado por engano antes da segunda rodada diagnóstica. A tabela "Misto, 50 clientes" abaixo foi transcrita da saída de terminal daquela execução e **não pode ser conferida por arquivo**. Os demais números do misto/50, isto é, profundidade da fila, outbox e consumo pela inbox, vêm do `diagnostico-misto-50.json` e da inbox lida logo após a rodada ([`inbox-rate.ts`](../test/load/diagnostics/inbox-rate.ts)). A inbox também não está arquivada; só o resultado ficou.
+**Arquivo não preservado:** o JSONL bruto da sonda de recursos do misto/50 não foi preservado. A tabela "Misto, 50 clientes" abaixo foi transcrita da saída de terminal daquela execução e **não pode ser conferida por arquivo**. Os demais números do misto/50, isto é, profundidade da fila, outbox e consumo pela inbox, vêm do `diagnostico-misto-50.json` e da inbox lida logo após a rodada ([`inbox-rate.ts`](../test/load/diagnostics/inbox-rate.ts)). A inbox também não está arquivada; só o resultado ficou.
 
 **Wallet disputada, 10 clientes: o atraso é todo de um único agregado.**
 
@@ -81,7 +141,7 @@ Consumo do consumidor, contado pela inbox (`processed_at`) em janelas de 5s:
  carga encerrada: 112,6 109,2 104,4 90,8              msg/s
 ```
 
-### Custo do claim com backlog (EXPLAIN ANALYZE, backlog sintético)
+#### Custo do claim com backlog (EXPLAIN ANALYZE, backlog sintético)
 
 Reproduzível com [`explain-claim.ts`](../test/load/diagnostics/explain-claim.ts), que dá TRUNCATE na outbox do `wagering_test`. Os tempos são de duas execuções.
 
@@ -93,7 +153,7 @@ Reproduzível com [`explain-claim.ts`](../test/load/diagnostics/explain-claim.ts
 
 Com backlog espalhado, o claim custa pouco. Quando uma wallet quente acumula eventos à frente, porém, cada claim fica O(backlog), e isso deixa mais lento o ciclo de **todos** os agregados. É uma realimentação: mais atraso deixa o claim mais lento, e o claim lento aumenta o atraso. No wallet-disputada/50 o backlog chegou a ~3.800, o que dá ~12ms extras por ciclo.
 
-## Causa 1: serialização por agregado (wallet disputada)
+### Causa 1: serialização por agregado (wallet disputada)
 
 O claim ([`outbox-store.ts`](../src/infrastructure/outbox/outbox-store.ts)) só considera elegível o pendente de menor `seq` do agregado. Isso decorre da decisão documentada em ARCHITECTURE.md → "Outbox publisher", "Ordem por agregado". Para uma wallet quente, isso tem três consequências:
 
@@ -103,7 +163,7 @@ O claim ([`outbox-store.ts`](../src/infrastructure/outbox/outbox-store.ts)) só 
 
 A garantia de ordem está correta; o custo dela é que não estava medido. Ele só aparece com uma wallet que recebe dezenas de transações por segundo.
 
-## Causa 2: vazão do publisher sob competição (muitas wallets, misto)
+### Causa 2: vazão do publisher sob competição (muitas wallets, misto)
 
 Por instância, o ciclo ([`outbox-publisher.ts`](../src/interfaces/workers/outbox-publisher.ts), [`outbox-store.ts`](../src/infrastructure/outbox/outbox-store.ts)) é **um laço sequencial**:
 
@@ -115,7 +175,7 @@ São ~14 idas e voltas ao Postgres e 1 ao LocalStack para no máximo 10 eventos,
 
 **Hipótese não medida:** com 50 clientes, há ~17 requisições HTTP em voo por instância para um pool de 10 conexões ([`mikro-orm.config.ts`](../src/infrastructure/persistence/mikro-orm.config.ts)), e o publisher espera na mesma fila do pool. Isso explicaria parte da queda de 10 para 50 clientes. Com 10 clientes (~3–4 em voo por instância), o pool não deve ser o gargalo. Não há métrica de espera do pool para confirmar.
 
-## Causa do acúmulo na fila (misto, 50 clientes)
+### Causa do acúmulo na fila (misto, 50 clientes)
 
 **Chegada maior que serviço.** Chegaram 75 msg/s. O alvo eram 125 msg/s (25 produtores × `LOAD_SQS_RATE=5`), mas cada produtor espera o `SendMessage` terminar antes de agendar o próximo, e com o LocalStack respondendo em centenas de ms eles ficaram para trás. Ou seja, **a chegada SQS só é aberta enquanto o LocalStack responde rápido**, uma limitação do gerador (proposta 9). No misto/10, o alvo de 25 msg/s foi atingido. No misto/10 chegavam 25 msg/s e a fila não passou de 23 mensagens. No misto/50 ela cresceu a ~68 msg/s, ou seja, o consumo total ficou em **~7–8 msg/s** durante a janela. Depois da carga, a fila esvaziou a ~50 msg/s na execução oficial e a ~110 msg/s na diagnóstica.
 
@@ -127,28 +187,28 @@ O mecanismo está no [`wager-consumer.ts`](../src/interfaces/sqs/wager-consumer.
 
 **Por que aparece na fila e não no HTTP:** os clientes HTTP estão em laço fechado. Quando o sistema fica lento, eles mandam menos (o req/s sobe só de 111 para 215 quando os clientes vão de 10 para 50). Os produtores SQS estão em chegada aberta e continuam mandando 75 msg/s. A fila é o único ponto em que a sobrecarga se acumula em vez de se autolimitar. É o comportamento esperado de uma fila, e a latência ponta a ponta (p50 64s) é o tempo de espera nela (Lei de Little: ~3.400 mensagens ÷ ~55 msg/s ≈ 62s).
 
-### O que não está explicado
+#### O que não está explicado
 
 Pela barreira, com receive e delete de ~200–300ms e a cauda do use case, cada instância deveria fazer ~10–15 msg/s, ou seja, 30–45 msg/s no total. O medido foi ~7–8 msg/s. Não temos dados para fechar essa diferença. As hipóteses, em ordem de plausibilidade:
 
 1. A cauda do RTT do LocalStack (p99) é muito maior que a média que a sonda mede.
-2. O LocalStack saturado devolve lotes menores que 10. Ocioso, ele devolve lotes cheios de grupos distintos, como verifiquei com uma sonda de 200 grupos ([`fifo-batch.ts`](../test/load/diagnostics/fifo-batch.ts): 10 mensagens por receive, ~6ms).
+2. O LocalStack saturado devolve lotes menores que 10. Ocioso, ele devolve lotes cheios de grupos distintos, como mostrou uma sonda de 200 grupos ([`fifo-batch.ts`](../test/load/diagnostics/fifo-batch.ts): 10 mensagens por receive, ~6ms).
 3. Falta de event loop para o laço do consumidor.
 
 O consumidor não mede o tamanho do lote nem o tempo de cada etapa. Isso está na primeira proposta abaixo.
 
-## Fatores do ambiente (valem para todos os números)
+### Fatores do ambiente (valem para todos os números)
 
 - **Uma máquina só:** i7-1165G7 (4 núcleos / 8 threads), 7,7 GiB de RAM, Docker Desktop com VM de 8 CPUs e 3,7 GiB. Gerador, 3 instâncias, Postgres e LocalStack disputam a mesma CPU, que fica em 100% em todas as rodadas com 50 clientes e no muitas-wallets/10.
 - **Paginação:** no início da execução havia 0,6 GiB livres, e havia 15,9 GiB comprometidos para 7,7 GiB físicos. Na rodada diagnóstica do misto/50, o host inteiro parou por ~13s: o amostrador do teste e a sonda, que são processos independentes, ficaram sem amostras no mesmo intervalo, e o consumo da inbox foi a zero. **Na execução oficial isso não aconteceu** (nenhum intervalo entre amostras acima de 2,5s), exceto por uma lacuna de 3,2s no misto/10 aos 32s, que coincide com o salto de pendentes de 1.164 para 2.703.
 - **LocalStack não é SQS:** é um único processo Python, e preso em 1 núcleo ele é o teto de tudo o que passa por SQS (consumo, publicação e os leitores do teste). Cada evento de transação usa o próprio `MessageGroupId`, o que gera milhares de grupos FIFO; o custo disso no LocalStack não diz nada sobre o SQS real. **Os números dos caminhos SQS são limitados pelo ambiente**, e só a análise de mecanismo (barreira, serialização) vale fora dele.
 - **O próprio teste carrega o LocalStack:** 4 leitores da fila de eventos e o amostrador de profundidade.
 
-## Propostas (nenhuma implementada)
+### Propostas (nenhuma implementada)
 
 As propostas estão em ordem de prioridade. Cada uma traz o efeito esperado, o custo e como validar. **Valide sempre com o `test:load` de antes e de depois**, comparando "publicados/s" com a demanda, a taxa de esvaziamento depois da carga e o consumo da fila durante a janela.
 
-### 0. Instrumentar antes de otimizar (pré-requisito)
+#### 0. Instrumentar antes de otimizar (pré-requisito)
 
 | Métrica | Onde | Responde |
 |---|---|---|
@@ -159,7 +219,7 @@ As propostas estão em ordem de prioridade. Cada uma traz o efeito esperado, o c
 
 O risco é baixo: são só labels de conjunto fechado, seguindo a regra de ARCHITECTURE.md → "Observabilidade". Sem essas métricas, as propostas 3 e 4 são palpites calibrados.
 
-### Outbox
+#### Outbox
 
 **1. Publicar uma sequência de eventos do mesmo agregado por ciclo (ataca a causa 1).**
 
@@ -186,7 +246,7 @@ O risco é baixo: são só labels de conjunto fechado, seguindo a regra de ARCHI
 - **Mudança:** selecionar por cabeça de agregado (por exemplo, `distinct on (aggregate_id) … order by aggregate_id, seq`, ou uma tabela de cabeças mantida no INSERT).
 - **Custo:** um índice ou uma tabela a mais, e um plano a revalidar com EXPLAIN. Só vale junto com a proposta 1 ou se a 1 não for feita.
 
-### Consumidor
+#### Consumidor
 
 **5. Separar a API dos workers (configuração, sem código).**
 - **Mudança:** já existem as flags `SQS_CONSUMER_ENABLED`, `OUTBOX_PUBLISHER_ENABLED` e `PENDING_REFERENCE_WORKER_ENABLED`. Dá para rodar processos só de API e processos só de workers, escalando cada grupo de forma independente.
@@ -206,7 +266,7 @@ O risco é baixo: são só labels de conjunto fechado, seguindo a regra de ARCHI
 - **Efeito:** corta até 9 de cada 10 chamadas de ack ao SQS, que é o recurso saturado no misto.
 - **Custo:** o ack demora um pouco mais. Uma reentrega nesse intervalo cai na inbox (`DUPLICATE_MESSAGE`), então continua seguro.
 
-### Medição
+#### Medição
 
 **9. Melhorar o próprio experimento.**
 - Rodar o gerador em outra máquina, ou ao menos limitar a CPU dos containers e fechar o que estiver paginando.
@@ -215,7 +275,7 @@ O risco é baixo: são só labels de conjunto fechado, seguindo a regra de ARCHI
 - Produtores SQS de chegada realmente aberta: disparar cada envio no horário agendado sem esperar o anterior. Hoje o misto/50 entregou 75 dos 125 msg/s pedidos.
 - Registrar a RAM livre e a paginação no ambiente, e marcar as rodadas com lacunas de amostra acima de 2s como suspeitas.
 
-### Ordem sugerida
+#### Ordem sugerida
 
 Primeiro a **0**, que mostra quanto do problema é ambiente. Depois a **2**, barata e sem efeito colateral, e a **5**, que é só configuração. Em seguida a **6** ou a **3**, conforme o que a 0 mostrar. A **1** vem por último, só se uma wallet com dezenas de transações/s for um caso real de negócio, porque ela troca simplicidade da garantia de ordem por vazão.
 
@@ -227,7 +287,7 @@ Primeiro a **0**, que mostra quanto do problema é ambiente. Depois a **2**, bar
 
 **Método.** Cenário `quente-frias` do `test:load` (commit `4bccffc`): 50 clientes HTTP numa wallet disputada e 10 em 300 wallets frias, ao mesmo tempo, 3 instâncias, aquecimento de 10s e janela de 45s, seed fixa. Foram 3 rodadas antes (`main`, `4bccffc`) e 3 depois (branch), **alternadas** (antes, depois, antes, …) na mesma sessão da máquina, e a comparação usa as **medianas**. JSONs em [`docs/carga/mutex/`](carga/mutex/) (`antes-N.json`, `depois-N.json`).
 
-**Critério de merge, fixado antes da medição:** p95 das frias pelo menos 20% menor; throughput da wallet quente (PROCESSED/s pelo banco) sem queda maior que 10%; total de 503 sem aumento.
+**Critério de adoção, fixado antes da medição:** p95 das frias pelo menos 20% menor; throughput da wallet quente (PROCESSED/s pelo banco) sem queda maior que 10%; total de 503 sem aumento.
 
 | Métrica (mediana de 3) | Antes | Depois | Δ |
 |---|---:|---:|---:|
@@ -258,7 +318,7 @@ Primeiro a **0**, que mostra quanto do problema é ambiente. Depois a **2**, bar
 
 **Método.** O mesmo da medição do mutex: cenário `quente-frias` (50 clientes HTTP numa wallet disputada + 10 em 300 wallets frias, 3 instâncias, aquecimento de 10s, janela de 45s, seed 20261108). Foram 3 rodadas na `main` (`1052017`, numa worktree destacada) e 3 na branch, **alternadas** na mesma sessão da máquina (2026-11-08, 17:50–18:00), e a comparação usa as **medianas**. Antes de cada rodada da `main`, a migration do diário foi revertida no `wagering_test`, para que a `main` rodasse sobre o próprio schema; a rodada da branch a reaplica. JSONs em [`docs/carga/partidas-dobradas/`](carga/partidas-dobradas/) (`antes-N.json`, `depois-N.json`); a tabela sai de [`compare.ts`](carga/partidas-dobradas/compare.ts).
 
-**Critério de merge, fixado pelo autor antes da medição:** p95 do `quente-frias` até +20% sobre a `main`, sem erros novos.
+**Critério de adoção, fixado antes da medição:** p95 do `quente-frias` até +20% sobre a `main`, sem erros novos.
 
 | Métrica (mediana de 3) | Antes (`main`) | Depois (branch) | Δ |
 |---|---:|---:|---:|
