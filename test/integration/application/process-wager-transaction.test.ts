@@ -400,7 +400,7 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       const first = command(wallet, { money: { amount: '25.00', currency: 'BRL' } });
       const original = await expectType(first, 'Processed');
       const different = { ...first, payload: { ...first.payload, money: { amount: '26.00', currency: 'BRL' } } };
-      // Outra transação segura o lock da wallet bem além do lock_timeout (2s).
+      // Outra transação segura o lock da wallet além do orçamento de espera (2 tentativas de 1s).
       const release = Promise.withResolvers<void>();
       const locked = Promise.withResolvers<void>();
       const holder = orm.em.getKnex().transaction(async (trx) => {
@@ -413,9 +413,13 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
         const startedAt = Date.now();
         expect(await run(first)).toEqual({ ...original, idempotentReplay: true });
         expect(await run(different)).toEqual({ type: 'IdempotencyConflict', existingTransactionId: original.transactionId });
-        expect(Date.now() - startedAt, 'sem esperar o lock').toBeLessThan(1_500);
-        // Uma transação nova ainda passa pelo lock: com ele segurado, volta transitória.
+        expect(Date.now() - startedAt, 'sem esperar o lock').toBeLessThan(900);
+        // Uma transação nova ainda passa pelo lock: 2 tentativas de 1s (orçamento ~2s) e volta transitória.
+        const newAt = Date.now();
         expect(await run(command(wallet, {}))).toEqual({ type: 'TransientFailure', reason: 'lock_timeout' });
+        const waited = Date.now() - newAt;
+        expect(waited, 'duas esperas de 1s').toBeGreaterThanOrEqual(1_900);
+        expect(waited, 'orçamento total ~2s, não 4s').toBeLessThan(3_000);
       } finally {
         release.resolve();
         await holder;

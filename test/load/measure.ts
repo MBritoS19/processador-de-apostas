@@ -1,7 +1,7 @@
 import { cpus, freemem, platform, release, totalmem, version as osVersion } from 'node:os';
-import { join } from 'node:path';
 import { loadConfig } from '../../src/infrastructure/config/app-config';
 import { buildMikroOrmConfig } from '../../src/infrastructure/persistence/mikro-orm.config';
+import { WAGER_LOCK_TIMEOUT_MS } from '../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
 import { ROOT, type Instance } from '../multi/harness';
 import type { Rows } from '../multi/consistency';
 
@@ -82,8 +82,6 @@ async function run(command: string[]): Promise<string> {
 export async function collectEnvironment(rows: Rows, instanceEnv: Record<string, string>): Promise<Record<string, unknown>> {
   const config = loadConfig();
   const pool = buildMikroOrmConfig(config).pool;
-  const unitOfWork = await Bun.file(join(ROOT, 'src/infrastructure/persistence/mikro-orm-wager-unit-of-work.ts')).text();
-  const lockTimeoutMs = Number(/DEFAULT_LOCK_TIMEOUT_MS = ([\d_]+)/.exec(unitOfWork)?.[1]?.replaceAll('_', '') ?? NaN);
   const [pg] = await rows<Record<string, string>>(
     `select version() as version, current_setting('max_connections') as max_connections,
             current_setting('shared_buffers') as shared_buffers, current_setting('synchronous_commit') as synchronous_commit`,
@@ -116,7 +114,9 @@ export async function collectEnvironment(rows: Rows, instanceEnv: Record<string,
     app: {
       instances: 3,
       poolPerInstance: pool,
-      lockTimeoutMs,
+      // Por tentativa do use case (2 tentativas); o worker de pendentes usa 2s.
+      lockTimeoutMs: WAGER_LOCK_TIMEOUT_MS,
+      lockAttempts: 2,
       instanceEnv,
       logLevel: process.env['LOG_LEVEL'] ?? 'info',
     },

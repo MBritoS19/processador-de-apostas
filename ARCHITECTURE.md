@@ -38,7 +38,7 @@ Provedores enviam `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK` por HTTP ou pela f
 **Uma BET pela API** (`POST /wagering/transactions` com `Idempotency-Key`):
 
 1. `AuthGuard` (no-op hoje) → validação do corpo (`400`; nada é gravado) → cálculo do `payloadHash`.
-2. **Uma transação SQL:** `SET LOCAL lock_timeout = 2s` → `SELECT … FROM wallets … FOR UPDATE` → busca pela key ou pelo id externo (se existir: replay ou `409`) → regras de negócio → `INSERT` da transação → `UPDATE` do saldo conferindo `version` → `INSERT` do lançamento → `INSERT` dos eventos na outbox → `COMMIT`, quando as FKs deferidas e o trigger saldo × ledger são checados.
+2. **Uma transação SQL:** `SET LOCAL lock_timeout = 1s` (uma tentativa extra se estourar) → `SELECT … FROM wallets … FOR UPDATE` → busca pela key ou pelo id externo (se existir: replay ou `409`) → regras de negócio → `INSERT` da transação → `UPDATE` do saldo conferindo `version` → `INSERT` do lançamento → `INSERT` dos eventos na outbox → `COMMIT`, quando as FKs deferidas e o trigger saldo × ledger são checados.
 3. Resposta: `200` PROCESSED, `422` REJECTED/FAILED, `202` PENDING_REFERENCE, `409` conflito de idempotência, `503` falha transitória (reenviar com a mesma key).
 
 **A mesma BET pela fila:** `ReceiveMessage` → envelope inválido vai para a DLQ → pré-checagem da inbox → o mesmo use case, com a linha da inbox gravada **na mesma transação SQL** → `DeleteMessage` só depois do commit. Uma falha transitória volta para a fila com backoff; na 5ª tentativa, ou com payload inválido, vai para a DLQ com motivo.
@@ -251,12 +251,12 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 
 ## Concorrência
 
-**Escolha:** lock pessimista por wallet. `SELECT ... FOR UPDATE` na linha da wallet, dentro da transação do use case, com `SET LOCAL lock_timeout = '2000ms'`. O `UPDATE` da wallet ainda confere a `version` como segunda barreira.
+**Escolha:** lock pessimista por wallet. `SELECT ... FOR UPDATE` na linha da wallet, dentro da transação do use case, com `SET LOCAL lock_timeout = '1000ms'` e uma tentativa extra (orçamento de espera ~2s). O `UPDATE` da wallet ainda confere a `version` como segunda barreira.
 
 **Por que pessimista, e não otimista com retry:**
 - O caso dominante é contenção na **mesma** wallet: rodadas rápidas, reentregas at-least-once, várias instâncias. Com lock otimista, cada conflito vira rollback e reexecução inteira. Com pessimista, a segunda transação espera alguns milissegundos e roda sobre o estado já commitado.
 - A checagem de idempotência fica **sob o lock**. A transação original, se existir, foi gravada por quem segurava o mesmo lock e já está visível (READ COMMITTED lê a cada statement). Assim, "a mesma BET 50x em paralelo" vira 1 processamento e 49 replays, sem depender de violação de unicidade.
-- Uma conexão fica ocupada esperando o lock; por isso o `lock_timeout` é curto. Esgotado, a transação aborta (`55P03`), e o use case tenta **uma vez mais**, numa transação nova (`processWithLockRetry`). A fila de espera de uma wallet disputada costuma andar em menos de 2s, e a idempotência é rechecada sob o lock, então repetir nunca duplica efeito. Só o segundo estouro vira `TransientFailure('lock_timeout')`: o provedor reenvia a mesma requisição, que é idempotente. O custo é que o pior caso de latência antes do 503 sobe de ~2s para ~4s, com a conexão ocupada esse tempo todo. Deadlock, serialização e pool esgotado não ganham tentativa extra.
+- Uma conexão fica ocupada esperando o lock; por isso o `lock_timeout` é curto. Esgotado, a transação aborta (`55P03`), e o use case tenta **uma vez mais**, numa transação nova (`processWithLockRetry`). Cada tentativa espera até 1s (`WAGER_LOCK_TIMEOUT_MS`), então o orçamento total de espera continua ~2s, como era com uma tentativa de 2s. A tentativa extra dá a vez a quem entrou na fila de espera da wallet, sem aumentar a latência máxima, e a idempotência é rechecada sob o lock, então repetir nunca duplica efeito. Só o segundo estouro vira `TransientFailure('lock_timeout')`: o provedor reenvia a mesma requisição, que é idempotente. O custo é uma transação a mais (e um conflito a mais na métrica) quando a primeira espera estoura. O worker de pendentes e a abertura de wallet seguem com uma tentativa de 2s. Deadlock, serialização e pool esgotado não ganham tentativa extra.
 
 **Granularidade:** só a linha da wallet é travada; wallets diferentes não se bloqueiam. Não há lock global, advisory lock nem tabela de controle. O lock usa `WHERE id = $wallet AND player_id = $player`, então quem não é dono da wallet não segura nem espera o lock dela. Uma leitura sem lock distingue `WALLET_NOT_FOUND` de `WALLET_PLAYER_MISMATCH`.
 
@@ -265,7 +265,7 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 **Ausência de deadlock:** cada transação trava **uma única** linha de wallet, sempre antes de qualquer escrita, então não existe espera circular entre locks de linha. As outras esperas possíveis são de índices únicos (duas transações inserindo a mesma key em wallets diferentes); como todas inserem nos mesmos índices e na mesma ordem, a espera é sempre num sentido só. Se ainda assim o Postgres detectar deadlock (`40P01`) ou falha de serialização (`40001`), o resultado é `TransientFailure`. Os workers seguem a mesma ordem (wallet primeiro; ver [Worker de referências pendentes](#worker-de-referências-pendentes)).
 
 **SQL dentro da transação:**
-1. `BEGIN; SET LOCAL lock_timeout = '2000ms'`
+1. `BEGIN; SET LOCAL lock_timeout = '1000ms'` (a segunda tentativa repete tudo numa transação nova)
 2. `SELECT * FROM wallets WHERE id = $w AND player_id = $p FOR UPDATE`
 3. `SELECT * FROM wager_transactions WHERE provider_id = $p AND (idempotency_key = $k OR external_transaction_id = $e)`. Se achar, é replay ou conflito, e termina aqui (no replay, só a inbox é gravada).
 4. Se a wallet não veio: `SELECT count(*) FROM wallets WHERE id = $w` (sem lock).
@@ -512,10 +512,10 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | Limite do consumidor (`SQS_CONSUMER_MAX_ATTEMPTS`) | 5 | DLQ com motivo e métrica, decidida pelo consumidor |
 | `maxReceiveCount` da fila | 10 | rede de segurança (abaixo) |
 | Backoff do retry | `30s·2^(n−1)`, teto 300s: 30/60/120/240 | `n` = `ApproximateReceiveCount` |
-| `VisibilityTimeout` no receive | 60s | pior caso de um lote: 10 mensagens do mesmo grupo em sequência × ~5s (`lock_timeout` 2s + releitura) |
+| `VisibilityTimeout` no receive | 60s | pior caso de um lote: 10 mensagens do mesmo grupo em sequência × ~5s (2 tentativas de `lock_timeout` 1s + releitura) |
 | `WaitTimeSeconds` | 20 | long polling: menos chamadas vazias |
 | Pausa do polling (SQS falhou no receive) | `1s·2^(n−1)`, até 30s | não martelar um SQS fora do ar |
-| Sonda no modo "banco fora" | `1s·2^(n−1)`, até 30s, com `HEALTH_CHECK_TIMEOUT_MS` (2s) por sonda | volta a receber em até ~30s depois que o banco volta |
+| Sonda no modo "banco fora" | `1s·2^(n−1)`, até 5s (`databaseProbeDelayMs`), com `HEALTH_CHECK_TIMEOUT_MS` (2s) por sonda | volta a receber em até ~5s depois que o banco volta; a sonda é só um `select 1`, então sondar a cada 5s custa pouco |
 | `SQS_SHUTDOWN_TIMEOUT_MS` | 8s | um dos três prazos de shutdown, que rodam em sequência (ver [Estratégia de testes](#estratégia-de-testes)) |
 
 **Tolerância a falha transitória da mensagem** (lock, deadlock, pool esgotado, bug): 5 tentativas, separadas por 30+60+120+240 = 450s, ou seja, **~7,5 min** desde o primeiro recebimento até a DLQ. Se o próprio SQS falha no receive, o loop pausa (1s, 2s, 4s… até 30s, zerando no primeiro ciclo bom).
@@ -528,7 +528,7 @@ Antes, uma queda do Postgres era tratada como qualquer transitório: a mensagem 
 
 1. A mensagem que acusou a queda volta **já** (visibilidade 0) e não conta para o limite do consumidor, porque a falha não é dela. As mensagens do lote que ainda não foram tentadas, de qualquer grupo, também voltam com visibilidade 0, sem tentativa, e o grupo mantém a ordem.
 2. O loop **para de receber**. Ele registra o log `warn` `sqs_consumer_db_unavailable` e põe `wagering_consumer_db_unavailable = 1`.
-3. Em seguida, espera com backoff (1s, 2s, 4s… até 30s) e **sonda** o Postgres com o mesmo `select 1` do `/health/ready` (`PostgresReadinessCheck`, com prazo de 2s).
+3. Em seguida, espera com backoff (1s, 2s, 4s, 5s, 5s…) e **sonda** o Postgres com o mesmo `select 1` do `/health/ready` (`PostgresReadinessCheck`, com prazo de 2s).
 4. Quando a sonda passa, registra o log `info` `sqs_consumer_db_available` (com `downMs` e `probes`), põe o gauge em 0 e volta a receber.
 5. O `stop()` interrompe a espera e aborta a sonda, dentro do prazo de shutdown (log `sqs_consumer_db_wait_stopped`, testado).
 
@@ -903,7 +903,7 @@ Todas as variáveis são lidas e validadas por `loadConfig` (`src/infrastructure
 | `MULTI_SEED` | `20261107` (fixa) | só `test:multi`: troca a seed da carga |
 | `LOG_LEVEL` | `info` | nível do pino (`trace`…`fatal`, `silent`); lida direto em `logger.ts`, fora do `loadConfig`, porque o logger existe antes da config |
 
-Constantes fixas no código (não configuráveis): `lock_timeout` 2s, `statement_timeout` do claim 5s, pool 10 / acquire 10s, backoff das pendências 5s→10min, backoff da outbox 1s→5min, pausa dos loops até 30s (`errorPauseMs`, a mesma nos três loops). Todos os backoffs usam `exponentialBackoffMs` (`src/domain/backoff.ts`).
+Constantes fixas no código (não configuráveis): `lock_timeout` 1s por tentativa no use case (2 tentativas) e 2s no worker de pendentes e na abertura de wallet, `statement_timeout` do claim 5s, pool 10 / acquire 10s, backoff das pendências 5s→10min, backoff da outbox 1s→5min, pausa dos loops até 30s (`errorPauseMs`, a mesma nos três loops), sonda do modo "banco fora" até 5s. Todos os backoffs usam `exponentialBackoffMs` (`src/domain/backoff.ts`).
 
 ## Interpretações adotadas
 
@@ -963,7 +963,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **Migrations em SQL à mão, com CLI próprio:** mais código para manter, e nada detecta automaticamente divergência entre o `EntitySchema` e o SQL (os testes de integração contra o banco real fazem isso).
 - **FKs deferidas:** a ordem do flush não importa, mas a violação de FK só aparece no commit, não no statement.
 - **`Money` em `bigint` com escala fixa 2:** moedas com outra escala (JPY, BHD) ou operações com divisão exigiriam introduzir escala por moeda e arredondamento.
-- **Lock pessimista por wallet:** uma conexão fica ocupada esperando o lock (limitado pelo `lock_timeout` de 2s, com uma tentativa extra: até ~4s antes do 503 reenviável), em troca de não reexecutar transações inteiras sob contenção.
+- **Lock pessimista por wallet:** uma conexão fica ocupada esperando o lock (2 tentativas de `lock_timeout` 1s: no máximo ~2s antes do 503 reenviável), em troca de não reexecutar transações inteiras sob contenção.
 - **Porta própria de readiness**, sem `@nestjs/terminus`: ~80 linhas nossas em vez de uma dependência.
 - **Portas em loopback e LocalStack fixado em 4.9.2:** sem correções de versões futuras do LocalStack.
 - **Filas sem dedup por conteúdo:** todo produtor precisa gerar o dedup id; em troca, dois payloads idênticos legítimos não são descartados por coincidência.
@@ -981,7 +981,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **REFUND de BET que já tem WIN PROCESSED é aceito.** A spec não proíbe, e o provedor pode estornar uma rodada cancelada depois de liquidada; o jogador fica com o prêmio e com o valor da aposta. Barrar exige definir a prioridade entre liquidação e estorno (decisão de negócio).
 - **O banco não garante tudo do ledger:** compara o saldo com o **último** lançamento, não com a soma; não verifica o encadeamento `balance_before` = `balance_after` anterior, nem que só transação PROCESSED que move saldo tenha lançamento, nem que valor e direção do lançamento sejam os da transação. Garantem o domínio, o use case e o lock por wallet. Em produção, a [reconciliação](#reconciliação) detecta: lançamento sem transação PROCESSED que move saldo, valor ou direção divergentes, transação PROCESSED sem lançamento (ou com mais de um) e saldo ≠ soma. O encadeamento não é conferido lançamento a lançamento (ver "O que ela não detecta"). Nos testes, `expectLedgerConsistent` verifica tudo isso.
 - **Sem retenção da inbox:** `inbox_messages` cresce sem limite (ver [Idempotência](#idempotência) → "Retenção").
-- **Modo "banco fora":** o consumidor volta a receber até ~30s depois de o banco voltar (teto da sonda; ~16s no `test:chaos`). Várias quedas seguidas podem levar uma mensagem ao `maxReceiveCount` 10 da fila, e ela iria para a DLQ pelo redrive nativo, sem motivo nem métrica do consumidor. A sonda vê só o Postgres desta instância.
+- **Modo "banco fora":** o consumidor volta a receber até ~5s depois de o banco voltar (teto da sonda). Várias quedas seguidas podem levar uma mensagem ao `maxReceiveCount` 10 da fila, e ela iria para a DLQ pelo redrive nativo, sem motivo nem métrica do consumidor. A sonda vê só o Postgres desta instância.
 - **TRUNCATE não é bloqueado** pelos triggers: em produção, o usuário da aplicação não deve ter essa permissão.
 - **C4a — mensagem não registrada na inbox:** se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, nenhuma linha de inbox é gravada. Uma mensagem posterior com o mesmo `messageId` e outro payload válido é processada normalmente (com a própria idempotency key, sem duplicar efeito). Fechar exige gravar a inbox também nesses desfechos, o que muda o use case.
 - **Sem heartbeat de visibilidade no consumidor:** um lote acima de 60s pode ser reentregue em paralelo; é seguro, mas desperdiça trabalho.

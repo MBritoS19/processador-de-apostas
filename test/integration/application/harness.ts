@@ -10,7 +10,7 @@ import {
 import { WagerSettlement } from '../../../src/application/wagering/wager-settlement';
 import { LoggingLockConflictTelemetry } from '../../../src/infrastructure/observability/lock-conflict-telemetry';
 import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
-import { MikroOrmWagerUnitOfWork } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
+import { MikroOrmWagerUnitOfWork, WAGER_LOCK_TIMEOUT_MS } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
 import { randomIdGenerator } from '../../../src/infrastructure/system-adapters';
 import { T0 } from '../persistence/db';
 import { captureLogger } from '../workers/outbox-harness';
@@ -24,7 +24,7 @@ export function buildUseCase(orm: MikroORM, options: { lockTimeoutMs?: number } 
   const metrics = new ObservabilityMetrics();
   const log = captureLogger();
   const useCase = new ProcessWagerTransaction(
-    new MikroOrmWagerUnitOfWork(orm.em, options.lockTimeoutMs),
+    new MikroOrmWagerUnitOfWork(orm.em, options.lockTimeoutMs ?? WAGER_LOCK_TIMEOUT_MS),
     fixedClock,
     randomIdGenerator,
     new LoggingLockConflictTelemetry(metrics, log.logger),

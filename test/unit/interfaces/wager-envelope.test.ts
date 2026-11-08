@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { canonicalJson, wagerPayloadHashOfRaw } from '../../../src/application/wagering/payload-hash';
 import { parseEnvelope, type WagerEnvelope } from '../../../src/interfaces/sqs/wager-envelope';
 import { errorPauseMs } from '../../../src/interfaces/error-pause';
-import { retryDelaySeconds } from '../../../src/interfaces/sqs/wager-consumer';
+import { databaseProbeDelayMs, retryDelaySeconds } from '../../../src/interfaces/sqs/wager-consumer';
 
 const data = {
   providerId: 'provider-a',
@@ -108,5 +108,9 @@ describe('backoff do consumidor', () => {
 
   it('pausa do polling: 1s·2^(n−1) até 30s', () => {
     expect([1, 2, 3, 4, 5, 6, 7].map(errorPauseMs)).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  });
+
+  it('sonda do modo "banco fora": 1s·2^(n−1) até 5s', () => {
+    expect([1, 2, 3, 4, 5, 10].map(databaseProbeDelayMs)).toEqual([1000, 2000, 4000, 5000, 5000, 5000]);
   });
 });

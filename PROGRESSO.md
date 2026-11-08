@@ -120,6 +120,10 @@ Concorrência (paralelismo real):
 - [x] Lote 2: reconciliação como use case (`ReconcileWallet`), cruzando ledger × transações (7 tipos de divergência, um teste de integração por tipo); consumidor com modo "banco fora" (só erro de conexão; para de receber e sonda o Postgres; mensagem fora do limite de tentativas; gauge `wagering_consumer_db_unavailable`); pool esgotado separado (`pool_exhausted`); `test:chaos` com o Postgres parado 40s
 - [x] Lote 3: 80+80 com sobreposição provada e reenvio; BET sem referência e "não referencia a si mesma" em `WagerTransaction.create`; leitura de idempotência sem lock antes do caminho com lock; hash da inbox normalizado; 1 tentativa extra interna em `lock_timeout`
 - [x] Evidência do `test:chaos` em `docs/carga/chaos.txt`
+- [x] Ajustes finais: orçamento de espera pelo lock mantido em ~2s (2 tentativas de 1s); sonda do modo "banco fora" com teto de 5s
+
+## Fechamento
+- [ ] Mutex local por wallet (otimização de desempenho sobre o FOR UPDATE): reduz conexões presas esperando o lock numa wallet disputada (no máximo 1 por instância). Medir antes e depois com test:load (wallet-disputada); só entra se houver ganho medido. A correção continua garantida pelo FOR UPDATE.
 
 ## Opcionais (só depois de tudo acima)
 - [ ] Autenticação com Keycloak ou Zitadel
@@ -199,7 +203,7 @@ Concorrência (paralelismo real):
 ## Pendências e bloqueios
 - Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor e direção do lançamento = os da transação, nem o encadeamento `balance_before` (ARCHITECTURE.md → "Limitações"). O use case garante, e `expectLedgerConsistent` verifica nos testes. Em produção, a reconciliação (refeita na banca) detecta tudo isso, menos o encadeamento lançamento a lançamento (ARCHITECTURE.md → "Reconciliação").
 - Limitação: `inbox_messages` não tem retenção (ARCHITECTURE.md → "Idempotência").
-- Limitação: o modo "banco fora" volta a receber até ~30s depois de o banco voltar (teto da sonda); com várias quedas seguidas, a mensagem pode chegar ao `maxReceiveCount` 10 da fila e ir para a DLQ pelo redrive nativo, sem motivo (ARCHITECTURE.md → "Modo \"banco fora\"").
+- Limitação: o modo "banco fora" volta a receber até ~5s depois de o banco voltar (teto da sonda); com várias quedas seguidas, a mensagem pode chegar ao `maxReceiveCount` 10 da fila e ir para a DLQ pelo redrive nativo, sem motivo (ARCHITECTURE.md → "Modo \"banco fora\"").
 - Decisão pendente: amarrar `payload.providerId` ao provider autenticado e escopar as consultas por provider (desenho em ARCHITECTURE.md → "Autenticação"). Sem isso, qualquer cliente submete em nome de qualquer provider e lê transações e saldos alheios.
 - Limitação: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. O vínculo (`wallet_providers`) está no desenho de ARCHITECTURE.md → "Autenticação", não implementado.
 - Lock da wallet antes da checagem de dono: resolvido na Fase 3 (`FOR UPDATE ... AND player_id`); rate limit por provider/wallet na borda continua recomendado.

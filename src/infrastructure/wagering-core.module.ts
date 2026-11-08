@@ -7,7 +7,7 @@ import { APP_CONFIG, type AppConfig } from './config/app-config';
 import { InstrumentedProcessWagerTransaction } from './observability/instrumented-process-wager-transaction';
 import { LoggingLockConflictTelemetry } from './observability/lock-conflict-telemetry';
 import { ObservabilityMetrics } from './observability/metrics';
-import { MikroOrmWagerUnitOfWork } from './persistence/mikro-orm-wager-unit-of-work';
+import { MikroOrmWagerUnitOfWork, WAGER_LOCK_TIMEOUT_MS } from './persistence/mikro-orm-wager-unit-of-work';
 import { randomIdGenerator, systemClock } from './system-adapters';
 
 /** Monta o use case instrumentado. Exportada para testes que embrulham o processamento. */
@@ -19,7 +19,7 @@ export function buildInstrumentedProcess(
   const telemetry = new LoggingLockConflictTelemetry(metrics);
   const settlement = new WagerSettlement(randomIdGenerator, referenceTtlMs);
   return new InstrumentedProcessWagerTransaction(
-    new ProcessWagerTransaction(new MikroOrmWagerUnitOfWork(em), systemClock, randomIdGenerator, telemetry, settlement),
+    new ProcessWagerTransaction(new MikroOrmWagerUnitOfWork(em, WAGER_LOCK_TIMEOUT_MS), systemClock, randomIdGenerator, telemetry, settlement),
     metrics,
   );
 }

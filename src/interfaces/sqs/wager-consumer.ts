@@ -40,6 +40,17 @@ type BatchOutcome = 'ok' | 'db_unavailable' | 'poll_failed';
 
 type LogContext = Record<string, unknown>;
 
+const DATABASE_PROBE_BASE_MS = 1_000;
+const DATABASE_PROBE_MAX_MS = 5_000;
+
+/**
+ * Espera antes de cada sonda no modo "banco fora": 1s·2^(n−1), teto de 5s (1, 2, 4, 5, 5…).
+ * O teto curto faz o consumidor voltar até ~5s depois de o banco voltar; a sonda é só um `select 1`.
+ */
+export function databaseProbeDelayMs(probes: number): number {
+  return exponentialBackoffMs(Math.max(probes, 1), DATABASE_PROBE_BASE_MS, DATABASE_PROBE_MAX_MS);
+}
+
 /** Atraso da nova tentativa: base·2^(receiveCount−1), com teto. */
 export function retryDelaySeconds(receiveCount: number, baseSeconds: number, maxSeconds: number): number {
   return exponentialBackoffMs(Math.max(receiveCount, 1), baseSeconds, maxSeconds);
@@ -159,7 +170,7 @@ export class WagerConsumer {
   /**
    * Modo "banco fora" (ARCHITECTURE.md → "Consumidor SQS"): sem conexão com o Postgres, não
    * adianta receber (cada recebimento soma no `ApproximateReceiveCount` da mensagem). O loop
-   * para de receber, sonda o banco com backoff (1s→30s) e só volta a receber quando a sonda
+   * para de receber, sonda o banco com backoff (1s→5s) e só volta a receber quando a sonda
    * passa. O `stop()` interrompe a espera e a sonda.
    */
   private async waitForDatabase(): Promise<void> {
@@ -170,7 +181,7 @@ export class WagerConsumer {
     try {
       while (this.running) {
         probes++;
-        await this.pause(errorPauseMs(probes));
+        await this.pause(databaseProbeDelayMs(probes));
         if (!this.running) break;
         if (await this.databaseReachable()) {
           this.logger.info(

@@ -20,7 +20,13 @@ import { WagerTransactionRecord, toWagerTransaction, toWagerTransactionRecord } 
 import { LedgerEntryRecord, toLedgerEntryRecord } from './wallet-ledger-entry.persistence';
 import { WalletRecord, toWallet, toWalletRecord } from './wallet.persistence';
 
+/** Worker de pendentes e abertura de wallet: uma tentativa, até 2s. */
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
+/**
+ * `ProcessWagerTransaction`: 1s por tentativa, com 1 tentativa extra no use case. O orçamento total
+ * de espera pelo lock continua ~2s antes do 503 (ARCHITECTURE.md → "Concorrência").
+ */
+export const WAGER_LOCK_TIMEOUT_MS = 1_000;
 
 /** SQLSTATEs que significam "tente de novo": lock_not_available, deadlock, serialization_failure. */
 const TRANSIENT_SQLSTATES = {

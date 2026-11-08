@@ -11,7 +11,7 @@ import { eventually } from '../integration/workers/outbox-harness';
  * Paralelismo real: cada "instância" é um MikroORM próprio (pool e conexões separados),
  * e cada execução abre seu EntityManager (fork) e sua transação. Nada é sequencial.
  */
-/** Folga para máquinas lentas: lock_timeout (2s) + espera de pool podem somar mais que os 5s padrão. */
+/** Folga para máquinas lentas: lock_timeout (2 × 1s) + espera de pool podem somar mais que os 5s padrão. */
 const TIMEOUT_MS = 30_000;
 
 describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
@@ -60,7 +60,7 @@ describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
       await eventually(async () => {
         const { rows } = await orm.em.getKnex().raw(`select 1 from pg_stat_activity where wait_event_type = 'Lock' and query ilike '%wallets%'`);
         expect(rows.length, 'as duas BETs em andamento, esperando o lock da wallet').toBe(2);
-      }, 1_500); // abaixo do lock_timeout (2s)
+      }, 800); // abaixo do lock_timeout da 1ª tentativa (1s)
       release.resolve();
       await holder;
       results = await Promise.all(running);
