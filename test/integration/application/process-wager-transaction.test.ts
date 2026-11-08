@@ -396,6 +396,32 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       expect(await countRows(orm, 'outbox_messages', { aggregate_id: original.transactionId })).toBe(1);
     });
 
+    it('replay e conflito respondem sem esperar o lock da wallet (leitura antes do lock)', async () => {
+      const first = command(wallet, { money: { amount: '25.00', currency: 'BRL' } });
+      const original = await expectType(first, 'Processed');
+      const different = { ...first, payload: { ...first.payload, money: { amount: '26.00', currency: 'BRL' } } };
+      // Outra transação segura o lock da wallet bem além do lock_timeout (2s).
+      const release = Promise.withResolvers<void>();
+      const locked = Promise.withResolvers<void>();
+      const holder = orm.em.getKnex().transaction(async (trx) => {
+        await trx.raw('select id from wallets where id = ? for update', [wallet.walletId]);
+        locked.resolve();
+        await release.promise;
+      });
+      await locked.promise;
+      try {
+        const startedAt = Date.now();
+        expect(await run(first)).toEqual({ ...original, idempotentReplay: true });
+        expect(await run(different)).toEqual({ type: 'IdempotencyConflict', existingTransactionId: original.transactionId });
+        expect(Date.now() - startedAt, 'sem esperar o lock').toBeLessThan(1_500);
+        // Uma transação nova ainda passa pelo lock: com ele segurado, volta transitória.
+        expect(await run(command(wallet, {}))).toEqual({ type: 'TransientFailure', reason: 'lock_timeout' });
+      } finally {
+        release.resolve();
+        await holder;
+      }
+    }, 15_000);
+
     it('"25" e "25.00" são o mesmo payload (replay)', async () => {
       const first = command(wallet, { money: { amount: '25.00', currency: 'BRL' } });
       await expectType(first, 'Processed');
@@ -513,8 +539,10 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       } finally {
         await trx.rollback();
       }
-      expect(await counterTotal(metrics.lockConflicts)).toBe(1);
-      expect(await counterTotal(metrics.lockConflicts, { reason: 'lock_timeout' })).toBe(1);
+      // Uma tentativa extra interna: os dois estouros do lock são contados e logados.
+      expect(await counterTotal(metrics.lockConflicts)).toBe(2);
+      expect(await counterTotal(metrics.lockConflicts, { reason: 'lock_timeout' })).toBe(2);
+      expect(logs.filter((log) => log.event === 'wallet_lock_conflict')).toHaveLength(2);
       expect(logs[0]).toMatchObject({ event: 'wallet_lock_conflict', reason: 'lock_timeout', walletId: wallet.walletId });
       expect(await countRows(orm, 'wager_transactions')).toBe(1);
     });

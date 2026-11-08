@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalJson } from '../../application/wagering/payload-hash';
+import { canonicalJson, wagerPayloadHashOfRaw } from '../../application/wagering/payload-hash';
 import { textProblem } from '../../application/validation';
 import type { WagerTransactionPayload } from '../../application/wagering/process-wager-transaction';
 import { CORRELATION_ID_PATTERN } from '../../infrastructure/observability/correlation';
@@ -14,7 +14,7 @@ export interface WagerEnvelope {
   idempotencyKey: string;
   /** Validado pelo use case (o mesmo validador da entrada HTTP). */
   data: WagerTransactionPayload;
-  /** SHA-256 hex do JSON canônico de `{ type, data }`: sem messageId, occurredAt nem metadados. */
+  /** Hash da inbox (ver `inboxPayloadHash`): sem messageId, occurredAt nem metadados. */
   payloadHash: string;
   /** `correlationId` do envelope, se válido; senão o messageId. */
   correlationId: string;
@@ -52,11 +52,23 @@ export function parseEnvelope(body: string): WagerEnvelope | string {
     messageId,
     idempotencyKey: data.idempotencyKey as string,
     data: data as unknown as WagerTransactionPayload,
-    payloadHash: createHash('sha256')
-      .update(canonicalJson({ type: WAGER_MESSAGE_TYPE, data: data as Json }), 'utf8')
-      .digest('hex'),
+    payloadHash: inboxPayloadHash(data, data.idempotencyKey as string),
     correlationId,
   };
+}
+
+/**
+ * Hash da inbox = SHA-256 do JSON canônico de `{ idempotencyKey, payloadHash }`, onde
+ * `payloadHash` é o mesmo hash normalizado da transação ("25" e "25.00" são a mesma mensagem).
+ * A key entra porque identifica a mensagem: o mesmo messageId com outra key é outra mensagem.
+ * Payload não normalizável (o use case o mandaria para a DLQ como INVALID_PAYLOAD, sem gravar
+ * inbox): cai no JSON canônico cru de `{ type, data }`, que nunca coincide com uma linha gravada.
+ */
+function inboxPayloadHash(data: Record<string, unknown>, idempotencyKey: string): string {
+  const normalized = wagerPayloadHashOfRaw(data);
+  const subject: Json =
+    normalized === undefined ? { type: WAGER_MESSAGE_TYPE, data: data as Json } : { idempotencyKey, payloadHash: normalized };
+  return createHash('sha256').update(canonicalJson(subject), 'utf8').digest('hex');
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

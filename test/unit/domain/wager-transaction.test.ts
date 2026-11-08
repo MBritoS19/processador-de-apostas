@@ -41,6 +41,18 @@ describe('WagerTransaction.create', () => {
     expect(newTransaction({ kind }).requiresReference()).toBe(false);
   });
 
+  test('BET com referência é inválida (BET não referencia nada)', () => {
+    expect(() => newTransaction({ kind: Kind.Bet, referenceExternalTransactionId: 'ext-ref' })).toThrow(
+      new InvalidWagerTransactionError('BET não referencia outra transação'),
+    );
+  });
+
+  test.each([Kind.Win, Kind.Loss, Kind.Refund, Kind.Rollback])('%s não pode referenciar a si mesma', (kind) => {
+    expect(() => newTransaction({ kind, externalTransactionId: 'same', referenceExternalTransactionId: 'same' })).toThrow(
+      new InvalidWagerTransactionError('uma transação não pode referenciar a si mesma'),
+    );
+  });
+
   test.each([Kind.Bet, Kind.Win])('%s com valor zero é inválida', (kind) => {
     expect(() => newTransaction({ kind, money: brl('0') })).toThrow(InvalidWagerTransactionError);
   });

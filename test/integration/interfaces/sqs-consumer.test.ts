@@ -313,6 +313,25 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
+  it('mesmo messageId com "25" e depois "25.00": mesma mensagem (hash normalizado), ack como duplicata, sem DLQ', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    const original = envelope(wallet, { data: { money: { amount: '25', currency: 'BRL' } } });
+    const reformatted = envelope(wallet, {
+      messageId: original.messageId as string,
+      data: { ...(original.data as Record<string, unknown>), money: { amount: '25.00', currency: 'BRL' } },
+    });
+    await send(sqs, queues.queueUrl, original);
+    await send(sqs, queues.queueUrl, reformatted, { dedupId: 'reformatted' });
+    const app = await start();
+
+    await expectDrained();
+    await eventually(async () => expect(await counter([app], 'replays')).toBe(1));
+    expect(await readDlq(sqs, queues.dlqUrl)).toEqual([]);
+    expect(await debits(wallet.walletId)).toBe(1);
+    expect(await balance(wallet.walletId)).toBe('75.00');
+    await expectLedgerConsistent(orm, wallet.walletId);
+  });
+
   it('falha transitória: visibilidade 30/60/120/240 por ApproximateReceiveCount e sucesso na 5ª, um único efeito', async () => {
     const wallet = await seedWallet(orm, '100.00');
     const flaky = failing(4);

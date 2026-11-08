@@ -103,6 +103,9 @@ const SUBMITTABLE_KINDS = new Set<string>([
 ]);
 const TEXT_FIELDS = ['providerId', 'externalTransactionId', 'playerId', 'walletId', 'roundId', 'gameId'] as const;
 
+/** Tentativas do caminho com lock quando o lock da wallet estoura o `lock_timeout` (1 + 1 extra). */
+const LOCK_TIMEOUT_ATTEMPTS = 2;
+
 /**
  * Processa uma transação de aposta (BET, WIN, LOSS, REFUND, ROLLBACK) com idempotência
  * persistida e lock pessimista por wallet. Usado pela entrada HTTP (Fase 4) e SQS (Fase 5).
@@ -122,9 +125,41 @@ export class ProcessWagerTransaction {
     if (typeof parsed === 'string') return { type: 'InvalidInput', reason: parsed };
 
     try {
-      return await this.unitOfWork.run((repository) => this.process(repository, parsed, command));
+      // Caminho rápido, sem lock: key e hash de uma transação gravada nunca mudam, então um
+      // conflito visto aqui é definitivo, e um replay não precisa esperar o lock da wallet (numa
+      // wallet disputada, ele viraria 503). Pela fila, o replay segue para o caminho com lock,
+      // que grava a inbox. Não achou nada → caminho com lock, onde a checagem é a garantia.
+      const known = decideIdempotency(
+        await this.unitOfWork.run((repository) =>
+          repository.findByIdempotency(parsed.providerId, parsed.idempotencyKey, parsed.externalTransactionId),
+        ),
+        parsed,
+      );
+      if (known !== undefined && (known.type === 'IdempotencyConflict' || command.inbox === undefined)) return known;
+      return await this.processWithLockRetry(parsed, command);
     } catch (error) {
       return this.handleFailure(error, parsed, command);
+    }
+  }
+
+  /**
+   * Caminho com lock, com UMA tentativa extra se o lock da wallet não sair no `lock_timeout`
+   * (a fila de espera numa wallet disputada costuma andar em menos de 2s). Cada tentativa é uma
+   * transação nova, e a idempotência é checada de novo sob o lock: repetir nunca duplica efeito.
+   * A segunda falha sai como `TransientFailure` (503 / retry do SQS), como antes.
+   */
+  private async processWithLockRetry(
+    tx: WagerTransaction,
+    command: ProcessWagerTransactionCommand,
+  ): Promise<ProcessWagerTransactionResult> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.unitOfWork.run((repository) => this.process(repository, tx, command));
+      } catch (error) {
+        const lockTimeout = error instanceof TransientPersistenceError && error.reason === 'lock_timeout';
+        if (!lockTimeout || attempt >= LOCK_TIMEOUT_ATTEMPTS) throw error;
+        this.telemetry.lockConflict({ reason: 'lock_timeout', walletId: tx.walletId, correlationId: command.correlationId });
+      }
     }
   }
 
@@ -145,7 +180,6 @@ export class ProcessWagerTransaction {
     if (hasReference) {
       const problem = textProblem('referenceExternalTransactionId', reference);
       if (problem) return problem;
-      if (reference === payload.externalTransactionId) return 'uma transação não pode referenciar a si mesma';
     }
     const walletId = payload.walletId as string;
     if (!UUID_PATTERN.test(walletId)) return 'walletId deve ser um UUID';
@@ -153,7 +187,6 @@ export class ProcessWagerTransaction {
       return 'kind deve ser BET, WIN, LOSS, REFUND ou ROLLBACK';
     }
     const kind = payload.kind as WagerTransactionKind;
-    if (kind === WagerTransactionKind.Bet && hasReference) return 'BET não referencia outra transação';
     if (payload.money === null || typeof payload.money !== 'object') return 'money é obrigatório';
 
     try {
@@ -169,7 +202,7 @@ export class ProcessWagerTransaction {
         money,
         referenceExternalTransactionId: hasReference ? (reference as string) : undefined,
       };
-      // valor > 0 em BET/WIN/REFUND/ROLLBACK, ≥ 0 em LOSS, e referência obrigatória: validados pelo create.
+      // Valor por kind e referência (obrigatória, proibida na BET, nunca a si mesma): validados pelo create.
       return WagerTransaction.create({
         ...fields,
         id: this.ids.uuid(),

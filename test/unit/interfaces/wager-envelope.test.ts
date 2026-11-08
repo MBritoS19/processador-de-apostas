@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test';
+import { createHash } from 'node:crypto';
+import { canonicalJson, wagerPayloadHashOfRaw } from '../../../src/application/wagering/payload-hash';
 import { parseEnvelope, type WagerEnvelope } from '../../../src/interfaces/sqs/wager-envelope';
 import { errorPauseMs } from '../../../src/interfaces/error-pause';
 import { retryDelaySeconds } from '../../../src/interfaces/sqs/wager-consumer';
@@ -53,6 +55,30 @@ describe('parseEnvelope', () => {
     const reordered = JSON.stringify({ data: Object.fromEntries(Object.entries(data).reverse()), type: 'WagerTransactionRequested', occurredAt: '2026-07-29T15:00:00.000Z', messageId: 'm' });
     expect(parsed(reordered).payloadHash).toBe(base);
     expect(parsed(envelope({ data: { ...data, money: { amount: '26.00', currency: 'BRL' } } })).payloadHash).not.toBe(base);
+  });
+
+  it('hash da inbox usa a normalização da transação: "25" × "25.00", walletId em maiúsculas e referência null', () => {
+    const base = parsed(envelope()).payloadHash;
+    expect(parsed(envelope({ data: { ...data, money: { amount: '25', currency: 'BRL' } } })).payloadHash).toBe(base);
+    expect(parsed(envelope({ data: { ...data, walletId: data.walletId.toUpperCase() } })).payloadHash).toBe(base);
+    expect(parsed(envelope({ data: { ...data, referenceExternalTransactionId: null } })).payloadHash).toBe(base);
+    // Campos fora do payload de negócio não entram (como no hash da transação).
+    expect(parsed(envelope({ data: { ...data, extra: 'x' } })).payloadHash).toBe(base);
+  });
+
+  it('hash da inbox: o normalizado da transação + a idempotency key', () => {
+    const { idempotencyKey: _key, ...business } = data;
+    expect(parsed(envelope()).payloadHash).toBe(
+      createHash('sha256').update(canonicalJson({ idempotencyKey: data.idempotencyKey, payloadHash: wagerPayloadHashOfRaw(business)! }), 'utf8').digest('hex'),
+    );
+    // A mesma mensagem com outra key é outra mensagem.
+    expect(parsed(envelope({ data: { ...data, idempotencyKey: 'provider-a:outra' } })).payloadHash).not.toBe(parsed(envelope()).payloadHash);
+  });
+
+  it('payload não normalizável (o use case rejeitaria): hash do JSON cru, diferente do de qualquer payload válido', () => {
+    const invalid = parsed(envelope({ data: { ...data, money: { amount: '25,00', currency: 'BRL' } } })).payloadHash;
+    expect(invalid).toMatch(/^[0-9a-f]{64}$/);
+    expect(invalid).not.toBe(parsed(envelope()).payloadHash);
   });
 
   it.each([

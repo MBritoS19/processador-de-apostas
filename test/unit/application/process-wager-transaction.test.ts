@@ -26,8 +26,22 @@ function fakeUnitOfWork(error: Error = new Error('não deveria abrir transação
   };
 }
 
-function setup(error?: Error) {
-  const unitOfWork = fakeUnitOfWork(error);
+/**
+ * UoW falso em que a leitura de idempotência antes do lock (1ª chamada) não acha nada, e o
+ * caminho com lock (chamadas seguintes) lança `error`.
+ */
+function lockPathFailing(error: Error): WagerUnitOfWork & { calls: number } {
+  return {
+    calls: 0,
+    async run<T>(work: (repository: WagerProcessingRepository) => Promise<T>): Promise<T> {
+      this.calls++;
+      if (this.calls === 1) return work({ findByIdempotency: async () => [] } as unknown as WagerProcessingRepository);
+      throw error;
+    },
+  };
+}
+
+function setup(error?: Error, unitOfWork: WagerUnitOfWork & { calls: number } = fakeUnitOfWork(error)) {
   const logs: Array<Record<string, unknown>> = [];
   const logger = pino({ level: 'info' }, { write: (line: string) => logs.push(JSON.parse(line) as Record<string, unknown>) });
   const metrics = new ObservabilityMetrics();
@@ -111,6 +125,20 @@ describe('ProcessWagerTransaction — falhas de concorrência', () => {
     const { useCase, metrics } = setup(new TransientPersistenceError(reason));
     expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason });
     expect(await lockConflicts(metrics, reason)).toBe(1);
+  });
+
+  it('lock_timeout no caminho com lock: 1 tentativa extra, depois TransientFailure', async () => {
+    const { useCase, unitOfWork, metrics } = setup(undefined, lockPathFailing(new TransientPersistenceError('lock_timeout')));
+    expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason: 'lock_timeout' });
+    // 1 leitura sem lock + 2 tentativas com lock; cada estouro do lock é contado.
+    expect(unitOfWork.calls).toBe(3);
+    expect(await lockConflicts(metrics, 'lock_timeout')).toBe(2);
+  });
+
+  it.each(['deadlock', 'serialization', 'pool_exhausted', 'unavailable'] as const)('%s no caminho com lock: sem tentativa extra', async (reason) => {
+    const { useCase, unitOfWork } = setup(undefined, lockPathFailing(new TransientPersistenceError(reason)));
+    expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason });
+    expect(unitOfWork.calls).toBe(2);
   });
 
   it('banco indisponível → TransientFailure sem contar conflito de lock', async () => {

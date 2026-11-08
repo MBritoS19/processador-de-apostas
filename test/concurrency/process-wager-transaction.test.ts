@@ -41,10 +41,33 @@ describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
 
   it('cenário obrigatório: saldo 100.00, duas BETs de 80.00 em paralelo → uma PROCESSED, uma REJECTED, saldo 20.00, um débito', async () => {
     const wallet = await seedWallet(orm, '100.00');
-    // Duas apostas distintas; cada uma, se falhar transitoriamente, é reenviada idêntica.
     const bets = [0, 1].map(() => command(wallet, { money: { amount: '80.00', currency: 'BRL' } }));
 
-    const results = await Promise.all(bets.map((bet, i) => untilSettled(() => useCaseFor(i).execute(bet))));
+    // Prova de sobreposição: uma transação externa segura o lock da wallet, as duas BETs são
+    // disparadas por instâncias diferentes e o teste só libera quando o Postgres mostra AS DUAS
+    // paradas no lock ao mesmo tempo. Sem isso, elas poderiam ter rodado uma depois da outra.
+    const release = Promise.withResolvers<void>();
+    const locked = Promise.withResolvers<void>();
+    const holder = orm.em.getKnex().transaction(async (trx) => {
+      await trx.raw('select id from wallets where id = ? for update', [wallet.walletId]);
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+    let results: ProcessWagerTransactionResult[];
+    try {
+      const running = bets.map((bet, i) => useCaseFor(i).execute(bet));
+      await eventually(async () => {
+        const { rows } = await orm.em.getKnex().raw(`select 1 from pg_stat_activity where wait_event_type = 'Lock' and query ilike '%wallets%'`);
+        expect(rows.length, 'as duas BETs em andamento, esperando o lock da wallet').toBe(2);
+      }, 1_500); // abaixo do lock_timeout (2s)
+      release.resolve();
+      await holder;
+      results = await Promise.all(running);
+    } finally {
+      release.resolve();
+      await holder.catch(() => undefined);
+    }
 
     const processed = results.filter((r) => r.type === 'Processed');
     const rejected = results.filter((r): r is Extract<ProcessWagerTransactionResult, { type: 'Rejected' }> => r.type === 'Rejected');
@@ -53,8 +76,16 @@ describe('ProcessWagerTransaction — concorrência na mesma wallet', () => {
     expect(rejected[0]?.failureCode).toBe(FailureCode.InsufficientBalance);
     expect(await walletBalance(orm, wallet.walletId)).toBe('20.00');
     expect(await debits(wallet.walletId)).toBe(1);
+
+    // O provedor reenvia as duas (mesma key, mesmo payload), de novo em paralelo: cada uma devolve
+    // exatamente o resultado original como replay, e nenhum retry debita de novo.
+    const replays = await Promise.all(bets.map((bet, i) => untilSettled(() => useCaseFor(i + 1).execute(bet))));
+    expect(replays).toEqual(results.map((r) => ({ ...r, idempotentReplay: true }) as ProcessWagerTransactionResult));
+    expect(await walletBalance(orm, wallet.walletId)).toBe('20.00');
+    expect(await debits(wallet.walletId)).toBe(1);
+    expect(await countRows(orm, 'wager_transactions', { wallet_id: wallet.walletId, kind: 'BET' })).toBe(2);
     await expectLedgerConsistent(orm, wallet.walletId);
-  });
+  }, TIMEOUT_MS);
 
   it('a mesma BET 50x em paralelo → 1 débito, 1 linha de transação e 49 replays', async () => {
     const wallet = await seedWallet(orm, '100.00');

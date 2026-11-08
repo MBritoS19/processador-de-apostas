@@ -163,7 +163,10 @@ export class WagerTransaction {
     this._observedBalance = state.observedBalance;
   }
 
-  /** Nasce em PENDING. Rejeita OPENING e valida a exigência de referência e de valor por kind. */
+  /**
+   * Nasce em PENDING. Rejeita OPENING e valida, por kind: referência obrigatória (REFUND/ROLLBACK),
+   * proibida (BET), nunca a si mesma, e valor (> 0; LOSS aceita 0).
+   */
   static create(props: CreateWagerTransactionProps): WagerTransaction {
     const { kind, money, referenceExternalTransactionId: reference } = props;
     if (kind === WagerTransactionKind.Opening) {
@@ -171,6 +174,12 @@ export class WagerTransaction {
     }
     if (REVERSALS.has(kind) && (reference === undefined || reference.trim() === '')) {
       throw new InvalidWagerTransactionError(`${kind} exige referenceExternalTransactionId`);
+    }
+    if (kind === WagerTransactionKind.Bet && reference !== undefined) {
+      throw new InvalidWagerTransactionError('BET não referencia outra transação');
+    }
+    if (reference !== undefined && reference === props.externalTransactionId) {
+      throw new InvalidWagerTransactionError('uma transação não pode referenciar a si mesma');
     }
     if (kind === WagerTransactionKind.Loss ? money.isNegative() : !money.isPositive()) {
       throw new InvalidWagerTransactionError(`valor inválido para ${kind}`);

@@ -235,7 +235,8 @@ describe('API HTTP de wagering (Postgres real)', () => {
       } finally {
         await trx.rollback();
       }
-      expect(counter(await metricsText(), 'wagering_lock_conflicts_total')).toBe(counter(before, 'wagering_lock_conflicts_total') + 1);
+      // 503 só depois da tentativa extra interna: dois estouros do lock_timeout, os dois contados.
+      expect(counter(await metricsText(), 'wagering_lock_conflicts_total')).toBe(counter(before, 'wagering_lock_conflicts_total') + 2);
     }, 15_000);
 
     it('correlationId do header chega ao evento da outbox', async () => {

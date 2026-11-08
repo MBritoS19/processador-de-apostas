@@ -256,7 +256,7 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 **Por que pessimista, e não otimista com retry:**
 - O caso dominante é contenção na **mesma** wallet: rodadas rápidas, reentregas at-least-once, várias instâncias. Com lock otimista, cada conflito vira rollback e reexecução inteira. Com pessimista, a segunda transação espera alguns milissegundos e roda sobre o estado já commitado.
 - A checagem de idempotência fica **sob o lock**. A transação original, se existir, foi gravada por quem segurava o mesmo lock e já está visível (READ COMMITTED lê a cada statement). Assim, "a mesma BET 50x em paralelo" vira 1 processamento e 49 replays, sem depender de violação de unicidade.
-- Uma conexão fica ocupada esperando o lock; por isso o `lock_timeout` é curto. Esgotado, a transação aborta (`55P03`) e o resultado é `TransientFailure('lock_timeout')`: o provedor reenvia a mesma requisição, que é idempotente.
+- Uma conexão fica ocupada esperando o lock; por isso o `lock_timeout` é curto. Esgotado, a transação aborta (`55P03`), e o use case tenta **uma vez mais**, numa transação nova (`processWithLockRetry`). A fila de espera de uma wallet disputada costuma andar em menos de 2s, e a idempotência é rechecada sob o lock, então repetir nunca duplica efeito. Só o segundo estouro vira `TransientFailure('lock_timeout')`: o provedor reenvia a mesma requisição, que é idempotente. O custo é que o pior caso de latência antes do 503 sobe de ~2s para ~4s, com a conexão ocupada esse tempo todo. Deadlock, serialização e pool esgotado não ganham tentativa extra.
 
 **Granularidade:** só a linha da wallet é travada; wallets diferentes não se bloqueiam. Não há lock global, advisory lock nem tabela de controle. O lock usa `WHERE id = $wallet AND player_id = $player`, então quem não é dono da wallet não segura nem espera o lock dela. Uma leitura sem lock distingue `WALLET_NOT_FOUND` de `WALLET_PLAYER_MISMATCH`.
 
@@ -275,7 +275,9 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 8. `INSERT outbox_messages` (1 ou 2 eventos) e, com contexto de inbox, `INSERT inbox_messages`.
 9. `COMMIT`. As FKs deferidas e o trigger saldo × ledger são checados aqui.
 
-**Comprovação:** `test/concurrency/process-wager-transaction.test.ts` usa 3 instâncias de MikroORM (pools separados) com `Promise.all`: 80+80 sobre saldo 100 (uma PROCESSED, uma `INSUFFICIENT_BALANCE`, saldo 20, um débito); a mesma BET 50x (1 débito, 1 linha, 49 replays); 30 BETs disputando o saldo; a mesma key em wallets diferentes; e, com uma transação do use case parada no lock da wallet A, 12 outras wallets processadas em paralelo (sem lock global). Falhas transitórias são reenviadas idênticas, com backoff curto, como faria um provedor. O caminho `23505 → conflito` tem um teste determinístico, em que uma transação externa segura o INSERT. Entre processos reais, ver [Estratégia de testes](#estratégia-de-testes).
+**Comprovação:** `test/concurrency/process-wager-transaction.test.ts` usa 3 instâncias de MikroORM (pools separados) com `Promise.all`. Os casos:
+- **80+80 sobre saldo 100:** uma PROCESSED, uma `INSUFFICIENT_BALANCE`, saldo 20 e um débito. A **sobreposição é provada**: uma transação externa segura o lock, e o teste só a libera quando o `pg_stat_activity` mostra as duas BETs esperando ao mesmo tempo. Depois, as duas são reenviadas e devolvem o resultado original como replay, sem novo débito.
+- O restante, abaixo: a mesma BET 50x (1 débito, 1 linha, 49 replays); 30 BETs disputando o saldo; a mesma key em wallets diferentes; e, com uma transação do use case parada no lock da wallet A, 12 outras wallets processadas em paralelo (sem lock global). Falhas transitórias são reenviadas idênticas, com backoff curto, como faria um provedor. O caminho `23505 → conflito` tem um teste determinístico, em que uma transação externa segura o INSERT. Entre processos reais, ver [Estratégia de testes](#estratégia-de-testes).
 
 ## Idempotência
 
@@ -284,10 +286,16 @@ A garantia é o banco, nunca a memória.
 ### Fluxo
 
 1. **Antes da transação:** validação completa (`InvalidInput` não grava nada) e cálculo do `payloadHash`.
-2. **Sob o lock da wallet:** busca por `(provider_id, idempotency_key)` **ou** `(provider_id, external_transaction_id)`.
+2. **Leitura sem lock** (caminho rápido): a mesma busca do passo 3, numa transação curta, sem travar a wallet. Key e hash de uma transação gravada nunca mudam, e transações nunca são apagadas, então:
+   - um **conflito** encontrado aqui é definitivo e é respondido aqui;
+   - um **replay** também, quando não há inbox (HTTP): numa wallet disputada, ele não espera o lock nem vira 503 (testado com o lock segurado além do `lock_timeout`);
+   - pela fila, o replay segue para o passo 3, que grava a linha da inbox na mesma transação;
+   - não achou nada → passo 3. A leitura sem lock é só otimização; a garantia continua sendo a checagem sob o lock e a unicidade no banco.
+   - Custo: uma ida a mais ao banco por transação nova.
+3. **Sob o lock da wallet:** busca por `(provider_id, idempotency_key)` **ou** `(provider_id, external_transaction_id)`.
    - Mesma key **e** mesmo hash → **replay**. O resultado é reconstruído do estado persistido (`status`, `failure_code`, `observed_balance`) e é idêntico ao original, exceto por `idempotentReplay: true`. Vale para PROCESSED, REJECTED, FAILED e PENDING_REFERENCE. FAILED (encerrada pelo worker com `INFRASTRUCTURE_FAILURE`) devolve o mesmo 422 de REJECTED, com `status: "FAILED"`, para sempre: a key está consumida, e reenviar exige uma transação nova. PENDING_REFERENCE devolve o estado atual, que pode já ter sido resolvido pelo worker (com o `observed_balance` da resolução, não o saldo de agora).
    - Hash diferente, ou o mesmo `externalTransactionId` sob outra key → **conflito** (`IdempotencyConflict` com o id existente). Nada é gravado.
-3. **Se o INSERT violar a unicidade mesmo assim** (por exemplo, a mesma key com outra `walletId`, que trava outra linha, ou a mesma mensagem SQS reentregue):
+4. **Se o INSERT violar a unicidade mesmo assim** (por exemplo, a mesma key com outra `walletId`, que trava outra linha, ou a mesma mensagem SQS reentregue):
    - o adaptador só traduz `23505` nas constraints esperadas: `uq_wager_tx_provider_idempotency_key` e `uq_wager_tx_provider_external` viram `idempotency`, e `pk_inbox_messages` vira `inbox`;
    - depois do rollback, o use case relê numa transação nova e devolve replay ou conflito;
    - uma mensagem de inbox já usada por **outra** transação devolve `IdempotencyConflict` sem id, e não deve ser reenviada;
@@ -308,7 +316,7 @@ União tipada; o mapeamento para HTTP está em [API HTTP](#api-http) e para SQS,
 | `Rejected` | `status` REJECTED = regra de negócio; FAILED = falha permanente de infra |
 | `IdempotencyConflict` | mesma key com outro payload, ou mensagem de inbox já usada |
 | `InvalidInput` | código único `INVALID_INPUT`, motivo em texto |
-| `TransientFailure` | `lock_timeout`, `deadlock`, `serialization`, `unavailable` ou `version_conflict`; sempre é seguro reenviar a mesma requisição |
+| `TransientFailure` | `lock_timeout` (depois da tentativa extra), `deadlock`, `serialization`, `pool_exhausted`, `unavailable` ou `version_conflict`; sempre é seguro reenviar a mesma requisição |
 
 Erros lançados fora da união são bugs (500, ou mensagem sem ack). Ids e textos têm limite de 256 caracteres (`InvalidInput`).
 
@@ -326,7 +334,7 @@ Erros lançados fora da união são bugs (500, ou mensagem sem ack). Ids e texto
 {"externalTransactionId":"transaction-123","gameId":"fortune-chimp","kind":"BET","money":{"amount":"25.00","currency":"BRL"},"playerId":"player-1","providerId":"provider-a","referenceExternalTransactionId":null,"roundId":"round-987","walletId":"0192f291-27dd-7d3f-8071-5f8685deef37"}
 ```
 
-Mudar campos, normalização ou ordenação muda os hashes já gravados e transforma replays legítimos em conflitos. É mudança de contrato, e o teste `payload-hash.test.ts` fixa o JSON exato. O hash da **inbox** é outro (ver [Consumidor SQS](#consumidor-sqs)).
+Mudar campos, normalização ou ordenação muda os hashes já gravados e transforma replays legítimos em conflitos. É mudança de contrato, e o teste `payload-hash.test.ts` fixa o JSON exato. O hash da **inbox** parte deste mesmo hash normalizado e acrescenta a `idempotencyKey` (ver [Consumidor SQS](#consumidor-sqs)).
 
 ## Regras de negócio
 
@@ -337,7 +345,7 @@ As regras do CHALLENGE §7 são aplicadas por `WagerSettlement` (`src/applicatio
 - **WIN/LOSS sobre BET já estornada** → `REFERENCE_ALREADY_REVERSED`: liquidar uma aposta cujo valor já voltou ao jogador pagaria prêmio sobre uma aposta que não existe mais.
 - **WIN e LOSS podem referenciar a BET** da rodada (é opcional). Quando referenciam, valem as mesmas validações da reversão, exceto valor igual: kind = BET, mesma wallet, player, rodada e moeda, status PROCESSED. Referência inexistente ou ainda pendente → `PENDING_REFERENCE`.
 - **Valor:** reversões exigem valor igual ao da referência (`AMOUNT_MISMATCH`). Não há reversão parcial.
-- **Auto-referência:** uma transação não referencia a si mesma, e BET não referencia nada (`InvalidInput`).
+- **Auto-referência:** uma transação não referencia a si mesma, e BET não referencia nada (`InvalidInput`). As duas regras ficam no domínio, em `WagerTransaction.create`, junto com a referência obrigatória de REFUND/ROLLBACK.
 - **Saldo insuficiente na reversão** (por exemplo, ROLLBACK de um WIN já gasto) → `REVERSAL_WOULD_OVERDRAW`, distinto do `INSUFFICIENT_BALANCE` da BET e auditável.
 - **Crédito além do limite do `numeric(20,2)`** → `BALANCE_LIMIT_EXCEEDED`, com a wallet intacta.
 - **Referência pendente aguarda:** se a referência está `PENDING`/`PENDING_REFERENCE`, a transação também fica `PENDING_REFERENCE`. Só a referência `REJECTED`/`FAILED` gera `REFERENCE_NOT_PROCESSED`.
@@ -469,7 +477,12 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 
 1. **Receive** com long polling: `WaitTimeSeconds=20`, `MaxNumberOfMessages=10`, `VisibilityTimeout=60`. Pede `ApproximateReceiveCount` e `MessageGroupId`.
 2. **Envelope** (`wager-envelope.ts`): JSON, `messageId` (texto até 256), `type = WagerTransactionRequested`, `occurredAt` ISO 8601 com fuso, `data` objeto, `data.idempotencyKey` obrigatório. Os campos de negócio de `data` são validados pelo próprio use case, o mesmo validador da entrada HTTP; por isso `kind=OPENING` e `providerId=internal` são `InvalidInput`.
-3. **`payloadHash` da inbox:** SHA-256 hex do JSON canônico de `{ type, data }`. Ficam fora `messageId`, `occurredAt`, `correlationId` e outros metadados. É diferente do `payloadHash` da transação: o da inbox identifica a **mensagem** (inclui a `idempotencyKey` e não normaliza `"25"` × `"25.00"`).
+3. **`payloadHash` da inbox:** SHA-256 hex do JSON canônico de `{ idempotencyKey, payloadHash }`, onde `payloadHash` é o **mesmo hash normalizado da transação** (`wagerPayloadHashOfRaw`, com a normalização do `parse`: `Money` com 2 casas, `walletId` em minúsculas, referência ausente = `null`).
+   - `"25"` e `"25.00"` com o mesmo `messageId` são a mesma mensagem (ack como duplicata, testado), e não `INBOX_PAYLOAD_MISMATCH`.
+   - A key entra porque identifica a mensagem: o mesmo `messageId` com outra key é outra mensagem.
+   - Ficam fora `messageId`, `occurredAt`, `correlationId` e outros metadados.
+   - Payload não normalizável (o use case o rejeitaria como `INVALID_PAYLOAD`, sem gravar inbox): usa o JSON canônico cru de `{ type, data }`, que nunca coincide com uma linha gravada.
+   - **Mudança de contrato:** linhas de inbox gravadas com o algoritmo anterior não batem com o novo. Uma reentrega antiga iria para a DLQ como `INBOX_PAYLOAD_MISMATCH`, sem efeito duplicado; não há ambiente em produção, então não há migração de dados.
 4. **Pré-checagem da inbox** `(consumerName, messageId)`, fora da transação. Se já existe: mesmo hash → ack sem chamar o use case (conta como replay); hash diferente → DLQ. É só o caminho rápido; a garantia é a PK da inbox, gravada **na mesma transação** do efeito.
 5. **Use case** via `InstrumentedProcessWagerTransaction` (mesmas métricas do HTTP), com `inbox = { consumerName, messageId, payloadHash }` e `correlationId` = o do envelope, se válido, senão o `messageId`.
 6. **Ação**, conforme a classificação abaixo. O ack (`DeleteMessage`) só acontece depois que o use case retorna, ou seja, depois do commit. Se o `DeleteMessage` falhar, a reentrega cai na pré-checagem da inbox e é confirmada sem efeito novo (testado).
@@ -743,7 +756,7 @@ Abertos, sem autenticação (CHALLENGE §2).
 | `wagering_processing_duration_seconds` | histogram | status, kind, failure_code | latência do use case |
 | `wagering_idempotent_replays_total` | counter | kind | duplicatas detectadas (HTTP e SQS) |
 | `wagering_idempotency_conflicts_total` | counter | kind | mesma key com outro payload |
-| `wagering_lock_conflicts_total` | counter | reason (`lock_timeout`, `deadlock`, `version_conflict`) | conflitos de lock da wallet; o log `wallet_lock_conflict` (pino) traz os mesmos campos |
+| `wagering_lock_conflicts_total` | counter | reason (`lock_timeout`, `deadlock`, `version_conflict`) | conflitos de lock da wallet, cada estouro do `lock_timeout` contado (inclusive o da tentativa extra); o log `wallet_lock_conflict` (pino) traz os mesmos campos |
 | `wagering_reconciliation_divergences_total` | counter | — | reconciliações divergentes |
 | `wagering_retries_total` | counter | — | cada `ChangeMessageVisibility` de retry no consumidor |
 | `wagering_dlq_messages_total` | counter | — | mensagens enviadas à DLQ pelo consumidor (não conta o redrive nativo) |
@@ -950,7 +963,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **Migrations em SQL à mão, com CLI próprio:** mais código para manter, e nada detecta automaticamente divergência entre o `EntitySchema` e o SQL (os testes de integração contra o banco real fazem isso).
 - **FKs deferidas:** a ordem do flush não importa, mas a violação de FK só aparece no commit, não no statement.
 - **`Money` em `bigint` com escala fixa 2:** moedas com outra escala (JPY, BHD) ou operações com divisão exigiriam introduzir escala por moeda e arredondamento.
-- **Lock pessimista por wallet:** uma conexão fica ocupada esperando o lock (limitado pelo `lock_timeout` de 2s, que vira 503 reenviável), em troca de não reexecutar transações inteiras sob contenção.
+- **Lock pessimista por wallet:** uma conexão fica ocupada esperando o lock (limitado pelo `lock_timeout` de 2s, com uma tentativa extra: até ~4s antes do 503 reenviável), em troca de não reexecutar transações inteiras sob contenção.
 - **Porta própria de readiness**, sem `@nestjs/terminus`: ~80 linhas nossas em vez de uma dependência.
 - **Portas em loopback e LocalStack fixado em 4.9.2:** sem correções de versões futuras do LocalStack.
 - **Filas sem dedup por conteúdo:** todo produtor precisa gerar o dedup id; em troca, dois payloads idênticos legítimos não são descartados por coincidência.
