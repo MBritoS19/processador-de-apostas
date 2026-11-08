@@ -82,7 +82,7 @@ Todas as suítes, exceto a de unidade, usam Postgres e LocalStack **reais**: rod
 | `bun run test:multi` | 3 processos reais da aplicação, SIGKILL depois do commit e antes do ack, SIGKILL de todas no meio da carga | ~45s |
 | `bun test` | todas as suítes acima | ~2 min |
 | `bun run test:chaos` | **para o Postgres (~40s) e pausa o LocalStack (~12s)** com 2 processos sob carga; fora do `bun test` (só roda com `CHAOS=1`, que o script define) | ~1,5 min |
-| `bun run test:load` | teste de carga: 3 instâncias, 3 cenários × níveis `10,50` (`LOAD_LEVELS=10,50,100` opcional, ~15 min), consistência ao fim de cada rodada; resumo no terminal e JSON em `test/load/results/`; fora do `bun test` (só com `LOAD=1`) | ~10 min |
+| `bun run test:load` | teste de carga: 3 instâncias, 3 cenários × níveis `10,50` mais o quente-frias (50 clientes numa wallet + 10 em wallets frias) (`LOAD_LEVELS=10,50,100` opcional, ~15 min), consistência ao fim de cada rodada; resumo no terminal e JSON em `test/load/results/`; fora do `bun test` (só com `LOAD=1`) | ~10 min |
 
 O `test:chaos` mexe nos containers compartilhados do `docker compose` (`stop`/`start` do Postgres, `pause`/`unpause` do LocalStack) e os restaura no fim, mesmo se falhar. Não rode outra suíte junto.
 

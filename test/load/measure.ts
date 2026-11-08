@@ -184,5 +184,30 @@ export function printSummary(runs: ReadonlyArray<Record<string, any>>): void {
       ].join(' '),
     );
   }
+  const grouped = runs.filter((r) => r['groups'] !== undefined);
+  if (grouped.length > 0) {
+    lines.push('');
+    lines.push('Por grupo de clientes (quente-frias; latência por tentativa, em ms; proc/s da wallet quente pelo banco)');
+    const h3 = ['cenário', 'grupo', 'ops/s', 'p50', 'p95', 'p99', 'máx', '503', 'proc/s'];
+    const w3 = [16, 7, 8, 7, 7, 7, 8, 6, 8];
+    lines.push(h3.map((h, i) => (i === 0 ? h.padEnd(w3[i]!) : pad(h, w3[i]!))).join(' '));
+    for (const r of grouped) {
+      for (const [name, group] of Object.entries<Record<string, any>>(r['groups'])) {
+        lines.push(
+          [
+            String(r['scenario']).padEnd(w3[0]!),
+            pad(name, w3[1]!),
+            pad(group['logicalOpsPerSecond'].toFixed(1), w3[2]!),
+            pad(ms(group['latencyMs'].p50), w3[3]!),
+            pad(ms(group['latencyMs'].p95), w3[4]!),
+            pad(ms(group['latencyMs'].p99), w3[5]!),
+            pad(ms(group['latencyMs'].max), w3[6]!),
+            pad(group['http503'], w3[7]!),
+            pad(name === 'quente' && r['hotWallet'] ? r['hotWallet'].processedPerSecond.toFixed(1) : '-', w3[8]!),
+          ].join(' '),
+        );
+      }
+    }
+  }
   console.log(lines.join('\n'));
 }

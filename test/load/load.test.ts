@@ -26,7 +26,8 @@ import {
  *
  * 3 processos reais da aplicação (harness do test/multi: API + consumidor + outbox publisher +
  * worker de pendentes) sobre o Postgres e o LocalStack do compose. Três cenários × níveis de
- * concorrência, cada rodada com aquecimento descartado e janela de medição fixa, e ao fim as
+ * concorrência, mais o quente-frias (nível próprio, medido por grupo de clientes),
+ * cada rodada com aquecimento descartado e janela de medição fixa, e ao fim as
  * mesmas verificações de consistência do test:multi. Cada rodada começa com as tabelas vazias
  * (TRUNCATE). Metodologia e limitações: ARCHITECTURE.md → "Estratégia de testes".
  */
@@ -38,13 +39,17 @@ const WARMUP_S = intFromEnv('LOAD_WARMUP_S', 10);
 const DURATION_S = intFromEnv('LOAD_DURATION_S', 45);
 /** Mensagens/s de cada produtor SQS no cenário misto (taxa fixa: chegada aberta). */
 const SQS_RATE = intFromEnv('LOAD_SQS_RATE', 5);
+/** Cenário quente-frias: clientes na wallet disputada e clientes nas wallets frias, ao mesmo tempo. */
+const HOT_CLIENTS = intFromEnv('LOAD_HOT_CLIENTS', 50);
+const COLD_CLIENTS = intFromEnv('LOAD_COLD_CLIENTS', 10);
 const SCENARIO_FILTER = process.env['LOAD_SCENARIOS']?.split(',').map((s) => s.trim()).filter(Boolean);
 const PROVIDER = 'provider-load';
 const RESULTS_DIR = join(import.meta.dir, 'results');
 
 type Payload = Record<string, unknown>;
 type Wallet = { id: string; playerId: string };
-type Client = { id: number; rr: number; rand: () => number };
+/** `group`: subconjunto de clientes medido à parte (cenário quente-frias). */
+type Client = { id: number; rr: number; rand: () => number; group?: string };
 
 /** Tudo o que uma rodada (cenário × nível) mede. Só entra o que COMEÇA dentro da janela. */
 class RunRecorder {
@@ -67,6 +72,13 @@ class RunRecorder {
   }
   bump(map: Map<string, number>, key: string, by = 1): void {
     map.set(key, (map.get(key) ?? 0) + by);
+  }
+  /** Mesmas medidas HTTP, por grupo de clientes (só o cenário quente-frias usa). */
+  readonly groups = new Map<string, { latencies: number[]; statuses: Map<string, number>; logicalOps: number }>();
+  group(name: string) {
+    let group = this.groups.get(name);
+    if (!group) this.groups.set(name, (group = { latencies: [], statuses: new Map(), logicalOps: 0 }));
+    return group;
   }
 }
 
@@ -199,6 +211,11 @@ describe.skipIf(!ENABLED)(`carga: 3 instâncias, níveis ${LEVELS.join('/')} (se
         run.latencies.push(performance.now() - t0);
         run.bump(run.statuses, String(status));
         if (status === 422) run.bump(run.failureCodes, String(parsed['failureCode'] ?? '?'));
+        if (client.group !== undefined) {
+          const group = run.group(client.group);
+          group.latencies.push(performance.now() - t0);
+          run.bump(group.statuses, String(status));
+        }
       }
       if (status !== 503 && status !== 0) return { status, body: parsed };
       if (run.inWindow(startedAt)) run.clientRetries++;
@@ -276,7 +293,13 @@ describe.skipIf(!ENABLED)(`carga: 3 instâncias, níveis ${LEVELS.join('/')} (se
     name: string;
     describe: string;
     split(level: number): { http: number; sqs: number };
+    /** Níveis próprios do cenário (ignora LOAD_LEVELS). */
+    levels?: number[];
+    /** Grupo do cliente HTTP (pelo índice), para medir à parte. */
+    groupOf?(clientId: number): string;
     setup(tag: string): Promise<{
+      /** Wallet disputada: o throughput dela é medido pelo banco. */
+      hotWalletId?: string;
       http?: (run: RunRecorder, client: Client) => Promise<void>;
       /** Devolve quantas mensagens enviou (para a taxa fixa). */
       sqs?: (run: RunRecorder, client: Client) => Promise<number>;
@@ -315,6 +338,39 @@ describe.skipIf(!ENABLED)(`carga: 3 instâncias, níveis ${LEVELS.join('/')} (se
             const data = payload(pick(client.rand, wallets), extId(tag, kind.toLowerCase()), kind, amount(client.rand, 100, 2_000));
             await post(run, client, '/wagering/transactions', data, keyOf(data));
             if (run.inWindow(Date.now())) run.logicalOps++;
+          },
+        };
+      },
+    },
+    {
+      name: 'quente-frias',
+      describe:
+        `${HOT_CLIENTS} clientes numa wallet disputada (10.000.000,00; BET/WIN 50/50 de 1,00–10,00) + ` +
+        `${COLD_CLIENTS} clientes em 300 wallets frias (10.000,00; BET/WIN/LOSS 60/30/10 de 1,00–20,00), ao mesmo tempo, só HTTP; ` +
+        'latência e status medidos por grupo',
+      levels: [HOT_CLIENTS + COLD_CLIENTS],
+      split: (level) => ({ http: level, sqs: 0 }),
+      groupOf: (clientId) => (clientId < HOT_CLIENTS ? 'quente' : 'frias'),
+      async setup(tag) {
+        const [hot] = await openWallets(`${tag}h`, 1, 1_000_000_000n);
+        const cold = await openWallets(`${tag}c`, 300, 1_000_000n);
+        return {
+          hotWalletId: hot!.id,
+          http: async (run, client) => {
+            let data: Payload;
+            if (client.group === 'quente') {
+              const kind = client.rand() < 0.5 ? 'BET' : 'WIN';
+              data = payload(hot!, extId(tag, kind.toLowerCase()), kind, amount(client.rand, 100, 1_000));
+            } else {
+              const r = client.rand();
+              const kind = r < 0.6 ? 'BET' : r < 0.9 ? 'WIN' : 'LOSS';
+              data = payload(pick(client.rand, cold), extId(tag, kind.toLowerCase()), kind, amount(client.rand, 100, 2_000));
+            }
+            await post(run, client, '/wagering/transactions', data, keyOf(data));
+            if (run.inWindow(Date.now())) {
+              run.logicalOps++;
+              run.group(client.group!).logicalOps++;
+            }
           },
         };
       },
@@ -416,7 +472,7 @@ describe.skipIf(!ENABLED)(`carga: 3 instâncias, níveis ${LEVELS.join('/')} (se
   let runIndex = 0;
 
   for (const scenario of selected) {
-    for (const level of LEVELS) {
+    for (const level of scenario.levels ?? LEVELS) {
       it(
         `${scenario.name} com ${level} clientes`,
         async () => {
@@ -471,7 +527,10 @@ describe.skipIf(!ENABLED)(`carga: 3 instâncias, níveis ${LEVELS.join('/')} (se
           })();
 
           const clients: Array<Promise<void>> = [];
-          const newClient = (id: number): Client => ({ id, rr: id, rand: prng(SEED + index * 10_000 + id) });
+          const newClient = (id: number): Client => {
+            const group = scenario.groupOf?.(id);
+            return { id, rr: id, rand: prng(SEED + index * 10_000 + id), ...(group !== undefined && { group }) };
+          };
           for (let i = 0; i < split.http; i++) {
             const client = newClient(i);
             clients.push(
@@ -563,6 +622,30 @@ describe.skipIf(!ENABLED)(`carga: 3 instâncias, níveis ${LEVELS.join('/')} (se
             failureCodes422: Object.fromEntries(run.failureCodes),
           };
           result['mix'] = Object.fromEntries(run.mix);
+          if (run.groups.size > 0) {
+            result['groups'] = Object.fromEntries(
+              [...run.groups].map(([name, group]) => [
+                name,
+                {
+                  attempts: group.latencies.length,
+                  logicalOps: group.logicalOps,
+                  logicalOpsPerSecond: group.logicalOps / DURATION_S,
+                  latencyMs: percentiles(group.latencies),
+                  statuses: Object.fromEntries(group.statuses),
+                  http503: group.statuses.get('503') ?? 0,
+                },
+              ]),
+            );
+          }
+          if (plan.hotWalletId !== undefined) {
+            const [hot] = await rows<{ processed: string }>(
+              `select count(*)::text as processed from wager_transactions
+                where wallet_id = ? and kind <> 'OPENING' and status = 'PROCESSED'
+                  and processed_at >= to_timestamp(?::float8 / 1000) and processed_at < to_timestamp(?::float8 / 1000)`,
+              [plan.hotWalletId, String(run.windowStart), String(run.windowEnd)],
+            );
+            result['hotWallet'] = { processedInWindow: Number(hot?.processed), processedPerSecond: Number(hot?.processed) / DURATION_S };
+          }
 
           // ── Fila: ponta a ponta pelo banco
           const ids = [...run.sqsSentAt.keys()];
