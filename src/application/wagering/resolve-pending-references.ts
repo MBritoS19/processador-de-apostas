@@ -101,7 +101,12 @@ export class ResolvePendingReferences {
     });
   }
 
-  /** Ordem de locks: wallet, depois a transação, relida e conferida como pendente (e vencida, se `requireDue`). */
+  /**
+   * Ordem de locks: wallet, depois a transação, relida e conferida como pendente (e vencida, se `requireDue`).
+   * É a mesma do use case (wallet primeiro): travar a transação antes da wallet cruzaria com ele e abriria
+   * deadlock. `SKIP LOCKED` na wallet evita esperar atrás do tráfego de entrada; a releitura sob lock
+   * descarta a candidata que outra instância já resolveu (ARCHITECTURE.md → "Worker de referências pendentes").
+   */
   private async lock(
     repository: WagerProcessingRepository,
     candidate: PendingReferenceCandidate,

@@ -129,7 +129,9 @@ export class WagerConsumer {
       let outcome: BatchOutcome;
       const polling = new AbortController();
       try {
-        // A fila (maxReceiveCount) é a rede de segurança; o consumidor decide antes, com motivo.
+        // Limite do consumidor (5) abaixo do maxReceiveCount da fila (10): o SQS conta cada RECEBIMENTO, também
+        // das mensagens que só esperam atrás de uma que falhou no grupo. Com redrive em 5, mensagens válidas e
+        // nunca tentadas iriam para a DLQ sem motivo nem métrica (ARCHITECTURE.md → "Consumidor SQS", "Números").
         const limit = Math.min(this.options.maxAttempts, await this.queue.maxReceiveCount());
         this.polling = polling;
         let messages: ReceivedMessage[];
@@ -169,8 +171,9 @@ export class WagerConsumer {
 
   /**
    * Modo "banco fora" (ARCHITECTURE.md → "Consumidor SQS"): sem conexão com o Postgres, não
-   * adianta receber (cada recebimento soma no `ApproximateReceiveCount` da mensagem). O loop
-   * para de receber, sonda o banco com backoff (1s→5s) e só volta a receber quando a sonda
+   * adianta receber (cada recebimento soma no `ApproximateReceiveCount` da mensagem). Sem este modo,
+   * uma queda longa esgotaria as tentativas e mandaria mensagens financeiras válidas para a DLQ com
+   * MAX_ATTEMPTS_EXCEEDED. O loop para de receber, sonda o banco com backoff (1s→5s) e só volta a receber quando a sonda
    * passa. O `stop()` interrompe a espera e a sonda.
    */
   private async waitForDatabase(): Promise<void> {
@@ -348,6 +351,8 @@ export class WagerConsumer {
           this.logger.warn({ ...context, event: 'fault_injection_sigkill' }, 'fault injection: SIGKILL before ack');
           process.kill(process.pid, 'SIGKILL');
         }
+        // Ack só depois do commit (CHALLENGE §10): apagar antes perderia a mensagem se o processo caísse
+        // no meio. O inverso (commit sem ack) é seguro: a reentrega cai na inbox, sem efeito novo.
         try {
           await this.queue.delete(message);
         } catch (error) {
@@ -371,8 +376,9 @@ export class WagerConsumer {
       }
       case 'retry': {
         if (decision.unavailable) {
-          // Banco fora não é culpa da mensagem: volta já (visibilidade 0), sem o limite de tentativas
-          // do consumidor, e o loop entra no modo "banco fora". A rede de segurança é o maxReceiveCount da fila.
+          // Banco fora não é culpa da mensagem: volta já (visibilidade 0) e não conta para o limite do
+          // consumidor, senão uma queda a levaria à DLQ. O loop entra no modo "banco fora"; a rede de
+          // segurança é o maxReceiveCount da fila.
           await this.queue.changeVisibility(message, 0);
           this.metrics.retries.inc();
           this.logger.warn({ ...context, event: 'sqs_message_retry', reason: decision.reason, delaySeconds: 0 }, 'sqs message retry');

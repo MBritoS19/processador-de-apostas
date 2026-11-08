@@ -103,7 +103,11 @@ const SUBMITTABLE_KINDS = new Set<string>([
 ]);
 const TEXT_FIELDS = ['providerId', 'externalTransactionId', 'playerId', 'walletId', 'roundId', 'gameId'] as const;
 
-/** Tentativas do caminho com lock quando o lock da wallet estoura o `lock_timeout` (1 + 1 extra). */
+/**
+ * Tentativas do caminho com lock quando o lock da wallet estoura o `lock_timeout` (1 + 1 extra).
+ * Duas esperas de 1s mantêm o orçamento de ~2s antes do 503 e dão a vez a quem entrou na fila da
+ * wallet; repetir é seguro porque a idempotência é rechecada sob o lock (ARCHITECTURE.md → "Concorrência").
+ */
 const LOCK_TIMEOUT_ATTEMPTS = 2;
 
 /**
@@ -125,10 +129,10 @@ export class ProcessWagerTransaction {
     if (typeof parsed === 'string') return { type: 'InvalidInput', reason: parsed };
 
     try {
-      // Caminho rápido, sem lock: key e hash de uma transação gravada nunca mudam, então um
-      // conflito visto aqui é definitivo, e um replay não precisa esperar o lock da wallet (numa
-      // wallet disputada, ele viraria 503). Pela fila, o replay segue para o caminho com lock,
-      // que grava a inbox. Não achou nada → caminho com lock, onde a checagem é a garantia.
+      // Leitura sem lock é segura só porque key e hash gravados nunca mudam e transações nunca são
+      // apagadas: conflito visto aqui é definitivo. Sem ela, um replay HTTP numa wallet disputada
+      // esperaria o lock e viraria 503 (ARCHITECTURE.md → "Idempotência"). Pela fila o replay segue
+      // para o caminho com lock, que grava a inbox. "Não achou" não prova nada: a garantia é a checagem sob lock.
       const known = decideIdempotency(
         await this.unitOfWork.run((repository) =>
           repository.findByIdempotency(parsed.providerId, parsed.idempotencyKey, parsed.externalTransactionId),
@@ -227,11 +231,17 @@ export class ProcessWagerTransaction {
     tx: WagerTransaction,
     command: ProcessWagerTransactionCommand,
   ): Promise<ProcessWagerTransactionResult> {
+    // O lock vem antes de qualquer leitura de decisão: sem ele, dois débitos leriam o mesmo saldo
+    // (read → calculate → update) e a wallet poderia ficar negativa (CHALLENGE §8; ARCHITECTURE.md → "Concorrência").
     const wallet = await repository.lockWallet(tx.walletId, tx.playerId);
 
+    // Idempotência só vale DEPOIS do lock: quem gravou a original segurava este mesmo lock, então ela
+    // já está visível. Antes do lock, 50 envios paralelos da mesma BET passariam todos pela checagem.
     const existing = await repository.findByIdempotency(tx.providerId, tx.idempotencyKey, tx.externalTransactionId);
     const decided = decideIdempotency(existing, tx);
     if (decided !== undefined) {
+      // Replay pela fila também grava a inbox, na mesma transação: sem isso o messageId nunca ficaria
+      // registrado e cada reentrega voltaria a passar pelo use case.
       if (decided.type !== 'IdempotencyConflict' && command.inbox) {
         await repository.insertInbox(this.inboxMessage(command.inbox));
       }
@@ -244,6 +254,8 @@ export class ProcessWagerTransaction {
       // A mensagem de entrada (inbox) ou a requisição (idempotency key).
       causationId: command.inbox?.messageId ?? command.idempotencyKey,
     }, 'insert');
+    // Inbox no mesmo commit do saldo/ledger/outbox: em outra transação, um crash no meio aplicaria o efeito
+    // sem registrar a mensagem (a reentrega o duplicaria) ou registraria sem aplicar (CHALLENGE §10-11).
     if (command.inbox) await repository.insertInbox(this.inboxMessage(command.inbox));
 
     return resultOf(tx, false);

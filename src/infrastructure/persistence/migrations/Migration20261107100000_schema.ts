@@ -74,8 +74,10 @@ export class Migration20261107100000_schema extends Migration {
         reference_attempts integer not null default 0,
         next_reference_check_at timestamptz,
         created_at timestamptz not null,
-        -- NULL em REJECTED/FAILED: a FK composta (MATCH SIMPLE) não é checada para elas, o que
-        -- permite auditar rejeições por WALLET_NOT_FOUND e CURRENCY_MISMATCH.
+        -- NULL em REJECTED/FAILED: com MATCH SIMPLE a FK composta (wallet_id, currency) não é checada,
+        -- o que deixa gravar rejeições por WALLET_NOT_FOUND e CURRENCY_MISMATCH (auditoria e replay).
+        -- Nos demais status a FK vale e o banco garante moeda da transação = moeda da wallet
+        -- (ARCHITECTURE.md → "Garantias no schema").
         wallet_fk_currency char(3) generated always as (
           case when status in ('REJECTED','FAILED') then null else currency end
         ) stored,

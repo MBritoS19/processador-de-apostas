@@ -7,7 +7,9 @@ const STATEMENT_TIMEOUT_MS = 5_000;
 /**
  * Elegível = pendente, vencido e sem evento anterior (menor `seq`) pendente do mesmo agregado.
  * Um evento anterior travado por outro publisher, em backoff ou que falha para sempre bloqueia
- * os seguintes do agregado: dois publishers nunca publicam o mesmo agregado fora de ordem.
+ * os seguintes do agregado. Sem o `not exists`, o `skip locked` deixaria outro publisher pular o
+ * evento 1 (travado) e publicar o 2 antes dele. Troca vazão por ordem
+ * (ARCHITECTURE.md → "Outbox publisher", "Ordem por agregado").
  */
 const CLAIM_SQL = `
   select o.id, o.aggregate_id, o.event_type, o.payload, o.occurred_at, o.attempts, o.next_attempt_at
@@ -55,6 +57,10 @@ export class OutboxStore {
   }
 
   /**
+   * `SKIP LOCKED`: cada publisher pega linhas diferentes, sem fila nem lock global (CHALLENGE §11). A
+   * publicação acontece ainda com o lock: se o processo morre, o rollback solta as linhas sozinho, sem
+   * coluna de lease. O preço é a conexão presa durante o envio (limitada pelos timeouts abaixo).
+   *
    * Trava até `limit` eventos elegíveis, entrega-os a `work` (que os marca publicados ou
    * reagenda) e grava o estado no mesmo commit. Se algo lançar antes do commit, o lock cai
    * e outro publisher pega os eventos de novo (at-least-once). Devolve os eventos após o commit.

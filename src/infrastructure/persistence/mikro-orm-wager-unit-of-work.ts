@@ -24,7 +24,8 @@ import { WalletRecord, toWallet, toWalletRecord } from './wallet.persistence';
 const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 /**
  * `ProcessWagerTransaction`: 1s por tentativa, com 1 tentativa extra no use case. O orçamento total
- * de espera pelo lock continua ~2s antes do 503 (ARCHITECTURE.md → "Concorrência").
+ * de espera pelo lock continua ~2s antes do 503 (ARCHITECTURE.md → "Concorrência"). Curto de propósito:
+ * quem espera o lock ocupa uma conexão do pool, e uma espera longa esgotaria o pool para as outras wallets.
  */
 export const WAGER_LOCK_TIMEOUT_MS = 1_000;
 
@@ -91,6 +92,11 @@ export function translatePersistenceError(error: unknown): unknown {
 class MikroOrmWagerProcessingRepository implements WagerProcessingRepository {
   constructor(private readonly em: EntityManager) {}
 
+  /**
+   * `FOR UPDATE` serializa por wallet: duas BETs sobre o mesmo saldo nunca leem o mesmo valor. O filtro
+   * por `playerId` evita que um player que não é dono segure (ou espere) o lock de outra wallet.
+   * ARCHITECTURE.md → "Concorrência" (CHALLENGE §8).
+   */
   async lockWallet(walletId: string, playerId: string): Promise<Wallet | undefined> {
     const record = await this.em.findOne(
       WalletRecord,

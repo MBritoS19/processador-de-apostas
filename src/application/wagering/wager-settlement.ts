@@ -123,14 +123,19 @@ export class WagerSettlement {
       const found = await repository.findByExternalId(tx.providerId, tx.referenceExternalTransactionId);
       const check = checkReference(tx, found);
       if (check.type === 'pending') {
-        // Ausente ou ainda não resolvida: aguarda até o prazo; esgotado, REFERENCE_NOT_FOUND nos dois casos.
+        // TTL de relógio a partir do createdAt, e não contagem de tentativas: o caminho rápido e o backoff
+        // consomem tentativas de forma imprevisível e expirariam cedo cadeias que ainda andam. Esgotado,
+        // REFERENCE_NOT_FOUND (CHALLENGE §7.1; ARCHITECTURE.md → "Worker de referências pendentes").
         const deadline = addMs(tx.createdAt, this.referenceTtlMs);
         if (now >= deadline) return void tx.reject(FailureCode.ReferenceNotFound, wallet.balance);
         return void tx.markPendingReference(now, deadline);
       }
       if (check.type === 'reject') return void tx.reject(check.code, wallet.balance);
       reference = check.reference;
-      // Vale para reversões (uma no total) e para WIN/LOSS: liquidar uma BET já estornada creditaria duas vezes.
+      // Uma reversão (REFUND ou ROLLBACK) por BET, não uma de cada tipo: REFUND + ROLLBACK da mesma BET
+      // devolveria a aposta duas vezes. Vale também para WIN/LOSS sobre BET estornada. A garantia sob
+      // concorrência é o índice ux_wager_tx_one_reversal; esta checagem só produz o failureCode
+      // (ARCHITECTURE.md → "Regras de negócio").
       if (await repository.hasProcessedReversal(reference.id)) {
         return void tx.reject(FailureCode.ReferenceAlreadyReversed, wallet.balance);
       }
