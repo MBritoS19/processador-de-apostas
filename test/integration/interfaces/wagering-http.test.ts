@@ -6,7 +6,7 @@ import type { MikroORM } from '@mikro-orm/postgresql';
 import { AppModule } from '../../../src/app.module';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
 import { WageringHttpService } from '../../../src/interfaces/http/wagering-http.service';
-import { expectLedgerConsistent, openOrm, truncateAll } from '../persistence/db';
+import { expectJournalConsistent, expectLedgerConsistent, openOrm, truncateAll } from '../persistence/db';
 
 type Json = Record<string, any>;
 
@@ -24,7 +24,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
     url = `http://127.0.0.1:${address.port}`;
   });
 
-  // Invariante final de todos os testes (CHALLENGE §13): saldo == ledger em todas as wallets.
+  // Invariante final de todos os testes (CHALLENGE §13): saldo == ledger em todas as wallets, e == diário.
   // Só o teste que corrompe o saldo de propósito (reconciliação divergente) desliga a checagem.
   let ledgerTampered = false;
 
@@ -36,7 +36,10 @@ describe('API HTTP de wagering (Postgres real)', () => {
   afterEach(async () => {
     if (ledgerTampered) return;
     const wallets = await knex()('wallets').select('id');
-    for (const { id } of wallets) await expectLedgerConsistent(orm, id as string);
+    for (const { id } of wallets) {
+      await expectLedgerConsistent(orm, id as string);
+      await expectJournalConsistent(orm, id as string);
+    }
   });
 
   afterAll(async () => {
@@ -391,6 +394,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
         walletId: wallet.id,
         storedBalance: { amount: '90.00', currency: 'BRL' },
         calculatedBalance: { amount: '90.00', currency: 'BRL' },
+        journalBalance: { amount: '90.00', currency: 'BRL' },
         difference: { amount: '0.00', currency: 'BRL' },
         consistent: true,
         checkedEntries: 2,
@@ -429,12 +433,25 @@ describe('API HTTP de wagering (Postgres real)', () => {
     });
 
     describe('cruza ledger × transações: cada divergência é detectada sozinha', () => {
-      /** Corrompe por fora, com os triggers e FKs desligados só nesta transação. */
-      async function tamper(work: (trx: any) => Promise<void>): Promise<void> {
+      /**
+       * Corrompe por fora, com os triggers e FKs desligados só nesta transação. Por padrão, o diário
+       * acompanha o saldo adulterado (uma perna de ajuste na conta PLAYER), para que só a divergência
+       * pedida apareça; `alignJournal: false` deixa o diário como estava.
+       */
+      async function tamper(work: (trx: any) => Promise<void>, { alignJournal = true } = {}): Promise<void> {
         ledgerTampered = true;
         await knex().transaction(async (trx) => {
           await trx.raw('set local session_replication_role = replica');
           await work(trx);
+          if (alignJournal) {
+            await trx.raw(`insert into journal_postings (id, journal_entry_id, account_id, direction, amount, currency)
+              select gen_random_uuid(), (select p.journal_entry_id from journal_postings p where p.account_id = a.id limit 1), a.id,
+                     case when w.balance > s.total then 'CREDIT' else 'DEBIT' end, abs(w.balance - s.total), a.currency
+                from accounts a join wallets w on w.id = a.wallet_id
+                join lateral (select coalesce(sum(case direction when 'CREDIT' then amount else -amount end), 0) as total
+                                from journal_postings where account_id = a.id) s on true
+               where a.kind = 'PLAYER' and w.balance <> s.total`);
+          }
         });
       }
 
@@ -555,6 +572,31 @@ describe('API HTTP de wagering (Postgres real)', () => {
         expect(types(body)).toEqual(['BALANCE_MISMATCH', 'PROCESSED_WITHOUT_ENTRY']);
         expect(body.divergenceCount).toBe(2);
       });
+
+      it('JOURNAL_BALANCE_MISMATCH: só o diário adulterado (perna PLAYER extra); ledger e saldo intactos', async () => {
+        const wallet = await openWallet('p-d8');
+        expect((await submit(wager(wallet, 'd8-bet'))).status).toBe(200);
+        const bet = await txId('d8-bet');
+        await tamper(
+          (trx) =>
+            trx.raw(
+              `insert into journal_postings (id, journal_entry_id, account_id, direction, amount, currency)
+               select gen_random_uuid(), j.id, a.id, 'DEBIT', 10.00, 'BRL'
+                 from journal_entries j, accounts a where j.wager_transaction_id = ? and a.kind = 'PLAYER' and a.wallet_id = ?`,
+              [bet, wallet.id],
+            ),
+          { alignJournal: false },
+        );
+        const body = await reconcile(wallet.id);
+        expect(body).toMatchObject({
+          storedBalance: { amount: '90.00' },
+          calculatedBalance: { amount: '90.00' },
+          journalBalance: { amount: '80.00', currency: 'BRL' },
+          consistent: false,
+          divergenceCount: 1,
+          divergences: [{ type: 'JOURNAL_BALANCE_MISMATCH' }],
+        });
+      });
     });
 
     it('divergente: sinaliza, conta na métrica e não corrige o saldo', async () => {
@@ -576,8 +618,9 @@ describe('API HTTP de wagering (Postgres real)', () => {
           event: 'reconciliation_divergence',
           walletId: wallet.id,
           correlationId,
-          divergenceCount: 1,
-          divergences: [{ type: 'BALANCE_MISMATCH' }],
+          divergenceCount: 2,
+          // O saldo corrompido diverge do ledger e do diário.
+          divergences: [{ type: 'BALANCE_MISMATCH' }, { type: 'JOURNAL_BALANCE_MISMATCH' }],
         },
       ]);
       expect(JSON.stringify(warn.mock.calls)).not.toMatch(/70\.00|100\.00|30\.00/);
@@ -585,10 +628,11 @@ describe('API HTTP de wagering (Postgres real)', () => {
       expect(response.body).toMatchObject({
         storedBalance: { amount: '70.00' },
         calculatedBalance: { amount: '100.00' },
+        journalBalance: { amount: '100.00' },
         difference: { amount: '-30.00' },
         consistent: false,
         checkedEntries: 1,
-        divergences: [{ type: 'BALANCE_MISMATCH' }],
+        divergences: [{ type: 'BALANCE_MISMATCH' }, { type: 'JOURNAL_BALANCE_MISMATCH' }],
       });
       expect(counter(await metricsText(), 'wagering_reconciliation_divergences_total')).toBe(before + 1);
       const [row] = await knex()('wallets').where({ id: wallet.id });
