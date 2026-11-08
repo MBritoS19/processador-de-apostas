@@ -19,6 +19,7 @@ const DOCUMENTED_SCRIPTS = [
   'test:concurrency',
   'test:multi',
   'test:chaos',
+  'test:load',
 ] as const;
 
 const root = join(import.meta.dir, '..', '..');
@@ -30,7 +31,7 @@ describe('scripts do package.json', () => {
   });
 
   it('as suítes de teste apontam para pastas existentes', () => {
-    for (const suite of ['unit', 'integration', 'concurrency', 'multi', 'chaos']) {
+    for (const suite of ['unit', 'integration', 'concurrency', 'multi', 'chaos', 'load']) {
       expect(pkg.scripts[`test:${suite}`]).toContain(`./test/${suite}`);
       expect(existsSync(join(root, 'test', suite))).toBe(true);
     }

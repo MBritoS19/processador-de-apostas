@@ -31,3 +31,6 @@ Thumbs.db
 
 # Resultados brutos do teste de carga (a execução do relatório vai para docs/carga/)
 test/load/results/
+
+# Banca avaliadora local (não versionar)
+banca/

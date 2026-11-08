@@ -30,6 +30,8 @@ bun run migration:up                  # aplica as migrations no banco de desenvo
 
 O `--wait` só volta quando o Postgres aceita conexões e o script de criação das filas terminou com sucesso. O banco de testes `wagering_test` é criado pelo init do Postgres, e as suítes aplicam as migrations nele sozinhas.
 
+**O `docker-compose.yml` fixa o nome do projeto** (`name: processador-de-apostas`). Um segundo clone na mesma máquina reaproveita os mesmos containers e o mesmo volume do Postgres. Como o volume já existe, o init (que cria o `wagering_test`) não roda de novo. Para isolar um clone, use outro nome de projeto em **todos** os comandos do compose, por exemplo `docker compose -p outro-nome up -d --wait` e `docker compose -p outro-nome down`. As portas 5432 e 4566 continuam as mesmas, então só um dos stacks pode estar de pé por vez.
+
 ## Rodar a API e os workers
 
 ```bash
@@ -66,13 +68,18 @@ Endpoints e status HTTP: `ARCHITECTURE.md` → "API HTTP". A autenticação não
 
 Todas as suítes, exceto a de unidade, usam Postgres e LocalStack **reais**: rode `docker compose up -d --wait` antes. Elas usam o banco `wagering_test`, configurado em `.env.test`, que o `bun test` carrega sozinho (com `NODE_ENV=test`); não dependem do seu `.env`. Não rode duas suítes ao mesmo tempo: elas compartilham esse banco.
 
+**A aplicação (`bun run start`/`start:dev`) pode ficar de pé durante os testes**, mas é melhor pará-la:
+- Ela não interfere nos resultados: usa o banco `wagering` e as filas padrão, enquanto as suítes usam o `wagering_test`, filas com nome único e portas livres escolhidas na hora.
+- O `test:multi` e o `test:load` sobem 3 processos e têm prazos, então CPU ocupada pode atrasá-los.
+- O `test:chaos` para o Postgres, e a aplicação de pé vai responder 503 durante a queda.
+
 | Comando | Suíte | Tempo típico |
 |---|---|---|
 | `bun run typecheck` | `tsc --noEmit` (o Bun não checa tipos) | ~2s |
 | `bun run test:unit` | domínio, regras e config, sem I/O | ~5s |
 | `bun run test:integration` | migrations, constraints, atomicidade, inbox e redelivery, retry e DLQ, outbox, recuperação | ~1 min |
 | `bun run test:concurrency` | paralelismo real num processo (80+80, a mesma BET 50x, publishers e workers concorrentes) | ~10s |
-| `bun run test:multi` | 3 processos reais da aplicação, SIGKILL depois do commit e antes do ack, SIGKILL de todas no meio da carga | ~40s |
+| `bun run test:multi` | 3 processos reais da aplicação, SIGKILL depois do commit e antes do ack, SIGKILL de todas no meio da carga | ~45s |
 | `bun test` | todas as suítes acima | ~2 min |
 | `bun run test:chaos` | **para o Postgres e pausa o LocalStack** (~12s cada) com 2 processos sob carga; fora do `bun test` (só roda com `CHAOS=1`, que o script define) | ~40s |
 | `bun run test:load` | teste de carga: 3 instâncias, 3 cenários × níveis `10,50` (`LOAD_LEVELS=10,50,100` opcional, ~15 min), consistência ao fim de cada rodada; resumo no terminal e JSON em `test/load/results/`; fora do `bun test` (só com `LOAD=1`) | ~10 min |
@@ -81,7 +88,7 @@ O `test:chaos` mexe nos containers compartilhados do `docker compose` (`stop`/`s
 
 A matriz que liga cada exigência do `CHALLENGE.md` ao teste que a prova, e o teste de mutação, estão em [`docs/RASTREABILIDADE.md`](docs/RASTREABILIDADE.md).
 
-O `test:multi` sobe processos `bun src/main.ts` locais (não containers), em portas livres escolhidas na hora, cada um com API, consumidor, publisher e worker. A carga é gerada por uma seed, impressa no início e na falha. Para reproduzir a carga de uma execução:
+O `test:multi` sobe processos `bun src/main.ts` locais (não containers), em portas livres escolhidas na hora, cada um com API, consumidor, publisher e worker. A carga é gerada por uma seed **fixa** (`20261107`, impressa no início e na falha), então toda execução gera a mesma carga; a intercalação entre processos continua variando. Para trocar a seed:
 
 ```bash
 MULTI_SEED=<n> bun run test:multi     # PowerShell: $env:MULTI_SEED=<n>; bun run test:multi
@@ -151,8 +158,10 @@ src/
   infrastructure/  config, MikroORM (registros, migrations, unit of work), SQS, outbox, logs e métricas
   interfaces/      controllers HTTP, consumidor SQS, outbox publisher e worker de pendentes
 test/
-  unit/  integration/  concurrency/  multi/  chaos/
+  unit/  integration/  concurrency/  multi/  chaos/  load/
+docs/              RASTREABILIDADE.md (exigência → teste), CARGA.md e carga/ (resultados do teste de carga)
 docker/            init do Postgres (banco de testes) e do LocalStack (filas)
+.github/workflows/ CI: typecheck, unidade e integração
 docker-compose.yml Postgres + LocalStack; profile `multi` com 3 réplicas
 Dockerfile         imagem da aplicação (oven/bun:1.4)
 ```

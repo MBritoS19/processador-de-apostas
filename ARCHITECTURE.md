@@ -285,13 +285,15 @@ A garantia é o banco, nunca a memória.
 
 1. **Antes da transação:** validação completa (`InvalidInput` não grava nada) e cálculo do `payloadHash`.
 2. **Sob o lock da wallet:** busca por `(provider_id, idempotency_key)` **ou** `(provider_id, external_transaction_id)`.
-   - Mesma key **e** mesmo hash → **replay**. O resultado é reconstruído do estado persistido (`status`, `failure_code`, `observed_balance`) e é idêntico ao original, exceto por `idempotentReplay: true`. Vale para PROCESSED, REJECTED e PENDING_REFERENCE; esta última devolve o estado atual, que pode já ter sido resolvido pelo worker (com o `observed_balance` da resolução, não o saldo de agora).
+   - Mesma key **e** mesmo hash → **replay**. O resultado é reconstruído do estado persistido (`status`, `failure_code`, `observed_balance`) e é idêntico ao original, exceto por `idempotentReplay: true`. Vale para PROCESSED, REJECTED, FAILED e PENDING_REFERENCE. FAILED (encerrada pelo worker com `INFRASTRUCTURE_FAILURE`) devolve o mesmo 422 de REJECTED, com `status: "FAILED"`, para sempre: a key está consumida, e reenviar exige uma transação nova. PENDING_REFERENCE devolve o estado atual, que pode já ter sido resolvido pelo worker (com o `observed_balance` da resolução, não o saldo de agora).
    - Hash diferente, ou o mesmo `externalTransactionId` sob outra key → **conflito** (`IdempotencyConflict` com o id existente). Nada é gravado.
 3. **Se o INSERT violar a unicidade mesmo assim** (por exemplo, a mesma key com outra `walletId`, que trava outra linha, ou a mesma mensagem SQS reentregue):
    - o adaptador só traduz `23505` nas constraints esperadas: `uq_wager_tx_provider_idempotency_key` e `uq_wager_tx_provider_external` viram `idempotency`, e `pk_inbox_messages` vira `inbox`;
    - depois do rollback, o use case relê numa transação nova e devolve replay ou conflito;
    - uma mensagem de inbox já usada por **outra** transação devolve `IdempotencyConflict` sem id, e não deve ser reenviada;
    - `23505` em qualquer outra constraint, ou de idempotência sem linha correspondente, é bug e é relançado.
+
+**Retenção:** nem `inbox_messages` nem as keys de `wager_transactions` expiram. A transação é registro financeiro auditável, e apagá-la abriria a porta para um reenvio tardio duplicar o efeito, então não há TTL de idempotência. A inbox cresce uma linha por mensagem SQS processada (algumas centenas de bytes). Uma política de retenção seria segura acima de 14 dias, o `MessageRetentionPeriod` máximo da fila, porque nenhuma reentrega do broker chega depois disso; um redrive manual mais antigo ainda cairia na idempotência da transação. Ela não está implementada: hoje o crescimento é ilimitado e fica para um job de limpeza quando o volume pedir (ver [Limitações](#limitações)).
 
 **Escopo por provider:** a idempotency key é única por `(provider_id, idempotency_key)`. Com unicidade global, um provider poderia gravar antes a key de outro e bloquear a transação legítima dele, recebendo ainda o id interno dela no conflito. Isso pressupõe que `payload.providerId` seja o provider autenticado (ver [Autenticação](#autenticação)).
 
@@ -734,6 +736,8 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
 
 \* Máquina de desenvolvimento (Windows 11, Docker Desktop).
 
+**CI** (`.github/workflows/ci.yml`, em push e pull request): um job roda `typecheck` e `test:unit`; outro sobe a infraestrutura com o próprio `docker compose up -d --wait` e roda `test:integration`. O compose foi preferido aos `services:` do Actions porque os service containers sobem antes do checkout e não montam os scripts de init (banco `wagering_test` e filas). Concorrência, multi, chaos e carga ficam fora do CI: dependem de tempo e de CPU (multi e carga sobem 3 processos; chaos derruba containers) e seriam instáveis num runner compartilhado. Rodam localmente antes de cada entrega.
+
 **Rastreabilidade:** cada exigência do `CHALLENGE.md` ligada ao teste que a prova, e o teste de mutação manual (8 mutações, todas pegas), em [`docs/RASTREABILIDADE.md`](docs/RASTREABILIDADE.md).
 
 **Chaos fora do `bun test`:** a suíte só roda com `CHAOS=1` (o script define) porque derruba containers compartilhados. O Postgres é **parado**, não pausado: com pause, as conexões abertas ficam penduradas em vez de recusadas, e não daria para provar o 503 nem o retry pelo comportamento. O LocalStack é **pausado**, porque um stop apagaria as filas da suíte (não há persistência). Backoff, visibilidade e prazos curtos valem só para a suíte; a tolerância do consumidor (5 tentativas, 2/4/8/8s) cobre a queda de ~12s. O `afterAll` restaura os containers mesmo em falha.
@@ -792,7 +796,7 @@ CHALLENGE §14, "Diferenciais opcionais". Esta seção descreve **como** se mede
 ### Determinismo
 
 - **Sem sleep como sincronização:** toda espera é `eventually(condição, prazo)` com mensagem do que se esperava, ou espera por evento (`/health/ready`, saída do processo, sessão bloqueada em `pg_stat_activity`). Sobram só o backoff do cliente HTTP e um intervalo de 300ms entre as duas leituras da quiescência, porque as contagens do SQS são aproximadas.
-- **Seed:** `MULTI_SEED` (inteiro; valor inválido derruba o teste) fixa os valores e a divisão HTTP/SQS da carga. Ela é impressa no início e, na falha, junto com o passo e a cauda de log de todas as instâncias.
+- **Seed:** fixa por padrão (`20261107`), então toda execução gera a mesma carga. `MULTI_SEED` (inteiro; valor inválido derruba o teste) troca a seed e fixa os valores e a divisão HTTP/SQS da carga. Ela é impressa no início e, na falha, junto com o passo e a cauda de log de todas as instâncias.
 - **Relógio manual:** nos testes do worker de pendentes e da outbox, o tempo avança por `ManualClock`, e o ciclo roda via `runOnce()`.
 - Processos filhos são mortos no `afterAll` e também no `exit` do `bun test`, mesmo se interrompido.
 
@@ -842,7 +846,7 @@ Todas as variáveis são lidas e validadas por `loadConfig` (`src/infrastructure
 | `PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS` | `8000` | prazo de shutdown do worker |
 | `SHUTDOWN_BUDGET_MS` | `25000` | teto da soma dos três prazos de shutdown |
 | `FAULT_INJECTION` | `none` | só testes: `exit_after_commit_before_ack`, exige `NODE_ENV=test` |
-| `MULTI_SEED` | aleatória | só `test:multi`: reproduz a carga |
+| `MULTI_SEED` | `20261107` (fixa) | só `test:multi`: troca a seed da carga |
 | `LOG_LEVEL` | `info` | nível do pino (`trace`…`fatal`, `silent`); lida direto em `logger.ts`, fora do `loadConfig`, porque o logger existe antes da config |
 
 Constantes fixas no código (não configuráveis): `lock_timeout` 2s, `statement_timeout` do claim 5s, pool 10 / acquire 10s, backoff das pendências 5s→10min, backoff da outbox 1s→5min, pausa dos loops até 30s (`errorPauseMs`, a mesma nos três loops). Todos os backoffs usam `exponentialBackoffMs` (`src/domain/backoff.ts`).
@@ -922,6 +926,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **Wallet sem vínculo com provider:** qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. O vínculo (`wallet_providers`) faz parte do desenho de autenticação, não implementado.
 - **REFUND de BET que já tem WIN PROCESSED é aceito.** A spec não proíbe, e o provedor pode estornar uma rodada cancelada depois de liquidada; o jogador fica com o prêmio e com o valor da aposta. Barrar exige definir a prioridade entre liquidação e estorno (decisão de negócio).
 - **O banco não garante tudo do ledger:** compara o saldo com o **último** lançamento, não com a soma; não verifica o encadeamento `balance_before` = `balance_after` anterior, nem que só transação PROCESSED tenha lançamento, nem que o valor do lançamento seja o da transação. Garantem o domínio, o use case e o lock por wallet; a reconciliação detecta em produção, e `expectLedgerConsistent` verifica nos testes.
+- **Sem retenção da inbox:** `inbox_messages` cresce sem limite (ver [Idempotência](#idempotência) → "Retenção").
 - **TRUNCATE não é bloqueado** pelos triggers: em produção, o usuário da aplicação não deve ter essa permissão.
 - **C4a — mensagem não registrada na inbox:** se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, nenhuma linha de inbox é gravada. Uma mensagem posterior com o mesmo `messageId` e outro payload válido é processada normalmente (com a própria idempotency key, sem duplicar efeito). Fechar exige gravar a inbox também nesses desfechos, o que muda o use case.
 - **Sem heartbeat de visibilidade no consumidor:** um lote acima de 60s pode ser reentregue em paralelo; é seguro, mas desperdiça trabalho.

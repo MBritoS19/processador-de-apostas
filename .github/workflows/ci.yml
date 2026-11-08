@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test:unit
+
+  # Postgres e LocalStack sobem pelo próprio docker-compose.yml (não por `services:`): os service
+  # containers do Actions sobem antes do checkout e não montam os scripts de init (banco de testes e filas).
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: docker compose up -d --wait
+      - run: bun run test:integration
+      - if: failure()
+        run: docker compose logs --tail=200
