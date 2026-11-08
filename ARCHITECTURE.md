@@ -12,23 +12,24 @@ As seções não são numeradas: código e configuração citam uma seção pelo
 4. [Persistência](#persistência)
 5. [Modelo de domínio](#modelo-de-domínio)
 6. [Garantias no schema](#garantias-no-schema)
-7. [Estratégia transacional](#estratégia-transacional)
-8. [Concorrência](#concorrência)
-9. [Idempotência](#idempotência)
-10. [Regras de negócio](#regras-de-negócio)
-11. [Taxonomia de failureCode](#taxonomia-de-failurecode)
-12. [API HTTP](#api-http)
-13. [Autenticação](#autenticação)
-14. [Consumidor SQS](#consumidor-sqs)
-15. [Outbox publisher](#outbox-publisher)
-16. [Worker de referências pendentes](#worker-de-referências-pendentes)
-17. [Observabilidade](#observabilidade)
-18. [Estratégia de testes](#estratégia-de-testes)
-19. [Configuração](#configuração)
-20. [Interpretações adotadas](#interpretações-adotadas)
-21. [Pontos da especificação que geraram dúvida](#pontos-da-especificação-que-geraram-dúvida)
-22. [Decisões, trade-offs e limitações](#decisões-trade-offs-e-limitações)
-23. [Evolução futura](#evolução-futura)
+7. [Diário de partidas dobradas](#diário-de-partidas-dobradas)
+8. [Estratégia transacional](#estratégia-transacional)
+9. [Concorrência](#concorrência)
+10. [Idempotência](#idempotência)
+11. [Regras de negócio](#regras-de-negócio)
+12. [Taxonomia de failureCode](#taxonomia-de-failurecode)
+13. [API HTTP](#api-http)
+14. [Autenticação](#autenticação)
+15. [Consumidor SQS](#consumidor-sqs)
+16. [Outbox publisher](#outbox-publisher)
+17. [Worker de referências pendentes](#worker-de-referências-pendentes)
+18. [Observabilidade](#observabilidade)
+19. [Estratégia de testes](#estratégia-de-testes)
+20. [Configuração](#configuração)
+21. [Interpretações adotadas](#interpretações-adotadas)
+22. [Pontos da especificação que geraram dúvida](#pontos-da-especificação-que-geraram-dúvida)
+23. [Decisões, trade-offs e limitações](#decisões-trade-offs-e-limitações)
+24. [Evolução futura](#evolução-futura)
 
 ---
 
@@ -39,7 +40,7 @@ Provedores enviam `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK` por HTTP ou pela f
 **Uma BET pela API** (`POST /wagering/transactions` com `Idempotency-Key`):
 
 1. `AuthGuard` (no-op hoje) → validação do corpo (`400`; nada é gravado) → cálculo do `payloadHash`.
-2. **Uma transação SQL:** `SET LOCAL lock_timeout = 1s` (uma tentativa extra se estourar) → `SELECT … FROM wallets … FOR UPDATE` → busca pela key ou pelo id externo (se existir: replay ou `409`) → regras de negócio → `INSERT` da transação → `UPDATE` do saldo conferindo `version` → `INSERT` do lançamento → `INSERT` dos eventos na outbox → `COMMIT`, quando as FKs deferidas e o trigger saldo × ledger são checados.
+2. **Uma transação SQL:** `SET LOCAL lock_timeout = 1s` (uma tentativa extra se estourar) → `SELECT … FROM wallets … FOR UPDATE` → busca pela key ou pelo id externo (se existir: replay ou `409`) → regras de negócio → `INSERT` da transação → `UPDATE` do saldo conferindo `version` → `INSERT` do lançamento → `INSERT` do lançamento de diário (partidas dobradas) → `INSERT` dos eventos na outbox → `COMMIT`, quando as FKs deferidas, o trigger saldo × ledger e o balanço do diário são checados.
 3. Resposta: `200` PROCESSED, `422` REJECTED/FAILED, `202` PENDING_REFERENCE, `409` conflito de idempotência, `503` falha transitória (reenviar com a mesma key).
 
 **A mesma BET pela fila:** `ReceiveMessage` → envelope inválido vai para a DLQ → pré-checagem da inbox → o mesmo use case, com a linha da inbox gravada **na mesma transação SQL** → `DeleteMessage` só depois do commit. Uma falha transitória volta para a fila com backoff; na 5ª tentativa, ou com payload inválido, vai para a DLQ com motivo.
@@ -53,8 +54,9 @@ Provedores enviam `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK` por HTTP ou pela f
 | Dinheiro exato | `Money` em `bigint` de centavos e `numeric(20,2)` no banco; nunca `number` | [Modelo de domínio](#modelo-de-domínio), [Persistência](#persistência) |
 | Sem débito ou crédito duplicado | unicidade de `(provider_id, idempotency_key)` e `(provider_id, external_transaction_id)`, checada sob o lock; inbox única por `(consumer_name, message_id)` | [Idempotência](#idempotência) |
 | Sem saldo negativo nem lost update | `FOR UPDATE` por wallet, `version` no `UPDATE` e `CHECK (balance >= 0)` | [Concorrência](#concorrência), [Garantias no schema](#garantias-no-schema) |
-| Atomicidade | transação, saldo, ledger, inbox e outbox no mesmo commit | [Estratégia transacional](#estratégia-transacional) |
+| Atomicidade | transação, saldo, ledger, diário, inbox e outbox no mesmo commit | [Estratégia transacional](#estratégia-transacional) |
 | Ledger auditável | append-only por trigger; saldo × último lançamento checado no commit; reconciliação sob demanda | [Garantias no schema](#garantias-no-schema), [API HTTP](#api-http) |
+| Todo movimento tem contrapartida | diário de partidas dobradas paralelo ao ledger; débito = crédito e perna PLAYER = lançamento da wallet checados no commit | [Diário de partidas dobradas](#diário-de-partidas-dobradas) |
 | Evento nunca antes do commit, nunca perdido | outbox no mesmo commit; publisher at-least-once com `eventId` estável | [Outbox publisher](#outbox-publisher) |
 | Várias instâncias | nenhuma garantia depende de memória; locks no banco; `SKIP LOCKED` nos workers | [Concorrência](#concorrência), [Estratégia de testes](#estratégia-de-testes) |
 
@@ -222,6 +224,10 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 | Cursor estável do ledger | `seq bigint generated always as identity` + `uq_ledger_wallet_seq` |
 | Inbox única por consumidor e mensagem | `pk_inbox_messages (consumer_name, message_id)` |
 | Outbox: tentativas ≥ 0; ordem por agregado | `ck_outbox_attempts`; `seq` identity + `uq_outbox_seq` (`…400000`) |
+| Diário: débito = crédito; transação PROCESSED que move saldo, com o mesmo valor; uma perna PLAYER da wallet, igual ao lançamento da wallet; contrapartida FUNDING (OPENING) ou HOUSE do provider | constraint triggers deferidos `trg_journal_entries_balanced` e `trg_journal_postings_balanced` (função `journal_entry_balanced`, constraint `trg_journal_balanced`) (`…20261109000000`) |
+| Diário: um lançamento por transação; uma moeda por lançamento; conta na moeda da perna | `uq_journal_wager_tx`; `fk_postings_entry_currency` → `uq_journal_id_currency`; `fk_postings_account_currency` → `uq_accounts_id_currency` |
+| Diário: contas, lançamentos e pernas append-only | triggers `trg_accounts_append_only`, `trg_journal_entries_append_only`, `trg_journal_postings_append_only` |
+| Diário: perna positiva e direção válida; uma conta por dono | `ck_postings_amount_positive`, `ck_postings_direction`; `ck_accounts_owner`, `ux_accounts_player`, `ux_accounts_house`, `ux_accounts_funding`; `fk_accounts_wallet_currency` |
 
 **Índices para os workers:** `ix_wager_tx_reference_check_due (next_reference_check_at) WHERE status='PENDING_REFERENCE'`, `ix_wager_tx_awaiting_reference (provider_id, reference_external_transaction_id) WHERE status='PENDING_REFERENCE'` (caminho rápido), `ix_outbox_pending (next_attempt_at) WHERE published_at IS NULL` e `ix_outbox_pending_aggregate (aggregate_id, seq) WHERE published_at IS NULL`.
 
@@ -229,9 +235,75 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 - `REJECTED`/`FAILED` ficam isentas da FK `(wallet_id, currency) → wallets`: a coluna gerada `wallet_fk_currency` é `NULL` nesses status, e com MATCH SIMPLE a FK não é checada. Sem isso, `WALLET_NOT_FOUND` e `CURRENCY_MISMATCH` não poderiam ser gravadas, e precisam ser, para auditoria e replay. Nos outros status, a FK vale integralmente.
 - Em rejeições `REFERENCE_*_MISMATCH` grava-se **só** `reference_external_transaction_id`, com `reference_transaction_id` `NULL`: a FK composta `(reference_transaction_id, wallet_id)` impediria o insert de uma referência de outra wallet. O id interno só é obrigatório (CHECK) em `REFUND`/`ROLLBACK` `PROCESSED`.
 
-**Códigos de erro do banco:** CHECK `23514`, UNIQUE `23505`, FK `23503`, triggers de imutabilidade `23001` (`restrict_violation`), divergência saldo × ledger `23514`.
+**Códigos de erro do banco:** CHECK `23514`, UNIQUE `23505`, FK `23503`, triggers de imutabilidade `23001` (`restrict_violation`), divergência saldo × ledger `23514`, diário desbalanceado ou incoerente `23514` com constraint `trg_journal_balanced`.
 
 **TRUNCATE não é bloqueado:** triggers de linha não disparam em TRUNCATE, que é operação administrativa (os testes limpam com ele). Em produção, o usuário da aplicação não deve ter permissão de `TRUNCATE`.
+
+## Diário de partidas dobradas
+
+**Por quê:** o `wallet_ledger_entries` é um ledger de partida simples, por wallet. Ele prova o saldo de cada jogador, mas não diz para onde foi o dinheiro: a BET de 80 sai da wallet e não entra em conta nenhuma. O diário dá contrapartida a todo movimento (fechamento por provider, auditoria externa) e uma segunda prova, independente, do saldo de cada wallet.
+
+**Aditivo:** o `wallet_ledger_entries` não mudou (schema, código, testes). Ele continua a fonte do saldo, do trigger saldo × ledger e do cursor da API; o diário é a visão contábil, gravada **na mesma transação SQL**.
+
+### Plano de contas e lançamentos
+
+| Conta | Quantas | Papel |
+|---|---|---|
+| `PLAYER` | uma por wallet | o que a casa deve ao jogador; saldo = crédito − débito, a mesma convenção do ledger |
+| `PROVIDER_HOUSE` | uma por provider e moeda | contrapartida de apostas, prêmios e estornos |
+| `FUNDING` | uma por moeda | contrapartida do `OPENING`, que não vem de provider nenhum |
+
+A perna `PLAYER` tem **a mesma direção e o mesmo valor do lançamento da wallet**; a contrapartida, a direção oposta (`JournalEntry.forTransaction`). O ROLLBACK sai invertido pela mesma regra que já decidiu a direção do ledger (`ledgerDirectionFor(reference)`), sem tabela própria.
+
+| Kind | Débito | Crédito |
+|---|---|---|
+| `OPENING` (> 0) | `FUNDING` | `PLAYER` |
+| `BET` | `PLAYER` | `PROVIDER_HOUSE` |
+| `WIN`, `REFUND` | `PROVIDER_HOUSE` | `PLAYER` |
+| `ROLLBACK` de `BET` | `PROVIDER_HOUSE` | `PLAYER` |
+| `ROLLBACK` de `WIN`/`REFUND` | `PLAYER` | `PROVIDER_HOUSE` |
+| `LOSS`, `REJECTED`, `FAILED`, `PENDING_REFERENCE`, `OPENING` 0 | sem lançamento | |
+
+A HOUSE de um ROLLBACK ou REFUND é a do provider da transação, que é o mesmo da referência ([Regras de negócio](#regras-de-negócio)).
+
+### Schema
+
+Migration `Migration20261109000000_double_entry_journal`, com `down` que remove só o diário. Tabelas `accounts`, `journal_entries` (uma por transação que move saldo) e `journal_postings` (as pernas, `numeric(20,2)`); garantias na tabela de [Garantias no schema](#garantias-no-schema).
+
+- **Balanço no COMMIT:** constraint trigger deferido, disparado pelo INSERT do lançamento e de cada perna (uma perna avulsa num lançamento antigo também é pega). Exige débito = crédito com ≥ 2 pernas, transação `PROCESSED` que move saldo com o mesmo valor e moeda, exatamente uma perna `PLAYER` da wallet da transação, contrapartida certa e perna `PLAYER` igual (valor e direção) ao lançamento da wallet. **Só lê** o `wallet_ledger_entries`.
+- **Sem saldo materializado em conta nenhuma:** a HOUSE seria uma hot row compartilhada por todas as wallets do provider. Saldo de conta é soma sob demanda (`ix_postings_account`).
+- **FUNDING** criadas pela migration para BRL, USD e as moedas já existentes em `wallets`. O sistema aceita qualquer ISO de 3 letras, então uma moeda nova cria a sua FUNDING sob demanda, pelo mesmo mecanismo da HOUSE (decisão do autor: não restringir moedas).
+- **Backfill** na própria migration, a partir do `wallet_ledger_entries`, num INSERT…SELECT por tabela; o trigger deferido valida tudo no COMMIT da migration. Serve para este volume; em produção seria em lotes por `seq`.
+
+### Gravação e concorrência
+
+- `WagerSettlement` (use case e worker de pendentes) e `OpenWallet` chamam `insertJournalEntry` logo depois de `insertLedgerEntry`. O adaptador (`journal.persistence.ts`, SQL direto, sem `EntitySchema`, porque nada do diário é lido pelo ORM) resolve as contas pela chave natural numa consulta servida pelos índices únicos parciais e grava lançamento e pernas num único statement.
+- **Lock:** continua só o da wallet. A conta PLAYER nasce sob esse lock. HOUSE e FUNDING são compartilhadas: a que falta é criada com `insert … on conflict do nothing` e relida. Se duas wallets usam ao mesmo tempo um provider novo, a segunda espera o INSERT da primeira (dentro do `lock_timeout`) e reaproveita a conta. Isso só acontece no primeiro uso de um (provider, moeda); depois, a consulta só lê.
+
+### Falha do diário
+
+O diário que não fecha é **bug**, não falha passageira: a transação SQL inteira sofre rollback (nada de transação, saldo, ledger, inbox, outbox ou diário fica gravado), e reenviar daria o mesmo erro.
+
+| Onde | Comportamento |
+|---|---|
+| Adaptador | `23514` com constraint `trg_journal_balanced` → `JournalIntegrityError` (porta) |
+| HTTP | `500` (não é `503`: reenviar não resolve) |
+| SQS | DLQ `JOURNAL_INTEGRITY_VIOLATION` **na primeira entrega**, sem retry (também para `InvalidJournalEntryError` do domínio); ver [Consumidor SQS](#consumidor-sqs) |
+| Worker de pendentes | erro inesperado: repetido 5 vezes, a pendente vira `FAILED` `INFRASTRUCTURE_FAILURE` ([Worker de referências pendentes](#worker-de-referências-pendentes)) |
+
+### Conferência pela reconciliação
+
+A [reconciliação](#reconciliação) lê, no mesmo snapshot, o saldo da conta PLAYER e o devolve como `journalBalance`. `JOURNAL_BALANCE_MISMATCH` acusa diário ≠ saldo guardado; com `BALANCE_MISMATCH` (saldo ≠ ledger), cobre **diário == `wallets.balance` == ledger** sem acusar a mesma causa duas vezes.
+
+### O que o banco não garante
+
+O banco garante **diário → ledger** (todo lançamento de diário bate com um lançamento da wallet), mas não **ledger → diário**: um lançamento da wallet sem diário só é pego pela reconciliação e pelas verificações dos testes (`expectJournalConsistent`, `expectConsistent`). Fechar isso no schema está em [Evolução futura](#evolução-futura).
+
+### Custo e medição
+
+Por transação que move saldo: +1 consulta de contas, +1 INSERT (lançamento e pernas) e o trigger deferido (3 execuções no COMMIT, cada uma com consultas por índice). Medido com o cenário `quente-frias` contra a `main` (3 + 3 rodadas alternadas, medianas): p95 geral +18,7% (critério do autor: até +20%, sem erros novos; atingido), nenhum erro novo, e vazão −18% na wallet disputada e no total, porque o custo cai dentro da seção crítica do lock da wallet. Dados e opções para reduzir o custo em `docs/CARGA.md` → "Diário de partidas dobradas: medição".
+
+**Provas:** `test/unit/domain/journal-entry.test.ts`, `test/integration/persistence/journal-constraints.test.ts` (cada garantia com o SQLSTATE), `journal-repository.test.ts` (contas sob demanda e primeiro uso disputado), `test/integration/application/journal-dual-write.test.ts`, `test/integration/interfaces/journal-failure.test.ts` (atomicidade por HTTP e SQS, DLQ direto), `test/concurrency/journal.test.ts` e as checagens do diário em `test/multi/consistency.ts`.
 
 ## Estratégia transacional
 
@@ -239,15 +311,15 @@ Criadas em `Migration20261107100000_schema` (e nas migrations seguintes, quando 
 
 | Entrada | Grava no mesmo commit |
 |---|---|
-| `ProcessWagerTransaction` (HTTP e SQS) | transação, saldo (com `version`), lançamento, eventos na outbox e, pela fila, a linha da inbox; o caminho rápido das pendentes da mesma wallet |
-| `OpenWallet` (`POST /wallets`) | wallet (version 1), transação `OPENING`, lançamento CREDIT e `WalletBalanceChanged` |
-| Worker de pendentes | resolução da pendente, saldo, lançamento, eventos e caminho rápido |
+| `ProcessWagerTransaction` (HTTP e SQS) | transação, saldo (com `version`), lançamento, lançamento de diário, eventos na outbox e, pela fila, a linha da inbox; o caminho rápido das pendentes da mesma wallet |
+| `OpenWallet` (`POST /wallets`) | wallet (version 1), transação `OPENING`, lançamento CREDIT, lançamento de diário (FUNDING → PLAYER) e `WalletBalanceChanged` |
+| Worker de pendentes | resolução da pendente, saldo, lançamento, lançamento de diário, eventos e caminho rápido |
 | Outbox publisher | marcação de publicado e backoff dos eventos do lote (o envio ao SQS acontece dentro da transação, com o lock; ver [Outbox publisher](#outbox-publisher)) |
 
 - **Eventos só saem pelo publisher**, depois do commit. Nenhum caminho publica no SQS de dentro do use case.
 - **Ack do SQS só depois do commit:** o `DeleteMessage` acontece quando o use case retorna.
-- **O domínio decide, o banco confirma:** o use case aplica as regras no domínio e grava o resultado. As FKs deferidas e o trigger saldo × ledger são checados no COMMIT; qualquer violação desfaz tudo.
-- **Tradução de erros:** o adaptador traduz SQLSTATE em resultados do use case. `55P03` (lock timeout), `40P01` (deadlock), `40001` (serialização), pool esgotado (`pool_exhausted`) ou banco fora (`unavailable`, só erro de conexão) viram `TransientFailure`; `23505` só nas constraints de idempotência e inbox vira replay ou conflito (ver [Idempotência](#idempotência)); `23505` em qualquer outra constraint, e os demais erros, são bugs e são relançados.
+- **O domínio decide, o banco confirma:** o use case aplica as regras no domínio e grava o resultado. As FKs deferidas, o trigger saldo × ledger e o balanço do diário são checados no COMMIT; qualquer violação desfaz tudo.
+- **Tradução de erros:** o adaptador traduz SQLSTATE em resultados do use case. `55P03` (lock timeout), `40P01` (deadlock), `40001` (serialização), pool esgotado (`pool_exhausted`) ou banco fora (`unavailable`, só erro de conexão) viram `TransientFailure`; `23505` só nas constraints de idempotência e inbox vira replay ou conflito (ver [Idempotência](#idempotência)); `23505` em qualquer outra constraint, e os demais erros, são bugs e são relançados; o `23514` do diário (`trg_journal_balanced`) vira `JournalIntegrityError`, permanente (ver [Diário de partidas dobradas](#diário-de-partidas-dobradas)).
 - **Prova:** `test/integration/application/atomicity.test.ts` cria um trigger real que derruba uma gravação no meio do commit (no use case e na resolução pelo worker): nada persiste, e o reenvio aplica uma vez.
 
 ## Concorrência
@@ -426,7 +498,7 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 
 `POST /wallets/:id/reconciliation` chama o use case `ReconcileWallet` (`src/application/wallets/reconcile-wallet.ts`). A leitura fica atrás da porta `WalletReconciliationReader`, cujo adaptador é `PostgresWalletReconciliationReader`.
 
-- **Leitura:** wallet, lançamentos (com a transação de cada um e a referência dela) e transações PROCESSED (com quantos lançamentos cada uma tem, em qualquer wallet). As três consultas rodam numa transação `REPEATABLE READ, READ ONLY`: um único snapshot, sem lock e sem bloquear escritas.
+- **Leitura:** wallet, lançamentos (com a transação de cada um e a referência dela), transações PROCESSED (com quantos lançamentos cada uma tem, em qualquer wallet) e o saldo da conta PLAYER no diário. As quatro consultas rodam numa transação `REPEATABLE READ, READ ONLY`: um único snapshot, sem lock e sem bloquear escritas.
 - **Regras no use case**, com as funções do domínio usadas para gravar (`ledgerDirectionForKind`, `kindAffectsBalance`). A soma usa `Money`.
 - **Custo:** O(lançamentos + transações) da wallet por chamada. É uma ferramenta de auditoria sob demanda, não um caminho quente. Para wallets com milhões de lançamentos, o próximo passo seria reconciliar por faixa de `seq` a partir de um ponto já conferido.
 
@@ -439,9 +511,10 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | `PROCESSED_WITHOUT_ENTRY` | transação PROCESSED que move saldo (inclusive OPENING) sem lançamento |
 | `PROCESSED_WITH_MULTIPLE_ENTRIES` | transação PROCESSED com mais de um lançamento; o extra só pode estar em outra wallet, porque `uq_ledger_wallet_transaction` impede dois na mesma |
 | `BALANCE_MISMATCH` | saldo guardado ≠ soma do ledger (CREDIT − DEBIT) |
+| `JOURNAL_BALANCE_MISMATCH` | saldo da conta PLAYER no diário de partidas dobradas ≠ saldo guardado; com `BALANCE_MISMATCH`, cobre diário == saldo == ledger ([Diário de partidas dobradas](#diário-de-partidas-dobradas)) |
 
 - **Resposta:**
-  - `storedBalance`, `calculatedBalance`, `difference` (= guardado − calculado) e `checkedEntries`;
+  - `storedBalance`, `calculatedBalance`, `journalBalance` (saldo da conta PLAYER no diário; `0.00` sem conta), `difference` (= guardado − calculado) e `checkedEntries`;
   - `consistent` (nenhuma divergência);
   - `divergenceCount` e `divergences: [{ type, transactionId?, ledgerEntryId? }]`, limitada a 100 itens.
 - **Nunca corrige.** Na divergência: log `warn` `reconciliation_divergence` com `walletId`, `correlationId`, `divergenceCount` e a lista (só tipos e ids, **sem valores**). Também incrementa `wagering_reconciliation_divergences_total` e responde `consistent: false`. Corrigir exige investigar a causa; um ajuste automático esconderia o bug que a gerou.
@@ -501,9 +574,10 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | `InvalidInput` | DLQ `INVALID_PAYLOAD` (motivo em `dlqDetail`) |
 | `TransientFailure` `unavailable` (sem conexão com o banco), no use case ou na pré-checagem | `ChangeMessageVisibility` 0 + `wagering_retries_total`, **fora** do limite de tentativas; o loop entra no [modo "banco fora"](#modo-banco-fora) |
 | Outra `TransientFailure` (`lock_timeout`, `deadlock`, `serialization`, `pool_exhausted`, `version_conflict`), na pré-checagem ou no use case, ou exceção inesperada (bug) | retry: `ChangeMessageVisibility` com backoff + `wagering_retries_total`; na 5ª tentativa → DLQ `MAX_ATTEMPTS_EXCEEDED` |
+| `JournalIntegrityError` (o diário de partidas dobradas recusou o lançamento no COMMIT) ou `InvalidJournalEntryError` | DLQ `JOURNAL_INTEGRITY_VIOLATION` na primeira entrega, sem retry: é bug, e reenviar daria o mesmo erro (nada foi gravado) |
 
-- **DLQ:** primeiro `SendMessage` na `wager-transactions-dlq.fifo`, depois `DeleteMessage` na principal. Atributos: `dlqReason` (um dos 4 códigos acima), `dlqDetail` (até 256 caracteres, sem valores do payload), `sourceMessageId` e `receiveCount`. O `MessageGroupId` é o original, e o `MessageDeduplicationId` é o MessageId do SQS: se o delete falhar, a reentrega reenvia para a DLQ e o broker deduplica (testado). Conta em `wagering_dlq_messages_total`.
-- **Erro inesperado** é tratado como transitório até o limite: um bug não descarta a mensagem na primeira falha, e ela acaba na DLQ com motivo, para análise.
+- **DLQ:** primeiro `SendMessage` na `wager-transactions-dlq.fifo`, depois `DeleteMessage` na principal. Atributos: `dlqReason` (um dos 5 códigos acima), `dlqDetail` (até 256 caracteres, sem valores do payload), `sourceMessageId` e `receiveCount`. O `MessageGroupId` é o original, e o `MessageDeduplicationId` é o MessageId do SQS: se o delete falhar, a reentrega reenvia para a DLQ e o broker deduplica (testado). Conta em `wagering_dlq_messages_total`.
+- **Erro inesperado** é tratado como transitório até o limite: um bug não descarta a mensagem na primeira falha, e ela acaba na DLQ com motivo, para análise. A exceção é o erro do diário, que é sabidamente permanente e vai direto para a DLQ.
 - **Recuperação:** redrive manual da DLQ para a fila principal. É seguro: a inbox e a idempotência impedem efeito duplicado.
 
 ### Números
@@ -968,6 +1042,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 - **`Money` em `bigint` com escala fixa 2:** moedas com outra escala (JPY, BHD) ou operações com divisão exigiriam introduzir escala por moeda e arredondamento.
 - **Lock pessimista por wallet:** uma conexão fica ocupada esperando o lock (2 tentativas de `lock_timeout` 1s: no máximo ~2s antes do 503 reenviável), em troca de não reexecutar transações inteiras sob contenção.
 - **Sem mutex local por wallet antes do `FOR UPDATE`:** numa wallet disputada, até o pool inteiro de uma instância fica esperando o lock, e as wallets frias da mesma instância esperam conexão (p95 de ~2,1s no cenário quente-frias). Um mutex em memória foi implementado num branch e medido (3 rodadas antes e 3 depois, alternadas): o p95 das frias caiu 96%, mas o throughput da wallet disputada caiu 47% e surgiram 503. Ficou de fora pelo critério fixado antes da medição. Dados e análise em `docs/CARGA.md`, seção "Mutex local por wallet: medido, não adotado".
+- **Diário de partidas dobradas paralelo ao ledger, gravado na mesma transação:** ~18% menos vazão e p95 +18,7% no cenário `quente-frias` (o custo cai dentro do lock da wallet), em troca de contrapartida para todo movimento e de uma segunda prova, independente e checada no banco, do saldo de cada wallet. Ver [Diário de partidas dobradas](#diário-de-partidas-dobradas).
 - **Porta própria de readiness**, sem `@nestjs/terminus`: ~80 linhas nossas em vez de uma dependência.
 - **Portas em loopback e LocalStack fixado em 4.9.2:** sem correções de versões futuras do LocalStack.
 - **Filas sem dedup por conteúdo:** todo produtor precisa gerar o dedup id; em troca, dois payloads idênticos legítimos não são descartados por coincidência.
@@ -1000,31 +1075,14 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 
 Nada desta seção está implementado. É o que viria a seguir e onde cada peça entraria sem mexer no que já está provado.
 
-### Ledger de partidas dobradas (diário paralelo e aditivo)
+### Diário de partidas dobradas: ledger → diário no schema
 
-**Por quê:** o `wallet_ledger_entries` é um ledger de partida simples, por wallet. Ele prova o saldo de cada jogador, mas não diz para onde foi o dinheiro: a BET de 80 sai da wallet e não entra em conta nenhuma. Contabilidade, fechamento por provider e auditoria externa pedem que todo movimento tenha contrapartida.
+O diário está implementado ([Diário de partidas dobradas](#diário-de-partidas-dobradas)). O banco garante diário → ledger, mas não ledger → diário: um lançamento da wallet sem lançamento de diário só é pego pela reconciliação.
 
-**Desenho:** um diário **paralelo** ao ledger atual, gravado na mesma transação SQL, sem alterar nem substituir nada do que existe.
-
-- **Tabelas novas** (migration própria, com `down`):
-  - `accounts (id, kind, owner_id, currency)`: `PLAYER` (uma por wallet), `PROVIDER_HOUSE` (uma por provider e moeda, contrapartida de apostas e prêmios) e `FUNDING` (contrapartida do `OPENING`).
-  - `journal_entries (id, wager_transaction_id UNIQUE, created_at)`: um lançamento de diário por transação que move saldo.
-  - `journal_postings (id, journal_entry_id, account_id, direction, amount numeric(20,2), currency)`: as pernas.
-- **Mapeamento por kind:**
-
-| Kind | Débito | Crédito |
-|---|---|---|
-| `OPENING` | `FUNDING` | `PLAYER` |
-| `BET` | `PLAYER` | `PROVIDER_HOUSE` |
-| `WIN` | `PROVIDER_HOUSE` | `PLAYER` |
-| `REFUND` | `PROVIDER_HOUSE` | `PLAYER` |
-| `ROLLBACK` | inverso da referência | inverso da referência |
-| `LOSS` | não move saldo, sem lançamento | |
-
-- **Garantias no schema**, no mesmo espírito de [Garantias no schema](#garantias-no-schema): triggers append-only nas duas tabelas; constraint trigger **deferida** que, no commit, exige soma dos débitos = soma dos créditos por `journal_entry_id`, numa moeda só; `UNIQUE (wager_transaction_id)` para nunca lançar duas vezes.
-- **Onde entra no código:** o `WagerSettlement` já é a fonte única de "aplicar regras + gravar" (use case e worker de pendentes). Ele passaria a montar também o lançamento de diário, ao lado do `WalletLedgerEntry`. A concorrência não muda: o lock continua sendo o da wallet. As contas `PROVIDER_HOUSE` **não** têm saldo materializado, para não virarem hot row; o saldo delas é soma sob demanda.
-- **Rollout aditivo:** (1) migration cria as tabelas; (2) backfill a partir de `wallet_ledger_entries`, em lotes por `seq`; (3) gravação dupla pelo `WagerSettlement`; (4) a [reconciliação](#reconciliação) ganha uma checagem: saldo da conta `PLAYER` no diário = `wallets.balance` = soma do ledger atual. O ledger por wallet continua sendo a fonte do saldo e do cursor da API; o diário é a visão contábil.
-- **Trade-off:** mais 3 linhas por transação no caminho quente e mais uma constraint deferida no commit, em troca de um balanço fechado por provider e de uma segunda prova, independente, do saldo de cada wallet.
+- **Como fechar:** constraint trigger deferido em `wallets` (`after insert or update of balance`), ao lado do `trg_wallets_balance_matches_ledger`: no COMMIT, o último lançamento da wallet (por `seq`) precisa ter lançamento de diário (`uq_journal_wager_tx`, uma busca por índice). Como todo movimento muda o saldo, isso cobre todo lançamento novo. Não toca o `wallet_ledger_entries`.
+- **Quando:** só depois que **todas** as instâncias gravarem o diário. Com o trigger ligado, uma instância com o código anterior teria todas as transações recusadas no COMMIT. Por isso fica fora da primeira entrega.
+- **Custo:** mais uma consulta por índice no COMMIT de cada transação que move saldo.
+- **Próximos passos contábeis:** saldo por conta e por período (fechamento por provider) e reconciliação global (Σ débitos = Σ créditos, HOUSE = − movimentos dos jogadores do provider), hoje conferidos só nos testes.
 
 ### Autenticação
 
@@ -1043,7 +1101,8 @@ A lista completa está em [Limitações](#limitações). As que mais pesam em pr
 | Limitação | O que fecharia |
 |---|---|
 | Sem autenticação; wallet sem vínculo com provider | o desenho acima |
-| O banco não confere encadeamento nem "só PROCESSED tem lançamento" | o diário de partidas dobradas dá uma segunda prova; reconciliação por faixa de `seq` confere o encadeamento |
+| O banco não confere encadeamento nem "só PROCESSED tem lançamento" | reconciliação por faixa de `seq` confere o encadeamento; o diário de partidas dobradas já exige, no banco, que todo lançamento de diário seja de transação PROCESSED e bata com o ledger |
+| Lançamento da wallet sem lançamento de diário só é pego pela reconciliação | trigger em `wallets` exigindo diário para o último lançamento (desenho acima) |
 | `inbox_messages` sem retenção | expurgo por idade, com janela maior que a de redelivery do SQS |
 | C4a: `IdempotencyConflict`/`InvalidInput` na primeira entrega não grava inbox | gravar a inbox também nesses desfechos (muda o use case) |
 | Uma wallet quente ocupa o pool e atrasa as frias da mesma instância | pool separado ou fila por wallet quente na borda (o mutex local foi medido e recusado, ver [Decisões e trade-offs](#decisões-e-trade-offs)) |
