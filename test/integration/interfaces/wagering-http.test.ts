@@ -1,10 +1,11 @@
 import 'reflect-metadata';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import type { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { AppModule } from '../../../src/app.module';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
+import { WageringHttpService } from '../../../src/interfaces/http/wagering-http.service';
 import { expectLedgerConsistent, openOrm, truncateAll } from '../persistence/db';
 
 type Json = Record<string, any>;
@@ -399,7 +400,13 @@ describe('API HTTP de wagering (Postgres real)', () => {
         await trx('wallets').where({ id: wallet.id }).update({ balance: '70.00' });
       });
       const before = counter(await metricsText(), 'wagering_reconciliation_divergences_total');
-      const response = await call('POST', `/wallets/${wallet.id}/reconciliation`);
+      // §9: a divergência é logada, além de contada e sinalizada. O log leva só ids, sem valores.
+      const logger = (app.get(WageringHttpService) as unknown as { logger: { warn: (...args: unknown[]) => void } }).logger;
+      const warn = spyOn(logger, 'warn');
+      const correlationId = 'c0ffee00-0000-4000-8000-000000000001';
+      const response = await call('POST', `/wallets/${wallet.id}/reconciliation`, undefined, { 'x-correlation-id': correlationId });
+      expect(warn.mock.calls.map(([fields]) => fields)).toEqual([{ event: 'reconciliation_divergence', walletId: wallet.id, correlationId }]);
+      warn.mockRestore();
       expect(response.body).toMatchObject({
         storedBalance: { amount: '70.00' },
         calculatedBalance: { amount: '100.00' },
@@ -442,6 +449,8 @@ describe('API HTTP de wagering (Postgres real)', () => {
       expect(delta('wagering_idempotent_replays_total{kind="BET"}')).toBe(1);
       expect(delta('wagering_idempotency_conflicts_total{kind="BET"}')).toBe(1);
       expect(text).toContain('wagering_processing_duration_seconds_bucket');
+      // Latência: uma observação por execução do use case (as 5 submissões acima).
+      expect(delta('wagering_processing_duration_seconds_count')).toBe(5);
       expect(text).toContain('wagering_retries_total 0');
       expect(text).toContain('wagering_dlq_messages_total 0');
       expect(text).toContain('wagering_outbox_lag_seconds 0');

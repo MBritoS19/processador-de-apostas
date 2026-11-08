@@ -137,6 +137,78 @@ describe('outbox publisher (Postgres + LocalStack reais)', () => {
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
+  // CHALLENGE §5.4 / §14: evento nunca sai antes do commit da transação financeira. A transação do
+  // use case fica aberta (débito, ledger e eventos já gravados) num trigger da inbox — a última gravação,
+  // depois da outbox — que espera o teste liberar; enquanto isso, outra instância roda o publisher.
+  // Uma outbox gravada fora da transação financeira ficaria visível aqui. Primeiro a transação é desfeita, depois
+  // o reenvio é confirmado: só o commit faz o evento chegar à fila.
+  it('transação financeira aberta ou desfeita → nada publicado; depois do commit, os eventos saem', async () => {
+    const knex = orm.em.getKnex();
+    await knex.raw('create table if not exists test_commit_gate (released boolean not null, fail boolean not null)');
+    await knex.raw('truncate test_commit_gate');
+    await knex.raw('insert into test_commit_gate values (false, true)');
+    await knex.raw(`create or replace function hold_before_commit() returns trigger language plpgsql as $$
+      begin
+        while not (select released from test_commit_gate) loop perform pg_sleep(0.02); end loop;
+        if (select fail from test_commit_gate) then raise exception 'rollback injetado' using errcode = 'XX000'; end if;
+        return new;
+      end $$`);
+    await knex.raw('create trigger hold_before_commit before insert on inbox_messages for each row execute function hold_before_commit()');
+    try {
+      const wallet = await seedWallet(orm, '100.00');
+      const { useCase } = buildUseCase(orm);
+      const { publisher } = buildPublisher(other, sqs, queue.name);
+      // Entrada pela fila: a inbox é a última gravação da transação, depois da outbox.
+      const viaQueue = command(wallet, {}, { inbox: { consumerName: 'commit-gate-test', messageId: 'msg-gate-1', payloadHash: 'hash-gate-1' } });
+      const held = async () =>
+        eventually(async () => {
+          const { rows } = await other.em.getKnex().raw(`select 1 from pg_stat_activity where wait_event = 'PgSleep' and state = 'active'`);
+          expect(rows.length, 'transação do use case parada dentro do trigger').toBe(1);
+        });
+      const expectNothingPublished = async () => {
+        expect(await pendingCount(other), 'outra instância não vê evento pendente').toBe(0);
+        expect(await publisher.publishOnce()).toBe(0);
+        expect(await drain(sqs, queue.url)).toEqual([]);
+      };
+
+      // 1) Transação aberta e depois desfeita.
+      const rolledBack = useCase.execute(viaQueue).then((r) => r, (e: unknown) => e);
+      await held();
+      expect((await walletRow()).balance, 'débito não confirmado é invisível').toBe('100.00');
+      await expectNothingPublished();
+      await knex.raw('update test_commit_gate set released = true');
+      expect(((await rolledBack) as { type?: string }).type).not.toBe('Processed');
+      await expectNothingPublished();
+
+      // 2) Reenvio: aberta, nada sai; confirmada, os 2 eventos saem.
+      await knex.raw('update test_commit_gate set released = false, fail = false');
+      const committed = useCase.execute(viaQueue);
+      await held();
+      await expectNothingPublished();
+      await knex.raw('update test_commit_gate set released = true');
+      expect((await committed).type).toBe('Processed');
+      const rows = await outboxRows(orm);
+      expect(rows).toHaveLength(2);
+      expect(await publisher.publishOnce()).toBe(2);
+      expect((await drain(sqs, queue.url)).map((m) => m.body.eventId).sort()).toEqual(rows.map((r) => r.id).sort());
+      await expectLedgerConsistent(orm, wallet.walletId);
+
+      async function walletRow(): Promise<{ balance: string }> {
+        return other.em.getKnex()('wallets').where({ id: wallet.walletId }).first('balance');
+      }
+    } finally {
+      // Libera (e desfaz) qualquer transação ainda parada no trigger antes do DROP, que esperaria o lock dela.
+      await knex.raw('update test_commit_gate set released = true, fail = true');
+      await eventually(async () => {
+        const { rows } = await knex.raw(`select 1 from pg_stat_activity where wait_event = 'PgSleep'`);
+        expect(rows).toHaveLength(0);
+      }, 5_000);
+      await knex.raw('drop trigger if exists hold_before_commit on inbox_messages');
+      await knex.raw('drop function if exists hold_before_commit()');
+      await knex.raw('drop table if exists test_commit_gate');
+    }
+  }, 30_000);
+
   it('exceção depois de publicar e antes do commit → outra instância republica o mesmo eventId; marcado uma vez', async () => {
     const [event] = await insertEvents(orm, [randomUUID()], 1);
     const { logger } = captureLogger();

@@ -227,6 +227,67 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await expectLedgerConsistent(orm, wallet.walletId);
   });
 
+  // CHALLENGE §6.3: OPENING é interno, nem a API nem a fila podem submetê-lo.
+  it('OPENING pela fila: DLQ INVALID_PAYLOAD, nada gravado e saldo intacto', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    await start();
+    await send(sqs, queues.queueUrl, envelope(wallet, { data: { kind: 'OPENING', money: { amount: '50.00', currency: 'BRL' } } }));
+
+    await eventually(async () => expect((await readDlq(sqs, queues.dlqUrl)).map((d) => d.reason)).toEqual(['INVALID_PAYLOAD']));
+    await expectDrained();
+    expect(await countRows(orm, 'wager_transactions')).toBe(1); // só a OPENING do seed
+    expect(await countRows(orm, 'inbox_messages')).toBe(0);
+    expect(await countRows(orm, 'outbox_messages')).toBe(0);
+    expect(await balance(wallet.walletId)).toBe('100.00');
+    await expectLedgerConsistent(orm, wallet.walletId);
+  });
+
+  // CHALLENGE §12: logs JSON com correlationId, messageId, transactionId, walletId e providerId,
+  // sem dados sensíveis nem payload financeiro (valor, player, rodada, jogo).
+  it('logs do processamento: campos de correlação presentes, sem valores nem payload', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    type Logs = { logger: Record<'info' | 'warn' | 'error', (...a: unknown[]) => void> };
+    const lines: Array<Record<string, unknown>> = [];
+    const capture = ({ logger }: Logs) => {
+      for (const level of ['info', 'warn', 'error'] as const) {
+        const original = logger[level].bind(logger);
+        logger[level] = (fields: unknown, ...rest: unknown[]) => {
+          if (typeof fields === 'object' && fields !== null) lines.push(fields as Record<string, unknown>);
+          original(fields, ...rest);
+        };
+      }
+    };
+    // Os dois loggers do caminho: o do use case instrumentado (o mesmo da produção) e o do consumidor.
+    const app = await start({ wrapProcess: (real) => (capture(real as unknown as Logs), real) });
+    capture(app.get(WagerConsumer) as unknown as Logs);
+    const message = envelope(wallet, {
+      correlationId: 'corr-log-1',
+      data: { money: { amount: '37.41', currency: 'BRL' }, roundId: 'round-secret-r1', gameId: 'game-secret-g1' },
+    });
+    await send(sqs, queues.queueUrl, message);
+
+    await eventually(async () => expect(lines.some((l) => l.event === 'sqs_message_acked')).toBe(true));
+    const transactionId = (await orm.em.getKnex()('wager_transactions').where({ kind: 'BET' }).first('id')).id as string;
+    expect(lines.find((l) => l.event === 'wager_transaction_processed')).toMatchObject({
+      correlationId: 'corr-log-1',
+      messageId: message.messageId,
+      transactionId,
+      walletId: wallet.walletId,
+      providerId: 'provider-a',
+      status: 'PROCESSED',
+    });
+    expect(lines.find((l) => l.event === 'sqs_message_acked')).toMatchObject({
+      correlationId: 'corr-log-1',
+      messageId: message.messageId,
+      transactionId,
+      outcome: 'PROCESSED',
+    });
+    const raw = JSON.stringify(lines);
+    for (const sensitive of ['37.41', '62.59', wallet.playerId, 'round-secret-r1', 'game-secret-g1', '"money"', '"amount"', '"data"']) {
+      expect(raw, `log contém ${sensitive}`).not.toContain(sensitive);
+    }
+  });
+
   it('envelope que estoura o parser (aninhamento profundo): DLQ INVALID_ENVELOPE, não loop', async () => {
     const depth = 60_000;
     const body = `{"messageId":"m-deep","type":"WagerTransactionRequested","occurredAt":"2026-11-07T12:00:00Z","data":{"idempotencyKey":"k","x":${'['.repeat(depth)}${']'.repeat(depth)}}}`;

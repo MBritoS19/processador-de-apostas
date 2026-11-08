@@ -453,4 +453,29 @@ describe('schema — constraints e triggers', () => {
       );
     });
   });
+
+  // CHALLENGE §5.1 / §14: dinheiro nunca é float. Toda coluna de valor é numeric(20,2), e o schema
+  // não tem nenhuma coluna de ponto flutuante ou do tipo `money`.
+  describe('tipos monetários', () => {
+    it('toda coluna de valor é numeric(20,2) e não há float, real, double ou money no schema', async () => {
+      const { rows } = await db().raw<{ rows: { col: string; type: string }[] }>(
+        `select table_name || '.' || column_name as col,
+                data_type || coalesce('(' || numeric_precision || ',' || numeric_scale || ')', '') as type
+           from information_schema.columns
+          where table_schema = 'public'
+            and (column_name ~ '(amount|balance)' or data_type in ('numeric', 'real', 'double precision', 'money'))
+          order by 1`,
+      );
+      expect(rows).toEqual(
+        [
+          'wager_transactions.amount',
+          'wager_transactions.observed_balance',
+          'wallet_ledger_entries.amount',
+          'wallet_ledger_entries.balance_after',
+          'wallet_ledger_entries.balance_before',
+          'wallets.balance',
+        ].map((col) => ({ col, type: 'numeric(20,2)' })),
+      );
+    });
+  });
 });
