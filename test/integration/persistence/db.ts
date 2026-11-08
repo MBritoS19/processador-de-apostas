@@ -1,5 +1,5 @@
 import { expect } from 'bun:test';
-import { MikroORM } from '@mikro-orm/postgresql';
+import { MikroORM, type Knex } from '@mikro-orm/postgresql';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
 import { buildMikroOrmConfig } from '../../../src/infrastructure/persistence/mikro-orm.config';
@@ -17,7 +17,7 @@ export async function openOrm(): Promise<MikroORM> {
 export async function truncateAll(orm: MikroORM): Promise<void> {
   await orm.em
     .getKnex()
-    .raw('truncate wallets, wager_transactions, wallet_ledger_entries, inbox_messages, outbox_messages cascade');
+    .raw('truncate wallets, wager_transactions, wallet_ledger_entries, inbox_messages, outbox_messages, accounts, journal_entries, journal_postings cascade');
 }
 
 /** Garante que o banco rejeitou com o SQLSTATE (e a constraint, quando houver) esperados. */
@@ -140,4 +140,65 @@ export async function expectLedgerConsistent(orm: MikroORM, walletId: string): P
     [walletId],
   );
   expect(orphans.rows).toEqual([]);
+}
+
+/** Conta do diário pela chave natural (moeda à parte). */
+export type JournalAccount = { kind: 'PLAYER'; walletId: string } | { kind: 'PROVIDER_HOUSE'; providerId: string } | { kind: 'FUNDING' };
+
+/** Id da conta; cria se faltar (SQL direto, sem concorrência: só para semear testes). */
+export async function accountId(knex: Knex, account: JournalAccount, currency: string): Promise<string> {
+  const key = {
+    kind: account.kind,
+    currency,
+    wallet_id: account.kind === 'PLAYER' ? account.walletId : null,
+    provider_id: account.kind === 'PROVIDER_HOUSE' ? account.providerId : null,
+  };
+  const found = await knex('accounts').where(key).first<{ id: string } | undefined>('id');
+  if (found) return found.id;
+  const id = randomUUID();
+  await knex('accounts').insert({ id, ...key, created_at: T0 });
+  return id;
+}
+
+export interface JournalPostingSeed {
+  account: JournalAccount;
+  direction: 'DEBIT' | 'CREDIT';
+  amount: string;
+}
+
+/** Lançamento de diário com as pernas dadas. Devolve o id do lançamento. */
+export async function insertJournal(
+  knex: Knex,
+  props: { transactionId: string; currency?: string; postings: JournalPostingSeed[] },
+): Promise<string> {
+  const currency = props.currency ?? 'BRL';
+  const id = randomUUID();
+  await knex('journal_entries').insert({ id, wager_transaction_id: props.transactionId, currency, created_at: T0 });
+  for (const posting of props.postings) {
+    await knex('journal_postings').insert({
+      id: randomUUID(),
+      journal_entry_id: id,
+      account_id: await accountId(knex, posting.account, currency),
+      direction: posting.direction,
+      amount: posting.amount,
+      currency,
+    });
+  }
+  return id;
+}
+
+/** Lançamento padrão: perna PLAYER com a direção do ledger; contrapartida FUNDING (OPENING) ou HOUSE do provider. */
+export function standardPostings(props: {
+  walletId: string;
+  kind: string;
+  providerId: string;
+  direction: 'DEBIT' | 'CREDIT';
+  amount: string;
+}): JournalPostingSeed[] {
+  const counterpart: JournalAccount =
+    props.kind === 'OPENING' ? { kind: 'FUNDING' } : { kind: 'PROVIDER_HOUSE', providerId: props.providerId };
+  return [
+    { account: { kind: 'PLAYER', walletId: props.walletId }, direction: props.direction, amount: props.amount },
+    { account: counterpart, direction: props.direction === 'DEBIT' ? 'CREDIT' : 'DEBIT', amount: props.amount },
+  ];
 }

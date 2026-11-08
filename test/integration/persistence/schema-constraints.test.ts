@@ -468,6 +468,7 @@ describe('schema — constraints e triggers', () => {
       );
       expect(rows).toEqual(
         [
+          'journal_postings.amount',
           'wager_transactions.amount',
           'wager_transactions.observed_balance',
           'wallet_ledger_entries.amount',
