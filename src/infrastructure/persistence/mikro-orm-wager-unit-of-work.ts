@@ -188,11 +188,13 @@ class MikroOrmWagerProcessingRepository implements WagerProcessingRepository {
   }
 
   async findDuePendingReferences(now: Date, limit: number): Promise<PendingReferenceCandidate[]> {
-    // Servida pelo índice parcial ix_wager_tx_reference_check_due.
+    // Servida pelo índice parcial ix_wager_tx_reference_check_due. Desempate por (created_at, id): sem ele,
+    // pendentes que vencem no mesmo instante saem em ordem indefinida, e o desfecho de uma pendente que
+    // referencia outra muda com a ordem (ARCHITECTURE.md → "Worker de referências pendentes").
     const rows = await this.em.execute<Array<{ id: string; wallet_id: string; player_id: string }>>(
       `select id, wallet_id, player_id from wager_transactions
        where status = 'PENDING_REFERENCE' and next_reference_check_at <= ?
-       order by next_reference_check_at
+       order by next_reference_check_at, created_at, id
        limit ?`,
       [now, limit],
     );

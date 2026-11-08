@@ -237,6 +237,9 @@ describe('worker de referências pendentes (Postgres real)', () => {
     fx = buildPendingFixture(orm, clock, { ttlMs: 30_000 });
     const wallet = await seedWallet(orm, '100.00');
     await submit(wallet, { externalTransactionId: 'rb-1', kind: 'ROLLBACK', referenceExternalTransactionId: 'rf-1', money: brl('30.00') });
+    // Chegada real: o REFUND chega depois. No mesmo instante, o desempate cairia no id (UUID aleatório) e o
+    // desfecho do rb-1 dependeria dele (ver o teste de empate abaixo).
+    clock.advance(1);
     await submit(wallet, { externalTransactionId: 'rf-1', kind: 'REFUND', referenceExternalTransactionId: 'bet-1', money: brl('30.00') });
 
     clock.advance(5_000);
@@ -250,6 +253,44 @@ describe('worker de referências pendentes (Postgres real)', () => {
     }
     expect(await pendingCount(orm)).toBe(0);
     await expectLedgerConsistent(orm, wallet.walletId);
+  });
+
+  describe('empate em next_reference_check_at: ordem determinística (created_at, depois id)', () => {
+    const forceDueAt = (at: Date) =>
+      orm.em.getKnex()('wager_transactions').where({ status: 'PENDING_REFERENCE' }).update({ next_reference_check_at: at });
+
+    it('a pendente mais antiga sai primeiro; o ROLLBACK que referencia o REFUND pendente expira como REFERENCE_NOT_FOUND', async () => {
+      // Sem o desempate, a ordem do empate era indefinida: resolver o REFUND antes deixava o ROLLBACK
+      // como REFERENCE_NOT_PROCESSED (reproduzido 100% forçando essa ordem).
+      fx = buildPendingFixture(orm, clock, { ttlMs: 30_000 });
+      const wallet = await seedWallet(orm, '100.00');
+      await submit(wallet, { externalTransactionId: 'rb-1', kind: 'ROLLBACK', referenceExternalTransactionId: 'rf-1', money: brl('30.00') });
+      clock.advance(1);
+      await submit(wallet, { externalTransactionId: 'rf-1', kind: 'REFUND', referenceExternalTransactionId: 'bet-1', money: brl('30.00') });
+      await forceDueAt(new Date(T0.getTime() + 10_000));
+
+      clock.advance(35_000);
+      const rb = await txByExternal(orm, 'rb-1');
+      const rf = await txByExternal(orm, 'rf-1');
+      expect(rb.next_reference_check_at).toEqual(rf.next_reference_check_at);
+      expect((await fx.resolver.findDue(10)).map((c) => c.id)).toEqual([rb.id, rf.id]);
+
+      expect(await fx.worker.runOnce()).toEqual({ candidates: 2, progressed: 2 });
+      for (const ext of ['rb-1', 'rf-1']) {
+        expect(await txByExternal(orm, ext)).toMatchObject({ status: 'REJECTED', failure_code: FailureCode.ReferenceNotFound });
+      }
+      await expectLedgerConsistent(orm, wallet.walletId);
+    });
+
+    it('mesmo next_reference_check_at e mesmo created_at: desempata pelo id', async () => {
+      const wallet = await seedWallet(orm, '100.00');
+      for (const ext of ['a-1', 'a-2', 'a-3']) {
+        await submit(wallet, { externalTransactionId: ext, kind: 'ROLLBACK', referenceExternalTransactionId: `bet-${ext}`, money: brl('1.00') });
+      }
+      await forceDueAt(T0);
+      const ids = await Promise.all(['a-1', 'a-2', 'a-3'].map(async (ext) => (await txByExternal(orm, ext)).id));
+      expect((await fx.resolver.findDue(10)).map((c) => c.id)).toEqual([...ids].sort());
+    });
   });
 
   it('caminho rápido: a BET antecipa só as pendentes da mesma wallet que a referenciam (o trigger permite o UPDATE)', async () => {
