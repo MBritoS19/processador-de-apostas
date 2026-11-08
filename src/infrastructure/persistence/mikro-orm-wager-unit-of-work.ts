@@ -1,6 +1,7 @@
 import { LockMode } from '@mikro-orm/core';
 import type { EntityManager } from '@mikro-orm/postgresql';
 import {
+  JournalIntegrityError,
   TransientPersistenceError,
   UniqueViolationError,
   WalletVersionConflictError,
@@ -10,11 +11,13 @@ import {
   type WagerUnitOfWork,
 } from '../../application/ports/wager-unit-of-work';
 import type { InboxMessage } from '../../domain/inbox-message';
+import type { JournalEntry } from '../../domain/journal-entry';
 import type { OutboxMessage } from '../../domain/outbox-message';
 import { REVERSAL_KINDS, WagerTransactionStatus, type WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
 import type { WalletLedgerEntry } from '../../domain/wallet-ledger-entry';
 import { isNetworkError } from '../network-errors';
+import { insertJournalEntry } from './journal.persistence';
 import { InboxMessageRecord, OutboxMessageRecord, toInboxMessageRecord, toOutboxMessageRecord } from './messages.persistence';
 import { WagerTransactionRecord, toWagerTransaction, toWagerTransactionRecord } from './wager-transaction.persistence';
 import { LedgerEntryRecord, toLedgerEntryRecord } from './wallet-ledger-entry.persistence';
@@ -71,9 +74,13 @@ const EXPECTED_UNIQUE_VIOLATIONS: Readonly<Record<string, UniqueViolationKind>> 
   uq_wallets_player_currency: 'wallet',
 };
 
+/** Constraint trigger do diário (migration `…20261109000000_double_entry_journal`): violação é permanente. */
+const JOURNAL_BALANCED_CONSTRAINT = 'trg_journal_balanced';
+
 /** Traduz erros do driver/ORM para os erros da porta. Exportada para teste. */
 export function translatePersistenceError(error: unknown): unknown {
   const { code, constraint, name } = (error ?? {}) as { code?: unknown; constraint?: unknown; name?: unknown };
+  if (code === '23514' && constraint === JOURNAL_BALANCED_CONSTRAINT) return new JournalIntegrityError({ cause: error });
   if (code === '23505' && typeof constraint === 'string' && Object.hasOwn(EXPECTED_UNIQUE_VIOLATIONS, constraint)) {
     return new UniqueViolationError(EXPECTED_UNIQUE_VIOLATIONS[constraint] as UniqueViolationKind, { cause: error });
   }
@@ -151,6 +158,10 @@ class MikroOrmWagerProcessingRepository implements WagerProcessingRepository {
 
   async insertLedgerEntry(entry: WalletLedgerEntry): Promise<void> {
     await this.em.insert(LedgerEntryRecord, toLedgerEntryRecord(entry));
+  }
+
+  async insertJournalEntry(entry: JournalEntry): Promise<void> {
+    await insertJournalEntry(this.em, entry);
   }
 
   async insertOutbox(messages: readonly OutboxMessage[]): Promise<void> {

@@ -23,7 +23,12 @@ export type DivergenceType =
   /** Transação PROCESSED com mais de um lançamento (o extra só pode estar em outra wallet: o schema impede dois na mesma). */
   | 'PROCESSED_WITH_MULTIPLE_ENTRIES'
   /** O saldo guardado difere da soma do ledger. */
-  | 'BALANCE_MISMATCH';
+  | 'BALANCE_MISMATCH'
+  /**
+   * O saldo da conta PLAYER no diário de partidas dobradas difere do saldo guardado. Junto com
+   * BALANCE_MISMATCH, cobre a invariante dos três saldos: diário == wallet.balance == ledger.
+   */
+  | 'JOURNAL_BALANCE_MISMATCH';
 
 export interface Divergence {
   type: DivergenceType;
@@ -40,6 +45,8 @@ export type ReconcileWalletResult =
       type: 'Reconciled';
       storedBalance: MoneyProps;
       calculatedBalance: MoneyProps;
+      /** Saldo da conta PLAYER no diário de partidas dobradas. */
+      journalBalance: MoneyProps;
       difference: MoneyProps;
       consistent: boolean;
       checkedEntries: number;
@@ -82,11 +89,14 @@ export class ReconcileWallet {
     }
 
     if (!stored.equals(calculated)) divergences.push({ type: 'BALANCE_MISMATCH' });
+    const journal = Money.from({ amount: snapshot.journalBalance, currency: snapshot.currency });
+    if (!stored.equals(journal)) divergences.push({ type: 'JOURNAL_BALANCE_MISMATCH' });
 
     return {
       type: 'Reconciled',
       storedBalance: stored.toJSON(),
       calculatedBalance: calculated.toJSON(),
+      journalBalance: journal.toJSON(),
       difference: stored.subtract(calculated).toJSON(),
       consistent: divergences.length === 0,
       checkedEntries: snapshot.entries.length,

@@ -20,7 +20,7 @@ interface EntrySqlRow {
 }
 
 /**
- * Lê wallet, lançamentos e transações PROCESSED num único snapshot (REPEATABLE READ, READ ONLY),
+ * Lê wallet, lançamentos, transações PROCESSED e o saldo da conta PLAYER no diário num único snapshot (REPEATABLE READ, READ ONLY),
  * sem lock: a reconciliação não bloqueia escritas e não vê um commit pela metade.
  * Custo O(lançamentos + transações) da wallet; ver ARCHITECTURE.md → "Reconciliação".
  */
@@ -65,7 +65,17 @@ export class PostgresWalletReconciliationReader implements WalletReconciliationR
         )
       ).rows.map((row) => ({ transactionId: row.transaction_id, kind: row.kind, entries: Number(row.entries) }));
 
-      return { balance: wallet.balance, currency: wallet.currency, entries, processed };
+      // Saldo da conta PLAYER no diário, no mesmo snapshot (servido por ux_accounts_player e ix_postings_account).
+      const [journal] = (
+        await trx.raw<{ rows: Array<{ balance: string }> }>(
+          `select coalesce(sum(case p.direction when 'CREDIT' then p.amount else -p.amount end), 0)::numeric(20,2)::text as balance
+             from accounts a join journal_postings p on p.account_id = a.id
+            where a.kind = 'PLAYER' and a.wallet_id = ?`,
+          [walletId],
+        )
+      ).rows;
+
+      return { balance: wallet.balance, currency: wallet.currency, journalBalance: journal?.balance ?? '0.00', entries, processed };
     });
   }
 }

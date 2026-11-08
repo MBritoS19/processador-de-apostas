@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/MBritoS19/processador-de-apostas/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MBritoS19/processador-de-apostas/actions/workflows/ci.yml)
 
-Serviço financeiro que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) recebidas de provedores por HTTP e por SQS. Saldo, ledger, inbox e outbox são gravados na mesma transação SQL, os eventos saem depois do commit por um outbox publisher, e o serviço funciona com várias instâncias em paralelo.
+Serviço financeiro que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) recebidas de provedores por HTTP e por SQS. Saldo, ledger, diário de partidas dobradas, inbox e outbox são gravados na mesma transação SQL, os eventos saem depois do commit por um outbox publisher, e o serviço funciona com várias instâncias em paralelo.
 
 ```mermaid
 flowchart LR
@@ -14,7 +14,7 @@ flowchart LR
     subgraph TX [Uma transação SQL]
         direction TB
         L[FOR UPDATE na wallet] --> R[regras + idempotência]
-        R --> W[transação + saldo + ledger<br/>+ inbox + outbox]
+        R --> W[transação + saldo + ledger<br/>+ diário + inbox + outbox]
     end
     U --> TX
     TX -->|COMMIT| DB[(PostgreSQL)]

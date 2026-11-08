@@ -251,3 +251,31 @@ Primeiro a **0**, que mostra quanto do problema é ambiente. Depois a **2**, bar
 - **Competição por CPU.** As frias passaram a fazer 11× mais operações na mesma máquina (gerador, 3 instâncias e Postgres juntos, ver "Fatores do ambiente"), o que também deixa mais lento cada ciclo da quente. O p50 das frias subiu (+34%) pelo mesmo motivo.
 
 **Se o assunto voltar** (não implementado): trocar o mutex por um semáforo de 2–3 vagas por wallet e por instância. Isso mantém o pipeline no lock da linha e ainda limita a fatia do pool que uma wallet ocupa. Também dá para descontar do orçamento só o tempo no banco, não a espera local. As duas opções precisam ser medidas com o mesmo cenário e o mesmo critério.
+
+## Diário de partidas dobradas: medição
+
+**Mudança medida.** Branch `feat/partidas-dobradas` (commit `e3ad728`): cada transação que move saldo passa a gravar também o lançamento de diário. São +1 consulta de contas e +1 INSERT (lançamento e pernas) por transação, e o constraint trigger deferido `trg_journal_balanced` roda 3 vezes no COMMIT. Desenho em ARCHITECTURE.md → "Diário de partidas dobradas".
+
+**Método.** O mesmo da medição do mutex: cenário `quente-frias` (50 clientes HTTP numa wallet disputada + 10 em 300 wallets frias, 3 instâncias, aquecimento de 10s, janela de 45s, seed 20261108). Foram 3 rodadas na `main` (`1052017`, numa worktree destacada) e 3 na branch, **alternadas** na mesma sessão da máquina (2026-11-08, 17:50–18:00), e a comparação usa as **medianas**. Antes de cada rodada da `main`, a migration do diário foi revertida no `wagering_test`, para que a `main` rodasse sobre o próprio schema; a rodada da branch a reaplica. JSONs em [`docs/carga/partidas-dobradas/`](carga/partidas-dobradas/) (`antes-N.json`, `depois-N.json`); a tabela sai de [`compare.ts`](carga/partidas-dobradas/compare.ts).
+
+**Critério de merge, fixado pelo autor antes da medição:** p95 do `quente-frias` até +20% sobre a `main`, sem erros novos.
+
+| Métrica (mediana de 3) | Antes (`main`) | Depois (branch) | Δ |
+|---|---:|---:|---:|
+| **p95 geral (ms)** | 2.192 | 2.603 | **+18,7%** |
+| p50 geral (ms) | 63,1 | 70,4 | +11,5% |
+| p99 geral (ms) | 2.544 | 2.870 | +12,8% |
+| Quente p95 (ms) | 2.278 | 2.646 | +16,1% |
+| Frias p95 (ms) | 1.750 | 2.020 | +15,4% |
+| Quente PROCESSED/s | 70,6 | 58,4 | −17,2% |
+| Frias ops/s | 18,5 | 14,9 | −19,4% |
+| Transações/s (total) | 89,1 | 73,4 | −17,7% |
+| Outbox lag p95 (ms) | 31.484 | 19.600 | −37,7% |
+| Erros HTTP (5xx/rede), 4xx inesperados, 503 | 0 / 0 / 0 | 0 / 0 / 0 | sem erros novos |
+| Consistência ao fim (inclui as checagens do diário na branch) | ok ×3 | ok ×3 | — |
+
+**Resultado: critério atingido, com pouca folga.** O p95 geral subiu 18,7%, abaixo do limite de 20%, e não apareceu nenhum erro. As três rodadas de cada lado ficaram próximas entre si (p95 geral: 2.042–2.249 ms antes, 2.581–2.608 ms depois), então a diferença não é ruído de uma rodada.
+
+**O que o critério não cobre: a vazão caiu ~18%.** Os clientes são de laço fechado (enviam, esperam e enviam de novo), então latência maior e vazão menor são o mesmo efeito visto de dois lados. O custo está dentro da seção crítica do lock da wallet: as consultas extras e o trigger no COMMIT alongam cada transação, e numa wallet disputada isso limita diretamente as transações/s. O outbox lag menor é consequência da vazão menor (menos eventos por segundo para publicar), não uma melhoria.
+
+**Se o custo precisar cair** (não implementado, cada item exige nova medição com o mesmo cenário): disparar o trigger só pelas pernas e não também pelo lançamento (2 execuções em vez de 3, mantendo o lançamento sem pernas detectado pela reconciliação); guardar em cache, por processo, os ids das contas HOUSE e FUNDING, que são imutáveis (append-only), e consultar só a PLAYER; juntar a consulta de contas e o INSERT num único statement.

@@ -3,7 +3,7 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
 import { buildMikroOrmConfig } from '../../../src/infrastructure/persistence/mikro-orm.config';
-import { PG, T0, expectPgError, seedWallet, transactionRow } from '../persistence/db';
+import { PG, T0, expectPgError, ledgerRow, processed, seedWallet, transactionRow, walletRow } from '../persistence/db';
 
 /** Postgres real (docker compose), banco wagering_test via .env.test. */
 describe('migrations', () => {
@@ -18,7 +18,12 @@ describe('migrations', () => {
 
   /** Tabelas e funções criadas pelas migrations, em ordem alfabética. */
   const SCHEMA_OBJECTS = [
+    'accounts',
     'inbox_messages',
+    'journal_append_only',
+    'journal_entries',
+    'journal_entry_balanced',
+    'journal_postings',
     'outbox_messages',
     'wager_transactions',
     'wager_transactions_guard',
@@ -204,6 +209,103 @@ describe('migrations', () => {
       .execute<Array<{ seq: string }>>('select max(seq)::text as seq from outbox_messages');
     expect(last?.seq).toBe('4');
     await knex.raw('truncate outbox_messages');
+  });
+
+  describe('diário de partidas dobradas', () => {
+    const JOURNAL = 'Migration20261109000000_double_entry_journal';
+    const JOURNAL_TABLES = ['accounts', 'journal_entries', 'journal_postings'];
+    const CORE = 'truncate wallets, wager_transactions, wallet_ledger_entries, inbox_messages, outbox_messages cascade';
+
+    const journalTables = async () =>
+      (
+        await orm.em.getConnection().execute<{ name: string }[]>(
+          `select table_name as name from information_schema.tables
+            where table_schema = 'public' and table_name in ('accounts', 'journal_entries', 'journal_postings') order by name`,
+        )
+      ).map((row) => row.name);
+
+    /** Wallets antes da migration: BRL com OPENING, BET, WIN e LOSS; EUR só com OPENING; BRL sem lançamento. */
+    async function seedBeforeJournal() {
+      const knex = orm.em.getKnex();
+      const brl = await seedWallet(orm, '100.00', {}, { journal: false });
+      const eur = await seedWallet(orm, '50.00', { currency: 'EUR' }, { journal: false });
+      const empty = walletRow();
+      await knex('wallets').insert(empty);
+      const bet = processed({ wallet_id: brl.walletId, player_id: brl.playerId, kind: 'BET', amount: '30.00', observed_balance: '70.00' });
+      const win = processed({ wallet_id: brl.walletId, player_id: brl.playerId, kind: 'WIN', amount: '45.00', observed_balance: '115.00' });
+      const loss = processed({ wallet_id: brl.walletId, player_id: brl.playerId, kind: 'LOSS', amount: '0.00', observed_balance: '115.00' });
+      await knex.transaction(async (trx) => {
+        await trx('wager_transactions').insert([bet, win, loss]);
+        await trx('wallet_ledger_entries').insert(
+          ledgerRow({ wallet_id: brl.walletId, transaction_id: bet.id as string, direction: 'DEBIT', amount: '30.00', balance_before: '100.00', balance_after: '70.00' }),
+        );
+        await trx('wallet_ledger_entries').insert(
+          ledgerRow({ wallet_id: brl.walletId, transaction_id: win.id as string, direction: 'CREDIT', amount: '45.00', balance_before: '70.00', balance_after: '115.00' }),
+        );
+        await trx('wallets').where({ id: brl.walletId }).update({ balance: '115.00', version: 3 });
+      });
+      return { brl, eur, emptyWalletId: empty.id as string };
+    }
+
+    it('up cria FUNDING por moeda e reconstrói o diário a partir do ledger; down remove só o diário', async () => {
+      const migrator = orm.getMigrator();
+      await migrator.up();
+      await migrator.down({ to: JOURNAL });
+      expect(await journalTables()).toEqual([]);
+      const knex = orm.em.getKnex();
+      await knex.raw(CORE);
+      const { brl, eur, emptyWalletId } = await seedBeforeJournal();
+
+      await migrator.up();
+      expect(await journalTables()).toEqual(JOURNAL_TABLES);
+
+      const funding = await knex('accounts').where({ kind: 'FUNDING' }).orderBy('currency').pluck('currency');
+      expect(funding).toEqual(['BRL', 'EUR', 'USD']);
+      const players = await knex('accounts').where({ kind: 'PLAYER' }).pluck('wallet_id');
+      expect(players.sort()).toEqual([brl.walletId, eur.walletId].sort());
+      expect(players).not.toContain(emptyWalletId);
+      const houses = await knex('accounts').where({ kind: 'PROVIDER_HOUSE' }).select('provider_id', 'currency');
+      expect(houses).toEqual([{ provider_id: 'provider-a', currency: 'BRL' }]);
+
+      // Um lançamento por lançamento do ledger (LOSS fica de fora), cada um com débito = crédito.
+      const ledgerCount = await knex('wallet_ledger_entries').count<{ count: string }[]>('* as count');
+      const journalCount = await knex('journal_entries').count<{ count: string }[]>('* as count');
+      expect(journalCount[0]!.count).toBe('4');
+      expect(journalCount[0]!.count).toBe(ledgerCount[0]!.count);
+
+      // Saldo da conta PLAYER no diário = wallets.balance.
+      const playerBalances = await orm.em.getConnection().execute<{ wallet_id: string; journal: string; balance: string }[]>(
+        `select a.wallet_id, sum(case p.direction when 'CREDIT' then p.amount else -p.amount end)::text as journal, w.balance::text as balance
+           from accounts a join journal_postings p on p.account_id = a.id join wallets w on w.id = a.wallet_id
+          where a.kind = 'PLAYER' group by a.wallet_id, w.balance`,
+      );
+      expect(playerBalances).toHaveLength(2);
+      for (const row of playerBalances) expect(row.journal).toBe(row.balance);
+      const brlRow = playerBalances.find((row) => row.wallet_id === brl.walletId);
+      expect(brlRow?.journal).toBe('115.00');
+
+      // Contrapartidas: HOUSE recebeu 30 e pagou 45; FUNDING BRL deu 100.
+      const counterparts = await orm.em.getConnection().execute<{ kind: string; currency: string; balance: string }[]>(
+        `select a.kind, a.currency, sum(case p.direction when 'CREDIT' then p.amount else -p.amount end)::text as balance
+           from accounts a join journal_postings p on p.account_id = a.id
+          where a.kind <> 'PLAYER' group by a.kind, a.currency order by a.kind, a.currency`,
+      );
+      expect(counterparts).toEqual([
+        { kind: 'FUNDING', currency: 'BRL', balance: '-100.00' },
+        { kind: 'FUNDING', currency: 'EUR', balance: '-50.00' },
+        { kind: 'PROVIDER_HOUSE', currency: 'BRL', balance: '-15.00' },
+      ]);
+
+      // down remove só o diário; o ledger continua intacto.
+      await migrator.down({ to: JOURNAL });
+      expect(await journalTables()).toEqual([]);
+      const ledgerAfter = await knex('wallet_ledger_entries').count<{ count: string }[]>('* as count');
+      expect(ledgerAfter[0]!.count).toBe(ledgerCount[0]!.count);
+
+      await migrator.up();
+      expect(await journalTables()).toEqual(JOURNAL_TABLES);
+      await knex.raw(`${CORE.replace(' cascade', '')}, accounts, journal_entries, journal_postings cascade`);
+    });
   });
 
   it('up é idempotente', async () => {

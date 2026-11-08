@@ -19,6 +19,8 @@ export interface ReconciliationTransactionRow {
 export interface WalletReconciliationSnapshot {
   balance: string;
   currency: string;
+  /** Saldo (crédito − débito) da conta PLAYER da wallet no diário de partidas dobradas; "0.00" sem conta. */
+  journalBalance: string;
   entries: ReconciliationEntryRow[];
   processed: ReconciliationTransactionRow[];
 }

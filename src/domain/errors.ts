@@ -40,3 +40,6 @@ export class InvalidTransactionStateError extends DomainError {
 
 /** Transição inválida em mensagem de inbox/outbox (ex.: publicar duas vezes). */
 export class InvalidMessageStateError extends DomainError {}
+
+/** Lançamento de diário inválido (desbalanceado, moeda mista, sem contrapartida): erro de programação. */
+export class InvalidJournalEntryError extends DomainError {}

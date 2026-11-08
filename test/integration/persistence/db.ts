@@ -1,5 +1,5 @@
 import { expect } from 'bun:test';
-import { MikroORM } from '@mikro-orm/postgresql';
+import { MikroORM, type Knex } from '@mikro-orm/postgresql';
 import { randomUUID } from 'node:crypto';
 import { loadConfig } from '../../../src/infrastructure/config/app-config';
 import { buildMikroOrmConfig } from '../../../src/infrastructure/persistence/mikro-orm.config';
@@ -17,7 +17,7 @@ export async function openOrm(): Promise<MikroORM> {
 export async function truncateAll(orm: MikroORM): Promise<void> {
   await orm.em
     .getKnex()
-    .raw('truncate wallets, wager_transactions, wallet_ledger_entries, inbox_messages, outbox_messages cascade');
+    .raw('truncate wallets, wager_transactions, wallet_ledger_entries, inbox_messages, outbox_messages, accounts, journal_entries, journal_postings cascade');
 }
 
 /** Garante que o banco rejeitou com o SQLSTATE (e a constraint, quando houver) esperados. */
@@ -92,11 +92,16 @@ export function ledgerRow(overrides: Row & { wallet_id: string; transaction_id: 
   };
 }
 
-/** Wallet BRL com saldo inicial, já com a transação OPENING e o lançamento CREDIT (como a Fase 4 fará). */
+/**
+ * Wallet BRL com saldo inicial, já com a transação OPENING, o lançamento CREDIT e o lançamento de
+ * diário (FUNDING → PLAYER), como o `OpenWallet` grava. `journal: false` só para semear antes da
+ * migration do diário.
+ */
 export async function seedWallet(
   orm: MikroORM,
   balance: string,
   overrides: Row = {},
+  options: { journal?: boolean } = {},
 ): Promise<{ walletId: string; openingId: string; playerId: string }> {
   const wallet = walletRow({ balance, ...overrides });
   const walletId = wallet.id as string;
@@ -117,6 +122,12 @@ export async function seedWallet(
     await trx('wallet_ledger_entries').insert(
       ledgerRow({ wallet_id: walletId, transaction_id: openingId, amount: balance, currency, balance_after: balance }),
     );
+    if (options.journal === false) return;
+    await insertJournal(trx, {
+      transactionId: openingId,
+      currency,
+      postings: standardPostings({ walletId, kind: 'OPENING', providerId: 'internal', direction: 'CREDIT', amount: balance }),
+    });
   });
   return { walletId, openingId, playerId };
 }
@@ -140,4 +151,102 @@ export async function expectLedgerConsistent(orm: MikroORM, walletId: string): P
     [walletId],
   );
   expect(orphans.rows).toEqual([]);
+}
+
+/** Conta do diário pela chave natural (moeda à parte). */
+export type JournalAccount = { kind: 'PLAYER'; walletId: string } | { kind: 'PROVIDER_HOUSE'; providerId: string } | { kind: 'FUNDING' };
+
+/** Id da conta; cria se faltar (SQL direto, só para semear testes). */
+export async function accountId(knex: Knex, account: JournalAccount, currency: string): Promise<string> {
+  const key = {
+    kind: account.kind,
+    currency,
+    wallet_id: account.kind === 'PLAYER' ? account.walletId : null,
+    provider_id: account.kind === 'PROVIDER_HOUSE' ? account.providerId : null,
+  };
+  const find = () => knex('accounts').where(key).first<{ id: string } | undefined>('id');
+  const found = await find();
+  if (found) return found.id;
+  // Seeds em paralelo disputam a mesma FUNDING/HOUSE: o perdedor reaproveita a do vencedor.
+  await knex('accounts').insert({ id: randomUUID(), ...key, created_at: T0 }).onConflict().ignore();
+  return (await find())!.id;
+}
+
+export interface JournalPostingSeed {
+  account: JournalAccount;
+  direction: 'DEBIT' | 'CREDIT';
+  amount: string;
+}
+
+/** Lançamento de diário com as pernas dadas. Devolve o id do lançamento. */
+export async function insertJournal(
+  knex: Knex,
+  props: { transactionId: string; currency?: string; postings: JournalPostingSeed[] },
+): Promise<string> {
+  const currency = props.currency ?? 'BRL';
+  const id = randomUUID();
+  await knex('journal_entries').insert({ id, wager_transaction_id: props.transactionId, currency, created_at: T0 });
+  for (const posting of props.postings) {
+    await knex('journal_postings').insert({
+      id: randomUUID(),
+      journal_entry_id: id,
+      account_id: await accountId(knex, posting.account, currency),
+      direction: posting.direction,
+      amount: posting.amount,
+      currency,
+    });
+  }
+  return id;
+}
+
+/** Lançamento padrão: perna PLAYER com a direção do ledger; contrapartida FUNDING (OPENING) ou HOUSE do provider. */
+export function standardPostings(props: {
+  walletId: string;
+  kind: string;
+  providerId: string;
+  direction: 'DEBIT' | 'CREDIT';
+  amount: string;
+}): JournalPostingSeed[] {
+  const counterpart: JournalAccount =
+    props.kind === 'OPENING' ? { kind: 'FUNDING' } : { kind: 'PROVIDER_HOUSE', providerId: props.providerId };
+  return [
+    { account: { kind: 'PLAYER', walletId: props.walletId }, direction: props.direction, amount: props.amount },
+    { account: counterpart, direction: props.direction === 'DEBIT' ? 'CREDIT' : 'DEBIT', amount: props.amount },
+  ];
+}
+
+/**
+ * Invariante dos três saldos da wallet: saldo da conta PLAYER no diário == `wallets.balance` ==
+ * saldo reconstruído pelo ledger; e cada lançamento do ledger tem exatamente um lançamento de diário.
+ */
+export async function expectJournalConsistent(orm: MikroORM, walletId: string): Promise<void> {
+  const knex = orm.em.getKnex();
+  const [row] = await knex
+    .raw<{ rows: { balance: string; ledger: string; journal: string }[] }>(
+      `select w.balance::text as balance,
+              (select coalesce(sum(case l.direction when 'CREDIT' then l.amount else -l.amount end), 0)::numeric(20,2)::text
+                 from wallet_ledger_entries l where l.wallet_id = w.id) as ledger,
+              (select coalesce(sum(case p.direction when 'CREDIT' then p.amount else -p.amount end), 0)::numeric(20,2)::text
+                 from accounts a join journal_postings p on p.account_id = a.id
+                where a.kind = 'PLAYER' and a.wallet_id = w.id) as journal
+         from wallets w where w.id = ?`,
+      [walletId],
+    )
+    .then((r) => r.rows);
+  expect(row).toBeDefined();
+  expect({ ledger: row?.ledger, journal: row?.journal }).toEqual({ ledger: row!.balance, journal: row!.balance });
+
+  // Cada lançamento do ledger tem um lançamento de diário, e vice-versa.
+  const unmatched = await knex.raw<{ rows: unknown[] }>(
+    `select l.transaction_id from wallet_ledger_entries l
+       left join journal_entries j on j.wager_transaction_id = l.transaction_id
+      where l.wallet_id = ? and j.id is null
+     union all
+     select j.wager_transaction_id from journal_entries j
+       join wager_transactions t on t.id = j.wager_transaction_id
+       left join wallet_ledger_entries l on l.transaction_id = j.wager_transaction_id and l.wallet_id = t.wallet_id
+      where t.wallet_id = ? and l.id is null`,
+    [walletId, walletId],
+  );
+  expect(unmatched.rows).toEqual([]);
 }

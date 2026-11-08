@@ -27,7 +27,13 @@ export interface ReceiveOptions {
 }
 
 /** Motivos estáveis de envio para a DLQ (atributo `dlqReason`). */
-export type DlqReason = 'INVALID_ENVELOPE' | 'INVALID_PAYLOAD' | 'INBOX_PAYLOAD_MISMATCH' | 'MAX_ATTEMPTS_EXCEEDED';
+export type DlqReason =
+  | 'INVALID_ENVELOPE'
+  | 'INVALID_PAYLOAD'
+  | 'INBOX_PAYLOAD_MISMATCH'
+  | 'MAX_ATTEMPTS_EXCEEDED'
+  /** O diário de partidas dobradas recusou o lançamento: bug, sem retry. */
+  | 'JOURNAL_INTEGRITY_VIOLATION';
 
 const MAX_ATTRIBUTE_LENGTH = 256;
 
