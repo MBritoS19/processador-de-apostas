@@ -488,7 +488,7 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 | `VisibilityTimeout` no receive | 60s | pior caso de um lote: 10 mensagens do mesmo grupo em sequência × ~5s (`lock_timeout` 2s + releitura) |
 | `WaitTimeSeconds` | 20 | long polling: menos chamadas vazias |
 | Pausa do polling (banco/SQS fora) | `1s·2^(n−1)`, até 30s | não drenar a fila contra um banco fora do ar |
-| `SQS_SHUTDOWN_TIMEOUT_MS` | 25s | abaixo do `stop_grace_period` de 30s previsto para o serviço da aplicação (pendência: o compose ainda não tem esse serviço) |
+| `SQS_SHUTDOWN_TIMEOUT_MS` | 8s | um dos três prazos de shutdown que rodam em sequência; a soma cabe no orçamento de 25s, abaixo do `stop_grace_period` de 30s (§21, Fase 9; era 25s) |
 
 **Tolerância a falha transitória:** uma mensagem tem 5 tentativas separadas por 30+60+120+240 = 450s. Isso dá **~7,5 min** desde o primeiro recebimento até a DLQ. Quando a falha é `unavailable` (banco fora, pool esgotado) ou o próprio SQS falha, o loop também pausa o polling (1s, 2s, 4s… até 30s, e zera no primeiro lote sem falha de conexão). Assim a instância não sai recebendo e queimando tentativas de mensagens novas enquanto o banco está fora. Mensagens já recebidas seguem o backoff normal. Depois da DLQ, a recuperação é o redrive manual da DLQ para a fila principal (é seguro: a inbox e a idempotência impedem efeito duplicado).
 
@@ -509,15 +509,19 @@ O provedor decide se reenvia só pelo status, sem ler mensagem. O mapeamento val
 ### Shutdown (`SIGTERM`)
 
 `WagerConsumerModule.beforeApplicationShutdown`, que roda antes de o ORM e o cliente SQS fecharem (`onApplicationShutdown`), executa:
-1. para de buscar e acorda uma pausa em andamento;
+1. para de buscar, acorda uma pausa em andamento e **aborta o `ReceiveMessage` em andamento** (`abortSignal` do SDK; Fase 9), para que o long polling de até 20s não consuma o prazo de 8s (§21);
 2. espera o lote atual até `SQS_SHUTDOWN_TIMEOUT_MS`;
 3. no timeout, `ChangeMessageVisibility 0` em tudo o que não terminou.
+
+**Trade-off do abort:** cancelar no cliente não cancela o poll no servidor. Se uma mensagem chegar exatamente nesse intervalo, o SQS (e o LocalStack) pode entregá-la à conexão abortada, e ela fica em voo até a visibilidade expirar (60s) antes de voltar para outra instância. Não há perda nem efeito duplicado; o efeito é o mesmo de um processo que cai (testado). A alternativa seria esperar o poll terminar, o que exigiria `stop_grace_period` acima de 20s só para o consumidor.
 
 O processamento abandonado pode ainda commitar. A outra instância que pegar a mensagem cai na inbox ou na idempotência, e o resultado é um único efeito (testado). Um `start()` não abre um segundo loop enquanto o anterior não terminou. Os testes usam `app.close()`, que dispara os mesmos hooks. O vínculo sinal → hooks vem de `enableShutdownHooks()` em `main.ts` e não tem teste automatizado.
 
 ### Logs
 
 `sqs_message_acked`, `sqs_message_retry`, `sqs_message_dead_lettered`, `sqs_ack_failed`, `sqs_polling_paused`, entre outros. Todos com `sqsMessageId`, `receiveCount`, `messageId`, `correlationId` e, quando houver, `transactionId`, `outcome` ou `reason`. O log do use case também recebe o `messageId`. Nunca entram `data`, valores nem o `dlqDetail`.
+
+`sqs_message_acked` só é emitido **depois** do `DeleteMessage` bem-sucedido (Fase 9; antes saía antes do delete). Se o delete falha, sai só `sqs_ack_failed` (com o `outcome`), e a reentrega aparece depois como `sqs_message_acked` com `DUPLICATE_MESSAGE` (testado). Contar acks pelo log, portanto, conta acks reais.
 
 ### Limitações
 
@@ -646,7 +650,7 @@ Procedimento operacional:
 
 `OutboxPublisherModule.beforeApplicationShutdown` roda antes de o ORM e os clientes SQS fecharem:
 1. para de buscar e acorda a espera do intervalo (testado: `stop()` volta na hora, mesmo com intervalo de 60s);
-2. espera o lote em andamento commitar, até `OUTBOX_SHUTDOWN_TIMEOUT_MS` (25s, abaixo do grace period de 30s; testado);
+2. espera o lote em andamento commitar, até `OUTBOX_SHUTDOWN_TIMEOUT_MS` (8s; a soma dos três prazos de shutdown cabe no orçamento de 25s, §21; testado);
 3. se o prazo estourar:
    - loga `outbox_publisher_shutdown_timeout` e segue;
    - o lote abandonado não commita, e a sessão cai (pelo fechamento do pool ou pelo idle timeout);
@@ -745,7 +749,7 @@ O replay (mesma key e payload) devolve o estado persistido: depois da resoluçã
 | `PENDING_REFERENCE_POLL_INTERVAL_MS` | 1000 | espera só quando o lote vem vazio **ou nenhuma candidata avançou** (todas puladas/erro): sem laço quente com wallet ocupada ou bug |
 | `PENDING_REFERENCE_GAUGE_INTERVAL_MS` | 10000 | gauge de pendentes por intervalo, com ou sem carga |
 | `PENDING_REFERENCE_TTL_MS` | 3600000 | prazo da referência (acima) |
-| `PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS` | 25000 | abaixo do grace period de 30s |
+| `PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS` | 8000 | soma dos três prazos de shutdown ≤ `SHUTDOWN_BUDGET_MS` (25s) < grace period de 30s (§21) |
 
 - Mesmo padrão do outbox publisher (§19): `start`/`stop` no módulo, `stop` em `beforeApplicationShutdown` (antes de o ORM fechar), erro do ciclo inteiro (banco fora) → pausa `1s·2^(n−1)` até 30s.
 - Shutdown: para **entre candidatas**; a candidata em andamento commita (testado). Prazo estourado: loga `pending_reference_worker_shutdown_timeout`; a transação abandonada sofre rollback quando o pool fecha e outra instância a reprocessa.
@@ -755,3 +759,85 @@ O replay (mesma key e payload) devolve o estado persistido: depois da resoluçã
 
 - Erros inesperados repetidos em mais de `batchSize` candidatas ao mesmo tempo seguram o lote até cada uma atingir 5 erros e virar FAILED.
 - Uma pendente cuja referência está numa **wallet diferente** não é antecipada (é rejeitada com `REFERENCE_WALLET_MISMATCH` no próximo check normal).
+
+---
+
+## 21. Estratégia de testes (Fase 9)
+
+Postgres e LocalStack são **reais** em todas as suítes que não são unitárias (`docker compose up`). Nada mocka o banco nem a fila. Os testes de integração e de concorrência rodam no banco `wagering_test` (`.env.test`, com `NODE_ENV=test`). As filas são criadas com nome único por suíte e apagadas no fim.
+
+### O que cada suíte prova
+
+| Suíte | Comando | Prova | Tempo típico* |
+|---|---|---|---|
+| Unidade | `bun run test:unit` | `Money`, invariantes da `Wallet`, regras BET/WIN/LOSS/REFUND/ROLLBACK, conflito de moeda, payload divergente, máquina de estados, config (inclusive a recusa do `FAULT_INJECTION` fora de `NODE_ENV=test` e o orçamento de shutdown) | ~5s |
+| Integração | `bun run test:integration` | migrations e constraints; **atomicidade** (trigger real que derruba uma gravação no meio do commit, tanto no use case quanto na resolução pelo worker de pendentes: nada persiste, e o reenvio aplica uma vez); inbox e redelivery; retry e DLQ; worker morto depois do commit e antes do ack (no processo); publishers concorrentes; recuperação de sessão morta (`pg_terminate_backend`, idle timeout); shutdown gracioso, inclusive com long polling em andamento | ~1 min |
+| Concorrência | `bun run test:concurrency` | paralelismo real num processo: 80+80 sobre 100; a mesma BET 50x → 1 débito; mesma key em wallets diferentes; esgotar o saldo sem ficar negativo; dois publishers sobre a mesma outbox; dois workers de pendentes e worker + use case na mesma wallet | ~10s |
+| Multi-instância | `bun run test:multi` | itens 1, 4, 5 e 8 do CHALLENGE §13 com **processos reais** (ver abaixo) | ~40s |
+
+\* Máquina de desenvolvimento (Windows 11, Docker Desktop); o resumo das execuções está no `PROGRESSO.md`.
+
+**Invariante final:** `wallet.balance == saldo reconstruído pelo ledger`. É verificado por `expectLedgerConsistent` nos testes que movem saldo (no `wagering-http`, por um `afterEach` sobre todas as wallets, exceto no teste que corrompe o saldo de propósito) e, no multi, por SQL sobre todas as wallets. No banco, o constraint trigger deferido saldo × último lançamento (§11) também barra a divergência no commit.
+
+### Multi-instância (`test/multi`)
+
+- **Processos:** `Instance` sobe `bun src/main.ts` com `Bun.spawn`: PID, pool de conexões e memória próprios. Cada instância roda API, consumidor SQS, outbox publisher e worker de pendentes, sobre o mesmo Postgres e o mesmo LocalStack. A saída do pino é lida continuamente e contada **por vida do processo**: `start()` zera os contadores, e linhas tardias de uma vida anterior só vão para a cauda de diagnóstico.
+- **Roteiro:**
+  1. **Item 5:** uma instância `F` com `FAULT_INJECTION=exit_after_commit_before_ack` processa um BET pelo SQS e se mata com SIGKILL depois do commit e antes do `DeleteMessage`. Fica provado por SQL (transação, lançamento, inbox e 3 eventos pendentes), pela mensagem ainda na fila e pela ausência de `sqs_message_acked` na `F`. Depois sobem A, B e C; a reentrega cai na inbox (`DUPLICATE_MESSAGE`), sem segundo débito.
+  2. **Item 1 entre instâncias e canais:** a mesma aposta 50x em paralelo, sendo 30 por HTTP (10 em cada instância) e 20 por SQS (messageIds e grupos distintos, para as entregas correrem em paralelo). Resultado: 1 transação, 1 débito, um único `transactionId`.
+  3. **Item 4, carga mista:** cenário 80+80 em duas instâncias; *hot wallet* com 120 BETs de 10,00 sobre 1000,00 (metade por HTTP, em rodízio nas 3 instâncias; metade por SQS no mesmo grupo) → exatamente 100 aceitas e 20 rejeitadas; duplicatas SQS (mesmo messageId com dedup do broker distinto); 12 wallets aleatórias pela seed. O teste **falha** se alguma das 3 instâncias não tiver atendido HTTP e confirmado mensagens SQS.
+  4. **Item 8:** SIGKILL das 3 instâncias no meio da carga, reinício nas mesmas portas, onda 2 (REFUND/ROLLBACK antes da referência por HTTP e SQS, referência que nunca chega, replays em cada instância). O teste **falha** se alguma instância não atender HTTP e SQS depois do reinício.
+  5. **Quiescência**, seguida das verificações finais, todas por SQL:
+     - saldo == ledger e nenhum saldo negativo;
+     - uma linha por idempotency key e no máximo um lançamento por transação;
+     - nenhuma referência revertida duas vezes;
+     - lançamentos só em PROCESSED que move saldo, com valor igual ao da transação;
+     - toda transação terminal com exatamente um evento terminal do tipo certo, e todo lançamento com exatamente um `WalletBalanceChanged`;
+     - outbox toda publicada, todo `eventId` na fila de eventos e nada a mais;
+     - DLQ vazia e reconciliação HTTP consistente;
+     - saldos finais iguais aos calculados **pelo teste**, de forma independente.
+- **Por que o resultado não depende da ordem:** as cargas foram montadas para isso. Nas wallets aleatórias, a soma das 6 BETs pequenas cabe no saldo e as 2 grandes passam do saldo máximo possível. Na hot wallet, o saldo comporta exatamente 100 BETs. Qualquer intercalação dá o mesmo resultado final.
+- **Docker:** o profile `multi` do compose (`docker compose --profile multi up -d --build --wait`) sobe 3 réplicas da imagem em `127.0.0.1:3000-3002`, com `stop_grace_period: 30s`. Ele valida empacotamento e shutdown; a suíte `test:multi` usa processos locais, que permitem SIGKILL e leitura de log por instância. Validação manual em 2026-11-07:
+- build da imagem e `migrate` com saída 0;
+- 3 réplicas `healthy` com `/health/ready` 200 em 3000, 3001 e 3002;
+- `StopTimeout=30` e `NODE_ENV=production` nas três;
+- no `down`, cada réplica registrou `pending_reference_worker_stopped`, `outbox_publisher_stopped` e `sqs_consumer_stopped` (nessa ordem: os hooks são sequenciais) e saiu com código 0, sem `shutdown_timeout`, em ~4s no total, com o long polling de produção (20s) abortado.
+
+### Injeção de falha
+
+- `FAULT_INJECTION=exit_after_commit_before_ack` é a única falha injetada no código de produção, no ponto exato entre o commit e o `DeleteMessage` do consumidor, e só para resultado `PROCESSED`.
+- É aceita **só com `NODE_ENV=test`** (lista de permissão). Com `NODE_ENV` ausente, `production`, `prod`, `staging`, `TEST` ou qualquer outro valor, o `loadConfig` recusa e a aplicação não sobe (teste unitário). A imagem Docker fixa `NODE_ENV=production`.
+- As demais falhas são injetadas **de fora**: triggers reais do Postgres criados só dentro do teste (atomicidade), `pg_terminate_backend`, filas inexistentes, cliente SQS com falha programada (`SpyQueueClient`) e use case embrulhado que devolve transitório ou lança.
+
+### Determinismo
+
+- **Sem sleep como sincronização:** toda espera é `eventually(condição, prazo)` com mensagem do que se esperava, ou espera por evento (`/health/ready`, saída do processo, sessão bloqueada em `pg_stat_activity`). Sobram só o backoff do cliente HTTP e um intervalo de 300ms entre as duas leituras da quiescência, porque as contagens do SQS são aproximadas.
+- **Seed:** `MULTI_SEED` (inteiro; valor inválido derruba o teste) fixa os valores e a divisão HTTP/SQS da carga. A seed é impressa no início e, na falha, junto com o passo e a cauda de log de todas as instâncias (inclusive a `F`). A seed reproduz a **carga**, não a intercalação: o escalonamento entre processos não é determinístico, e por isso os resultados esperados independem da ordem.
+- **Relógio manual:** nos testes do worker de pendentes e da outbox, o tempo avança por `ManualClock` e o ciclo roda via `runOnce()`.
+- Processos filhos são mortos no `afterAll` e também no `exit` do `bun test`, mesmo se interrompido.
+
+### Shutdown: orçamento
+
+O Nest chama os `beforeApplicationShutdown` **módulo a módulo, em sequência** (`callBeforeShutdownHook` itera os módulos com `await`). Consumidor SQS, outbox publisher e worker de pendentes param um depois do outro, e o pior caso do shutdown é a **soma** dos três prazos.
+
+| Variável | Padrão |
+|---|---|
+| `SQS_SHUTDOWN_TIMEOUT_MS` | 8000 |
+| `OUTBOX_SHUTDOWN_TIMEOUT_MS` | 8000 |
+| `PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS` | 8000 |
+| `SHUTDOWN_BUDGET_MS` | 25000 |
+
+**Regra:** `soma dos três timeouts ≤ SHUTDOWN_BUDGET_MS < stop_grace_period` (30s no compose). O `loadConfig` recusa a soma acima do orçamento, e a aplicação não sobe (teste unitário). Quem aumentar o `stop_grace_period` do orquestrador pode aumentar o orçamento junto.
+
+**Por que 8s bastam:** cada componente só espera o trabalho em andamento. No consumidor, isso é o lote atual; o long poll em andamento é abortado (§18, com o trade-off). Na outbox, é um lote com envio limitado a 3s. No worker de pendentes, é uma candidata com `lock_timeout` de 2s. Estourado o prazo, o efeito continua seguro: a mensagem volta (visibilidade 0), o lote da outbox sofre rollback e é republicado, e a candidata é reprocessada por outra instância.
+
+**Trade-off:** parar os três em paralelo num único hook daria até 25s para cada um, mas acoplaria módulos hoje independentes. Os prazos curtos atendem ao trabalho real.
+
+### Limitações
+
+- **Sobreposição não provada:** a disputa na hot wallet vem de 60 requisições HTTP simultâneas nas 3 instâncias (a metade SQS fica serializada pelo grupo FIFO). Como o resultado esperado não depende da ordem, o teste passaria igual se, por acaso, as requisições não se sobrepusessem. Provar a sobreposição de forma determinística exigiria instrumentação nova (por exemplo, exigir `wallet_lock_conflict` > 0, o que não é garantido). O cenário 80+80 e os testes de concorrência cobrem a disputa no lock com resultado verificável.
+- **"Pegou trabalho em andamento" é sanidade, não prova:** no item 8, o teste exige fila ou outbox não vazias **imediatamente antes** do SIGKILL. Isso não prova que havia uma requisição HTTP em voo nem uma mensagem entre o commit e o ack no instante exato. Esse ponto é provado de forma determinística só pelo item 5, com a injeção de falha.
+- **Distribuição da fila:** a exigência de que cada instância confirme mensagens SQS depende de o LocalStack distribuir as mensagens entre os consumidores. O teste usa `SQS_MAX_MESSAGES=1` e grupos distintos para tornar isso praticamente certo, mas não há garantia formal do broker.
+- A seed não reproduz a intercalação entre processos (acima).
+- O vínculo `SIGTERM` → shutdown hooks (`enableShutdownHooks`) foi verificado só na validação manual do profile `multi` do Docker (acima), não em teste automatizado.
+- Algumas verificações finais repetem garantias do schema (reversão dupla, idempotency key duplicada). São intencionais: o teste não confia no schema para afirmar o resultado.

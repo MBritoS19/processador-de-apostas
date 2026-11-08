@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **9 — Testes de integração e concorrência** (aguardando plano)
+Fase atual: **10 — Documentação** (aguardando plano)
 
 ---
 
@@ -90,21 +90,21 @@ Fase atual: **9 — Testes de integração e concorrência** (aguardando plano)
 
 ## Fase 9 — Testes de integração e concorrência (§13)
 Integração:
-- [ ] Atomicidade entre wallet, ledger, inbox e outbox
-- [ ] Inbox e redelivery
-- [ ] Retry e DLQ
-- [ ] Recuperação após reinicialização
+- [x] Atomicidade entre wallet, ledger, inbox e outbox (use case e resolução pelo worker de pendentes)
+- [x] Inbox e redelivery
+- [x] Retry e DLQ
+- [x] Recuperação após reinicialização
 
 Concorrência (paralelismo real):
-- [ ] 1. Mesma aposta 50x em paralelo → um único débito
-- [ ] 2. Disputa de saldo na mesma wallet (cenário 80 + 80)
-- [ ] 3. Wallets distintas em paralelo
-- [ ] 4. 3 ou mais instâncias simultâneas
-- [ ] 5. Worker morto depois do commit e antes do ack
-- [ ] 6. Dois publishers sobre a mesma outbox
+- [x] 1. Mesma aposta 50x em paralelo → um único débito (num processo e, no multi, 30 HTTP nas 3 instâncias + 20 SQS)
+- [x] 2. Disputa de saldo na mesma wallet (cenário 80 + 80)
+- [x] 3. Wallets distintas em paralelo
+- [x] 4. 3 ou mais instâncias simultâneas (`test:multi`: 3 processos reais; falha se alguma não atender HTTP e SQS)
+- [x] 5. Worker morto depois do commit e antes do ack (`FAULT_INJECTION`, só com `NODE_ENV=test`)
+- [x] 6. Dois publishers sobre a mesma outbox
 - [x] 7. ROLLBACK/REFUND entregue antes da referência (Fase 7: HTTP/use case, fila SQS, dois workers, worker + use case)
-- [ ] 8. Reinício do serviço com consistência final comprovada
-- [ ] Invariante final em todos: `wallet.balance == saldo reconstruído pelo ledger`
+- [x] 8. Reinício do serviço com consistência final comprovada (SIGKILL das 3 no meio da carga + verificações por SQL)
+- [x] Invariante final em todos: `wallet.balance == saldo reconstruído pelo ledger`
 
 ## Fase 10 — Documentação
 - [ ] `README.md`: setup e comandos
@@ -178,9 +178,15 @@ Concorrência (paralelismo real):
 - Coluna `correlation_id` imutável; fallback `tx.id`; `causationId` = evento de pendência (fallback `tx.id`) — §20
 - 5 erros inesperados seguidos → FAILED `INFRASTRUCTURE_FAILURE`; 5 `wallet_busy` seguidos → espera o lock; contadores em memória por instância (heurística) — §20
 - `WagerTransactionRejected` aceita FAILED (`failureCode` distingue) — §20
+- Teste multi-instância com processos `bun src/main.ts` reais (não containers), contadores por vida do processo, seed `MULTI_SEED` — §21
+- `FAULT_INJECTION=exit_after_commit_before_ack` aceita só com `NODE_ENV=test` (lista de permissão) — §21
+- `sqs_message_acked` só depois do `DeleteMessage` bem-sucedido — §18
+- Shutdown: os 3 hooks são sequenciais no Nest; padrão 8s cada, soma ≤ `SHUTDOWN_BUDGET_MS` (25s) < `stop_grace_period` (30s), validado no boot — §21
+- `stop()` do consumidor aborta o long polling (mensagem entregue ao poll abortado volta após a visibilidade) — §18
+- Docker: imagem `oven/bun:1.4`, profile `multi` com `migrate` + 3 réplicas em `127.0.0.1:3000-3002` — §21
 
 ## Pendências e bloqueios
-- `README.md` fica para a Fase 10; por ora os comandos estão só no CLAUDE.md, que é local (fora do git).
+- `README.md` criado na Fase 9 com setup, comandos, testes e profile `multi`; a Fase 10 completa (visão da API, exemplos).
 - Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor do lançamento = valor da transação, nem o encadeamento `balance_before` (ARCHITECTURE §11). O use case garante, e `expectLedgerConsistent` verifica nos testes; a reconciliação da Fase 4 cobre em produção.
 - Decisão pendente: amarrar `payload.providerId` ao provider autenticado e escopar as consultas por provider (desenho em ARCHITECTURE §16). Sem isso, qualquer cliente submete em nome de qualquer provider e lê transações e saldos alheios.
 - Decisão pendente: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. Decidir se é intencional.
@@ -188,9 +194,10 @@ Concorrência (paralelismo real):
 - `InvalidInput` tem código único (`INVALID_INPUT`) e motivo em texto; códigos por campo ficam para quando um consumidor precisar.
 - Limitação conhecida: REFUND de BET que já tem WIN PROCESSED é aceito (ARCHITECTURE §15).
 - Deploy: usuário da aplicação sem permissão de TRUNCATE.
-- Pendente: `stop_grace_period: 30s` (acima do `SQS_SHUTDOWN_TIMEOUT_MS` de 25s) no serviço da aplicação do compose, inclusive no profile `multi`. O compose ainda não tem serviço da aplicação nem Dockerfile; entra quando forem criados (Fase 9, item 4).
+- Resolvido (Fase 9): `stop_grace_period: 30s` no serviço `app` do profile `multi`, com a soma dos prazos de shutdown validada no boot (ARCHITECTURE §21).
 - Limitação (C4a, ARCHITECTURE §18): se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, a inbox não é gravada; o mesmo `messageId` com outro payload válido depois é processado. Fechar exige mudar o use case.
-- O vínculo `SIGTERM` → shutdown hooks (`enableShutdownHooks`) não tem teste automatizado; os testes usam `app.close()`.
+- O vínculo `SIGTERM` → shutdown hooks (`enableShutdownHooks`) não tem teste automatizado (os testes usam `app.close()`); verificado manualmente no `down` do profile `multi` (3 réplicas, saída 0, sem timeout).
+- Limitações do `test:multi` (ARCHITECTURE §21): a sobreposição na hot wallet não é provada; "pegou trabalho em andamento" no item 8 é sanidade; a distribuição da fila entre instâncias depende do broker; a seed reproduz a carga, não a intercalação.
 
 ## Registro de sessões
 <!-- Data — o que foi feito — próximo passo -->
@@ -205,3 +212,4 @@ Concorrência (paralelismo real):
 - 2026-11-07 — Fase 5 concluída: consumidor SQS (inbox, ack após commit, retry com backoff, DLQ com motivo, FIFO por grupo, pausa do polling com banco fora, shutdown gracioso), `WageringCoreModule` compartilhado; revisão (correctness + test-evidence): 6 achados de código e 10 de testes corrigidos (redrive 10 / limite 5, ordem do grupo sem depender do broker, releitura da inbox, envelope ilegível → DLQ, loop único). ARCHITECTURE §18. 483 testes passando (259 unit, 220 integração, 4 concorrência). — Próximo: Fase 6 (outbox publisher), aguardando plano.
 - 2026-11-07 — Fase 6 concluída: outbox publisher em `wager-events.fifo` (claim com `FOR UPDATE SKIP LOCKED` publicando ainda com o lock, ordem por agregado via `seq`, `SendMessageBatch` com falha por entrada, backoff sem descarte nem DLQ, timeouts do SQS abaixo do idle timeout, métricas published/failures/retries/stuck e outbox lag, shutdown gracioso). Revisão (correctness + test-evidence): 4 achados de código e 14 de testes corrigidos (backfill ordenado do `seq`, reenvio um a um em 4xx, SDK sem retries + folga de 2s, falha parcial real do LocalStack, `pg_terminate_backend`, idle timeout, shutdown com timeout). ARCHITECTURE §19. 513 testes passando (263 unit, 244 integração, 6 concorrência). Observação: uma execução da integração travou uma vez sem atividade no banco e não se repetiu em duas execuções seguidas. — Próximo: Fase 7 (referências pendentes), aguardando plano.
 - 2026-11-07 — Fase 7 concluída: `WagerSettlement` extraído (commit próprio), worker de referências pendentes (SKIP LOCKED na wallet, TTL 1h, caminho rápido, `correlation_id`, FAILED após 5 erros, espera do lock após 5 `wallet_busy`), métricas e flag. Corrigido o travamento intermitente da suíte de integração (`killClaimSession` agora espera o término do backend). Revisão (correctness + test-evidence): 3 achados de código e 12 de testes corrigidos. ARCHITECTURE §20. — Próximo: Fase 9 (testes de integração e concorrência), aguardando plano.
+- 2026-11-07 — Fase 9 validada e concluída (feita no Antigravity, revisada aqui com test-evidence + correctness): 5 achados apontados e 7 novos corrigidos (50 envios em paralelo HTTP+SQS nas 3 instâncias, prova de tráfego por instância antes e depois do reinício, contadores por vida do processo, ack logado só após o DeleteMessage, atomicidade da resolução pelo worker, checagens transação → evento, ledger no wagering-http/outbox, FAULT_INJECTION só com NODE_ENV=test, shutdown 8s ×3 com orçamento de 25s validado no boot, abort do long polling). Docker: build, profile multi com 3 réplicas ready, StopTimeout=30, down gracioso (saída 0, ~4s). 3 rodadas seguidas verdes: unit 281 (~4s), integração 282 (~57s), concorrência 8 (~8s), multi 1 (~40s). ARCHITECTURE §21 e README. — Próximo: Fase 10 (documentação), aguardando plano.
