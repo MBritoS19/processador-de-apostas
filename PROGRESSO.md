@@ -137,7 +137,17 @@ Concorrência (paralelismo real):
 ## Opcionais (só depois de tudo acima)
 - [ ] Autenticação com Keycloak ou Zitadel — não implementada por decisão: não vale pontos (CHALLENGE §2, "Autenticação — a cargo do candidato"); `AuthGuard` no-op e desenho (Keycloak client credentials, vínculo `wallet_providers`) documentados em ARCHITECTURE.md → "Autenticação"
 - [x] Teste de carga (`bun run test:load`) com p50/p95/p99, erros, conflitos e outbox lag (concluído em 2026-11-08; metodologia em ARCHITECTURE.md → "Estratégia de testes"; análise do outbox lag e do acúmulo na fila, com propostas não implementadas, em `docs/CARGA.md`; dados em `docs/carga/`)
-- [ ] Ledger de partidas dobradas (plano em ARCHITECTURE.md → "Evolução futura")
+- [ ] Ledger de partidas dobradas (plano em ARCHITECTURE.md → "Evolução futura"; em andamento, ver abaixo)
+
+## Diário de partidas dobradas (branch `feat/partidas-dobradas`, 2026-11-08)
+Plano aprovado. Prazo: passos 1–6 até 2026-11-09 15h; passo 7 até 18h; estourando, para no último passo verde. Critério de merge: todas as suítes verdes 3× e p95 de `quente-frias` até +20% sobre a main, sem erros novos; fora disso, não mescla e registra o resultado no ARCHITECTURE.md. Um commit e um push por passo; a main não é tocada.
+- [x] 1. Domínio: `JournalEntry` (débito = crédito, uma moeda, ≥ 2 pernas, imutável) e `forTransaction` (perna PLAYER com a direção do lançamento da wallet; contrapartida FUNDING no OPENING, PROVIDER_HOUSE do provider nos demais). Unit 319
+- [ ] 2. Migration: `accounts`, `journal_entries`, `journal_postings`; append-only; constraint trigger deferido de balanço; FUNDING criadas na migration; backfill
+- [ ] 3. Persistência: records, porta `insertJournalEntry`, adaptador (HOUSE sob demanda)
+- [ ] 4. Gravação dupla em `WagerSettlement` e `OpenWallet`; atomicidade; erro do diário (23514) permanente no consumidor SQS (DLQ direto)
+- [ ] 5. Reconciliação: `JOURNAL_BALANCE_MISMATCH` e `journalBalance`
+- [ ] 6. Concorrência e multi: saldo PLAYER = `wallets.balance` = ledger
+- [ ] 7. Carga A/B `quente-frias` e documentação (ledger → diário no schema vai para "Evolução futura")
 
 ---
 
