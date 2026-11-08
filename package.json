@@ -36,7 +36,8 @@
     "test:multi": "bun test ./test/multi",
     "test:chaos": "CHAOS=1 bun test ./test/chaos",
     "test:load": "LOAD=1 bun test ./test/load",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "demo": "LOG_LEVEL=warn bun scripts/demo.ts"
   },
   "engines": {
     "bun": ">=1.4"

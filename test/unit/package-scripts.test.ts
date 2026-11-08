@@ -20,6 +20,7 @@ const DOCUMENTED_SCRIPTS = [
   'test:multi',
   'test:chaos',
   'test:load',
+  'demo',
 ] as const;
 
 const root = join(import.meta.dir, '..', '..');
