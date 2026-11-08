@@ -152,6 +152,7 @@ Critério de adoção: todas as suítes verdes 3× e p95 de `quente-frias` até 
 Segunda avaliação independente da `v1.1-entrega` (clone limpo, stack isolada): nenhuma falha eliminatória; principal achado, um intermitente no **teste** multi-instância.
 - [x] `test:multi`: contagens por linha de log esperam a linha (poll com prazo) em vez de ler logo depois de a fila zerar
 - [x] Docs: este arquivo como histórico neutro; README com "Limitações conhecidas", aviso do `test:chaos` e "Uso de IA"; ARCHITECTURE com o diário na lista de SQL da transação e nas migrations
+- [x] BET → REFUND → ROLLBACK do REFUND: comportamento documentado (ARCHITECTURE.md → "Regras de negócio", "Interpretações adotadas") e provado por teste de integração; regra inalterada
 
 ---
 

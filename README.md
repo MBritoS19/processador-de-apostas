@@ -99,7 +99,7 @@ Resumo. A lista completa, com o que fecharia cada uma, está em `ARCHITECTURE.md
 - **Outbox sem DLQ:** um evento que nunca publica trava só o próprio agregado; fica visível por métrica e log (`outbox_event_stuck`), sem descarte.
 - **Sem heartbeat de visibilidade no consumidor SQS:** um lote acima de 60s pode ser reentregue em paralelo; a inbox e o lock evitam efeito duplo.
 - **Sem retenção da inbox:** `inbox_messages` cresce sem limite.
-- **Regras de reversão:** REFUND depois de WIN é aceito (`ARCHITECTURE.md` → "Regras de negócio").
+- **Regras de reversão:** REFUND depois de WIN é aceito; depois de BET → REFUND → ROLLBACK do REFUND, a BET volta a ficar debitada e não aceita mais WIN/LOSS com referência nem nova reversão, sem dinheiro duplicado (`ARCHITECTURE.md` → "Regras de negócio").
 - **O schema não garante tudo do ledger** (encadeamento `balance_before`, "só PROCESSED tem lançamento"); a reconciliação detecta.
 
 ## Testes
