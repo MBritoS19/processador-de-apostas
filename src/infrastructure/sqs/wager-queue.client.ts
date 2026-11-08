@@ -22,6 +22,8 @@ export interface ReceiveOptions {
   maxMessages: number;
   waitTimeSeconds: number;
   visibilityTimeoutSeconds: number;
+  /** Aborta o long polling (shutdown): o consumidor não espera até `waitTimeSeconds` para parar. */
+  signal?: AbortSignal;
 }
 
 /** Motivos estáveis de envio para a DLQ (atributo `dlqReason`). */
@@ -56,6 +58,7 @@ export class WagerQueueClient {
         VisibilityTimeout: options.visibilityTimeoutSeconds,
         MessageSystemAttributeNames: ['ApproximateReceiveCount', 'MessageGroupId'],
       }),
+      options.signal ? { abortSignal: options.signal } : {},
     );
     return (output.Messages ?? []).flatMap((message) => {
       if (!message.MessageId || !message.ReceiptHandle) return [];

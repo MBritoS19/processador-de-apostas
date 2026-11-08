@@ -5,7 +5,7 @@ import { loadConfig } from '../../src/infrastructure/config/app-config';
 import { openOrm, truncateAll } from '../integration/persistence/db';
 import { createQueues, deleteQueues, queueDepth, send, type TestQueues } from '../integration/interfaces/sqs-harness';
 import { createEventsQueue, deleteQueue, drain } from '../integration/workers/outbox-harness';
-import { callWithRetry, cents, eventually, freePort, Instance, prng, type HttpResult } from './harness';
+import { callWithRetry, cents, eventually, freePort, Instance, prng, seedFromEnv, type HttpResult } from './harness';
 
 /**
  * Teste multi-instância (CHALLENGE §13: concorrência 4, 5 e 8).
@@ -17,7 +17,7 @@ import { callWithRetry, cents, eventually, freePort, Instance, prng, type HttpRe
  * direto no banco. Estratégia e limitações: ARCHITECTURE.md §21.
  */
 
-const SEED = Number(process.env['MULTI_SEED'] ?? 20261107);
+const SEED = seedFromEnv(process.env['MULTI_SEED'], 20261107);
 const PENDING_TTL_MS = 25_000;
 const PROVIDER = 'provider-a';
 
@@ -38,6 +38,8 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
   let queues: TestQueues;
   let events: { name: string; url: string };
   const instances: Instance[] = [];
+  /** Todas as instâncias já criadas (inclusive a F, que sai de `instances`): cauda de log na falha. */
+  const everyInstance: Instance[] = [];
   const wallets: TestWallet[] = [];
   const rand = prng(SEED);
   let step = 'setup';
@@ -58,6 +60,9 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
       SQS_WAGER_EVENTS_QUEUE_NAME: events.name,
       // Só aqui, no teste: tempos curtos para a mensagem de uma instância morta voltar logo.
       SQS_WAIT_TIME_SECONDS: '1',
+      // Uma mensagem por receive: o trabalho da fila se espalha pelas 3 instâncias (o teste exige
+      // que cada uma confirme mensagens, antes e depois do reinício).
+      SQS_MAX_MESSAGES: '1',
       SQS_VISIBILITY_TIMEOUT_SECONDS: '6',
       SQS_RETRY_BASE_SECONDS: '1',
       SQS_RETRY_MAX_SECONDS: '2',
@@ -80,8 +85,12 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
     const response = await callWithRetry(via, roundRobin++, 'POST', '/wallets', {
       body: { playerId, initialBalance: { amount: cents(start), currency: 'BRL' } },
     });
-    expect(response.status, `POST /wallets ${label}: ${JSON.stringify(response.body)}`).toBe(201);
-    const wallet = { id: response.body['id'] as string, playerId, label, start, expected: start };
+    // POST /wallets não tem Idempotency-Key: se a 1ª tentativa commitou e a resposta se perdeu, o
+    // reenvio do cliente recebe 409 com o id da wallet já criada (ARCHITECTURE §16).
+    const retriedConflict = response.status === 409 && response.attempts > 1 && typeof response.body['error']?.['walletId'] === 'string';
+    expect(response.status === 201 || retriedConflict, `POST /wallets ${label}: ${response.status} ${JSON.stringify(response.body)}`).toBe(true);
+    const id = (retriedConflict ? response.body['error']['walletId'] : response.body['id']) as string;
+    const wallet = { id, playerId, label, start, expected: start };
     wallets.push(wallet);
     return wallet;
   }
@@ -106,8 +115,11 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
       headers: { 'idempotency-key': `${PROVIDER}:${data['externalTransactionId'] as string}` },
     });
 
-  /** Produtor SQS: grupo = walletId; dedup do broker = `dedupId` (distinto para forçar duplicatas reais). */
-  const submitSqs = (data: Payload, messageId: string, dedupId: string = messageId): Promise<void> =>
+  /**
+   * Produtor SQS: grupo = walletId (ou `groupId`, para entregas paralelas da mesma transação);
+   * dedup do broker = `dedupId` (distinto para forçar duplicatas reais).
+   */
+  const submitSqs = (data: Payload, messageId: string, dedupId: string = messageId, groupId?: string): Promise<void> =>
     send(
       sqs,
       queues.queueUrl,
@@ -117,7 +129,7 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
         occurredAt: new Date().toISOString(),
         data: { ...data, idempotencyKey: `${PROVIDER}:${data['externalTransactionId'] as string}` },
       },
-      { dedupId },
+      { dedupId, ...(groupId === undefined ? {} : { groupId }) },
     );
 
   async function balanceOf(wallet: TestWallet): Promise<string> {
@@ -192,21 +204,18 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
           instanceEnv({ FAULT_INJECTION: 'exit_after_commit_before_ack', OUTBOX_PUBLISHER_ENABLED: 'false' }),
         );
         instances.push(faulty);
+        everyInstance.push(faulty);
         faulty.start();
         await faulty.waitReady();
 
         const w5 = await openWallet('item5', 10_000n, [faulty]);
         w5.expected = 7_000n;
         await submitSqs(payload(w5, 'item5-bet-1', 'BET', 3_000n), 'm-item5-1');
-        await Promise.race([
-          faulty.exited,
-          Bun.sleep(30_000).then(() => {
-            throw new Error('a instância com FAULT_INJECTION não morreu em 30s');
-          }),
-        ]);
+        await faulty.waitExit(30_000);
         await eventually('o log do SIGKILL injetado foi lido', () => expect(faulty.count('fault_injection_sigkill')).toBe(1), 5_000, 20);
         expect(faulty.count('fault_injection_sigkill'), 'log do ponto exato do SIGKILL').toBe(1);
-        // O log `sqs_message_acked` sai ANTES do DeleteMessage; a prova de "sem ack" é a mensagem na fila (abaixo).
+        // `sqs_message_acked` só é logado depois do DeleteMessage bem-sucedido: a instância morta não confirmou nada.
+        expect(faulty.count('sqs_message_acked'), 'a instância morta não registrou ack').toBe(0);
 
         const [afterDeath] = await rows<{ tx: string; ledger: string; inbox: string; pending: string; balance: string }>(
           `select (select count(*) from wager_transactions where wallet_id = ? and kind = 'BET' and status = 'PROCESSED')::text as tx,
@@ -220,7 +229,7 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
           tx: '1',
           ledger: '2', // OPENING + o débito
           inbox: '1',
-          pending: expect.stringMatching(/^[2-9]/) as unknown as string,
+          pending: '3', // WalletBalanceChanged da abertura + Processed + WalletBalanceChanged do BET (publisher desligado na F)
           balance: '70.00',
         });
         expect(await queueDepth(sqs, queues.queueUrl), 'a mensagem continua na fila (sem ack)').toBe(1);
@@ -232,6 +241,7 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
           ['A', 'B', 'C'].map(async (label) => new Instance(label, await freePort(), instanceEnv())),
         );
         instances.push(...live);
+        everyInstance.push(...live);
         live.forEach((instance) => instance.start());
         await Promise.all(live.map((instance) => instance.waitReady()));
         expect(new Set(live.map((instance) => instance.pid)).size, '3 PIDs distintos').toBe(3);
@@ -273,15 +283,47 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
         expect(pair.map((r) => r.status).sort(), 'uma 200 (PROCESSED) e uma 422 (REJECTED)').toEqual([200, 422]);
         expect(pair.find((r) => r.status === 422)?.body['failureCode']).toBe('INSUFFICIENT_BALANCE');
 
-        mark('mesma transação reenviada a instâncias diferentes (9 requisições, 3 por instância, em paralelo)');
+        // Item 1 entre instâncias e canais: a MESMA aposta (mesma Idempotency-Key) 50x em paralelo,
+        // 30 por HTTP (10 em cada instância) e 20 por SQS (messageIds e grupos distintos, para as
+        // entregas correrem em paralelo nas 3 instâncias). Resultado: 1 transação e 1 débito.
+        mark('item 1: mesma aposta 50x em paralelo (30 HTTP nas 3 instâncias + 20 SQS)');
         dupHttp.expected = 16_000n;
-        const dupPayload = payload(dupHttp, 'dup-http-bet-1', 'BET', 4_000n);
-        const dupResponses = await Promise.all(
-          Array.from({ length: 9 }, (_, i) => submitHttp(dupPayload, [live[i % 3]!])),
+        const dupPayload = payload(dupHttp, 'dup50-bet-1', 'BET', 4_000n);
+        const dupMessageIds = Array.from({ length: 20 }, (_, i) => `m-dup50-${i + 1}`);
+        const [dupResponses] = await Promise.all([
+          Promise.all(Array.from({ length: 30 }, (_, i) => submitHttp(dupPayload, [live[i % 3]!]))),
+          Promise.all(dupMessageIds.map((id) => submitSqs(dupPayload, id, id, `dup50-${id}`))),
+        ]);
+        expect(dupResponses.map((r) => r.status).filter((s) => s !== 200), 'todas as respostas HTTP são 200').toEqual([]);
+        expect(new Set(dupResponses.map((r) => r.body['transactionId'])).size, 'um único transactionId no HTTP').toBe(1);
+        expect(dupResponses.filter((r) => r.body['idempotentReplay'] === false).length, 'no máximo uma execução original pelo HTTP').toBeLessThanOrEqual(1);
+        await eventually(
+          'as 20 mensagens SQS da aposta duplicada foram confirmadas (inbox)',
+          async () => {
+            const [row] = await rows<{ n: string }>(`select count(*)::text as n from inbox_messages where message_id like 'm-dup50-%'`);
+            expect(row?.n).toBe('20');
+          },
+          45_000,
         );
-        expect(dupResponses.every((r) => r.status === 200), `todas 200: ${dupResponses.map((r) => r.status)}`).toBe(true);
-        expect(new Set(dupResponses.map((r) => r.body['transactionId'])).size, 'um único transactionId').toBe(1);
-        expect(dupResponses.filter((r) => r.body['idempotentReplay'] === false).length, 'só uma execução original').toBe(1);
+        const [dup50] = await rows<{ txs: string; debits: string; tx_id: string; balance: string }>(
+          `select (select count(*) from wager_transactions where wallet_id = ? and kind = 'BET')::text as txs,
+                  (select count(*) from wallet_ledger_entries where wallet_id = ? and direction = 'DEBIT')::text as debits,
+                  (select id from wager_transactions where wallet_id = ? and kind = 'BET') as tx_id,
+                  (select balance::text from wallets where id = ?) as balance`,
+          [dupHttp.id, dupHttp.id, dupHttp.id, dupHttp.id],
+        );
+        expect(dup50, '50 envios: uma transação, um débito, saldo 160.00').toEqual({
+          txs: '1',
+          debits: '1',
+          tx_id: dupResponses[0]?.body['transactionId'],
+          balance: '160.00',
+        });
+
+        // Antes do kill: cada uma das 3 instâncias atendeu HTTP e confirmou mensagens SQS.
+        for (const instance of live) {
+          expect(instance.count('wager_transaction_processed@http'), `${instance.label} atendeu HTTP antes do kill`).toBeGreaterThan(0);
+          expect(instance.count('sqs_message_acked'), `${instance.label} confirmou mensagens SQS antes do kill`).toBeGreaterThan(0);
+        }
 
         mark('onda 1: dispara HTTP e SQS juntos (hot wallet, duplicatas SQS, wallets aleatórias)');
         const pendingHttp: Array<Promise<{ op: string; result: HttpResult }>> = [];
@@ -329,7 +371,10 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
         await eventually(
           'o consumo começou (há mensagens na inbox)',
           async () => {
-            const [row] = await rows<{ n: string }>('select count(*)::text as n from inbox_messages');
+            // Só mensagens da onda 1 (as do item 5 e do item 1 já estão na inbox).
+            const [row] = await rows<{ n: string }>(
+              `select count(*)::text as n from inbox_messages where message_id <> 'm-item5-1' and message_id not like 'm-dup50-%'`,
+            );
             expect(Number(row?.n)).toBeGreaterThanOrEqual(5);
           },
           30_000,
@@ -410,6 +455,12 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
         mark('quiescência (a órfã expira pelo TTL de 25s)');
         await waitQuiescence();
 
+        // Depois do reinício (contadores zerados no start): cada instância atendeu HTTP e confirmou SQS.
+        for (const instance of live) {
+          expect(instance.count('wager_transaction_processed@http'), `${instance.label} atendeu HTTP depois do reinício`).toBeGreaterThan(0);
+          expect(instance.count('sqs_message_acked'), `${instance.label} confirmou mensagens SQS depois do reinício`).toBeGreaterThan(0);
+        }
+
         // ───────────────────────── Verificações finais, todas por SQL
         mark('verificações finais por SQL');
 
@@ -483,6 +534,37 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
           `[multi seed=${SEED}] eventos: outbox=${outboxIds.length}, mensagens na fila=${delivered.length} (duplicatas: ${delivered.length - deliveredIds.size})`,
         );
 
+        // 6b. Nenhum evento faltando na ORIGEM: toda transação terminal (exceto OPENING) tem exatamente
+        // um evento terminal do tipo certo, e todo lançamento tem exatamente um WalletBalanceChanged.
+        expect(
+          await rows(
+            `select t.id, t.kind, t.status,
+                    count(o.id) filter (where o.event_type = 'WagerTransactionProcessed') as processed_events,
+                    count(o.id) filter (where o.event_type = 'WagerTransactionRejected') as rejected_events
+               from wager_transactions t
+               left join outbox_messages o on o.aggregate_id::text = t.id::text
+              where t.kind <> 'OPENING'
+              group by t.id, t.kind, t.status
+             having not (
+                   (t.status = 'PROCESSED' and count(o.id) filter (where o.event_type = 'WagerTransactionProcessed') = 1
+                                           and count(o.id) filter (where o.event_type = 'WagerTransactionRejected') = 0)
+                or (t.status in ('REJECTED', 'FAILED') and count(o.id) filter (where o.event_type = 'WagerTransactionProcessed') = 0
+                                                       and count(o.id) filter (where o.event_type = 'WagerTransactionRejected') = 1))`,
+          ),
+          'transação terminal sem o evento terminal certo (ou com mais de um)',
+        ).toEqual([]);
+        expect(
+          await rows(
+            `select l.id, l.transaction_id, count(o.id) as balance_events
+               from wallet_ledger_entries l
+               left join outbox_messages o
+                 on o.event_type = 'WalletBalanceChanged' and o.payload->'data'->>'transactionId' = l.transaction_id::text
+              group by l.id, l.transaction_id
+             having count(o.id) <> 1`,
+          ),
+          'lançamento sem exatamente um WalletBalanceChanged',
+        ).toEqual([]);
+
         // 7. Nada na DLQ (todas as mensagens enviadas eram válidas; rejeição de negócio é ack).
         expect(await queueDepth(sqs, queues.dlqUrl), 'DLQ vazia').toBe(0);
 
@@ -554,12 +636,16 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
         expect(dupSqsCounts, 'duplicatas SQS: uma transação e um débito').toEqual({ txs: '1', ledger: '1' });
 
         // Evidência de que as 3 instâncias de fato atenderam tráfego (e a carga não foi de uma só).
-        const served = live.map((instance) => ({ label: instance.label, httpTx: instance.count('wager_transaction_processed') }));
-        console.log(`[multi seed=${SEED}] transações processadas por instância (após o reinício): ${JSON.stringify(served)}`);
+        const served = live.map((instance) => ({
+          label: instance.label,
+          http: instance.count('wager_transaction_processed@http'),
+          sqsAcked: instance.count('sqs_message_acked'),
+        }));
+        console.log(`[multi seed=${SEED}] tráfego por instância depois do reinício: ${JSON.stringify(served)}`);
         mark('concluído');
       } catch (error) {
         console.error(`\n[multi] FALHOU no passo "${step}". Reproduza com: MULTI_SEED=${SEED} bun run test:multi`);
-        for (const instance of [...instances]) console.error(instance.logTail(12));
+        for (const instance of everyInstance) console.error(instance.logTail(12));
         throw error;
       }
     },

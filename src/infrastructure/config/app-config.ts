@@ -61,8 +61,8 @@ export interface AppConfig {
   };
   readonly healthCheckTimeoutMs: number;
   /**
-   * Injeção de falha SÓ para testes (Fase 9). Desligada por padrão e recusada com
-   * `NODE_ENV=production`. Documentada no ARCHITECTURE.md (estratégia de testes).
+   * Injeção de falha SÓ para testes (Fase 9). Desligada por padrão e aceita apenas com
+   * `NODE_ENV=test` (lista de permissão). Documentada no ARCHITECTURE.md §21.
    */
   readonly faultInjection: FaultInjection;
 }
@@ -77,6 +77,14 @@ export class InvalidConfigError extends Error {
     this.name = 'InvalidConfigError';
   }
 }
+
+/**
+ * Os três `beforeApplicationShutdown` (consumidor, outbox, pendentes) rodam em SEQUÊNCIA no Nest:
+ * a soma dos timeouts é o pior caso do shutdown e precisa caber antes do SIGKILL do orquestrador
+ * (`stop_grace_period` de 30s no compose). Padrão 8s cada; orçamento 25s (ARCHITECTURE §21).
+ */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8_000;
+export const DEFAULT_SHUTDOWN_BUDGET_MS = 25_000;
 
 /** Folga mínima entre o timeout do SQS e o idle timeout da transação do claim. */
 export const OUTBOX_TIMEOUT_MARGIN_MS = 2_000;
@@ -192,7 +200,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       sqsTimeoutMs: intInRange('OUTBOX_SQS_TIMEOUT_MS', 3_000, 100, 60_000),
       idleInTransactionTimeoutMs: intInRange('OUTBOX_IDLE_IN_TRANSACTION_TIMEOUT_MS', 15_000, 1_000, 300_000),
       stuckAttempts: intInRange('OUTBOX_STUCK_ATTEMPTS', 10, 1, 1000),
-      shutdownTimeoutMs: intInRange('OUTBOX_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
+      shutdownTimeoutMs: intInRange('OUTBOX_SHUTDOWN_TIMEOUT_MS', DEFAULT_SHUTDOWN_TIMEOUT_MS, 0, 600_000),
     },
     sqsConsumer: {
       enabled: bool('SQS_CONSUMER_ENABLED', true),
@@ -203,7 +211,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       retryBaseSeconds: intInRange('SQS_RETRY_BASE_SECONDS', 30, 0, 43_200),
       retryMaxSeconds: intInRange('SQS_RETRY_MAX_SECONDS', 300, 0, 43_200),
       maxAttempts: intInRange('SQS_CONSUMER_MAX_ATTEMPTS', 5, 1, 1000),
-      shutdownTimeoutMs: intInRange('SQS_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
+      shutdownTimeoutMs: intInRange('SQS_SHUTDOWN_TIMEOUT_MS', DEFAULT_SHUTDOWN_TIMEOUT_MS, 0, 600_000),
     },
     pendingReferences: {
       workerEnabled: bool('PENDING_REFERENCE_WORKER_ENABLED', true),
@@ -211,13 +219,22 @@ export function loadConfig(env: Env = process.env): AppConfig {
       pollIntervalMs: intInRange('PENDING_REFERENCE_POLL_INTERVAL_MS', 1_000, 1, 60_000),
       gaugeIntervalMs: intInRange('PENDING_REFERENCE_GAUGE_INTERVAL_MS', 10_000, 1, 600_000),
       ttlMs: intInRange('PENDING_REFERENCE_TTL_MS', 3_600_000, 1_000, 7 * 24 * 3_600_000),
-      shutdownTimeoutMs: intInRange('PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS', 25_000, 0, 600_000),
+      shutdownTimeoutMs: intInRange('PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS', DEFAULT_SHUTDOWN_TIMEOUT_MS, 0, 600_000),
     },
     healthCheckTimeoutMs: positiveInt('HEALTH_CHECK_TIMEOUT_MS', 2000, 60_000),
     faultInjection: faultInjection(),
   };
-  if (config.faultInjection !== 'none' && config.nodeEnv === 'production') {
-    problems.push('FAULT_INJECTION é recusada com NODE_ENV=production');
+  if (config.faultInjection !== 'none' && config.nodeEnv !== 'test') {
+    problems.push(`FAULT_INJECTION só é aceita com NODE_ENV=test (recebido: "${config.nodeEnv}")`);
+  }
+  const shutdownBudgetMs = intInRange('SHUTDOWN_BUDGET_MS', DEFAULT_SHUTDOWN_BUDGET_MS, 0, 600_000);
+  const shutdownTotalMs =
+    config.sqsConsumer.shutdownTimeoutMs + config.outboxPublisher.shutdownTimeoutMs + config.pendingReferences.shutdownTimeoutMs;
+  if (shutdownTotalMs > shutdownBudgetMs) {
+    problems.push(
+      `SQS_SHUTDOWN_TIMEOUT_MS + OUTBOX_SHUTDOWN_TIMEOUT_MS + PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS (${shutdownTotalMs}) ` +
+        `deve ser menor ou igual a SHUTDOWN_BUDGET_MS (${shutdownBudgetMs})`,
+    );
   }
   if (config.sqsConsumer.name.length > 256) problems.push('SQS_CONSUMER_NAME excede 256 caracteres');
   if (config.sqsConsumer.retryMaxSeconds < config.sqsConsumer.retryBaseSeconds) {

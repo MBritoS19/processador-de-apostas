@@ -17,16 +17,42 @@ function problemsOf(env: Record<string, string | undefined>): readonly string[] 
 }
 
 describe('loadConfig', () => {
-  it('FAULT_INJECTION: desligada por padrão; valor desconhecido e NODE_ENV=production são recusados', () => {
+  it('FAULT_INJECTION: desligada por padrão; aceita só com NODE_ENV=test; valor desconhecido é recusado', () => {
+    const fault = { FAULT_INJECTION: 'exit_after_commit_before_ack' };
     expect(loadConfig(validEnv).faultInjection).toBe('none');
-    expect(loadConfig({ ...validEnv, FAULT_INJECTION: 'exit_after_commit_before_ack' }).faultInjection).toBe(
-      'exit_after_commit_before_ack',
-    );
-    expect(problemsOf({ ...validEnv, FAULT_INJECTION: 'boom' }).join()).toContain('FAULT_INJECTION');
-    expect(
-      problemsOf({ ...validEnv, NODE_ENV: 'production', FAULT_INJECTION: 'exit_after_commit_before_ack' }).join(),
-    ).toContain('recusada com NODE_ENV=production');
+    expect(loadConfig({ ...validEnv, ...fault, NODE_ENV: 'test' }).faultInjection).toBe('exit_after_commit_before_ack');
+    expect(problemsOf({ ...validEnv, NODE_ENV: 'test', FAULT_INJECTION: 'boom' }).join()).toContain('FAULT_INJECTION deve ser um de');
+    // Lista de permissão: qualquer coisa diferente de "test" recusa, inclusive NODE_ENV ausente.
+    for (const nodeEnv of [undefined, 'production', 'Production', 'prod', 'staging', 'development', 'TEST']) {
+      const problems = problemsOf({ ...validEnv, ...fault, NODE_ENV: nodeEnv });
+      expect(problems.join(), `NODE_ENV=${String(nodeEnv)}`).toContain('FAULT_INJECTION só é aceita com NODE_ENV=test');
+    }
     expect(loadConfig({ ...validEnv, NODE_ENV: 'production' }).faultInjection).toBe('none');
+  });
+
+  it('shutdown: padrão 8s por componente; a soma dos três não pode passar de SHUTDOWN_BUDGET_MS (padrão 25s)', () => {
+    const defaults = loadConfig(validEnv);
+    expect([
+      defaults.sqsConsumer.shutdownTimeoutMs,
+      defaults.outboxPublisher.shutdownTimeoutMs,
+      defaults.pendingReferences.shutdownTimeoutMs,
+    ]).toEqual([8_000, 8_000, 8_000]);
+
+    // No limite (soma == orçamento) sobe.
+    expect(loadConfig({ ...validEnv, SQS_SHUTDOWN_TIMEOUT_MS: '9000' }).sqsConsumer.shutdownTimeoutMs).toBe(9_000);
+    // 1ms acima do orçamento padrão: não sobe.
+    expect(problemsOf({ ...validEnv, SQS_SHUTDOWN_TIMEOUT_MS: '9001' })).toEqual([
+      'SQS_SHUTDOWN_TIMEOUT_MS + OUTBOX_SHUTDOWN_TIMEOUT_MS + PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS (25001) deve ser menor ou igual a SHUTDOWN_BUDGET_MS (25000)',
+    ]);
+    // Os antigos 25s em cada um (75s no total) são recusados.
+    const legacy = { SQS_SHUTDOWN_TIMEOUT_MS: '25000', OUTBOX_SHUTDOWN_TIMEOUT_MS: '25000', PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS: '25000' };
+    expect(problemsOf({ ...validEnv, ...legacy }).join()).toContain('(75000) deve ser menor ou igual a SHUTDOWN_BUDGET_MS (25000)');
+    // Orçamento informado: vale o novo limite, nos dois sentidos.
+    expect(loadConfig({ ...validEnv, ...legacy, SHUTDOWN_BUDGET_MS: '75000' }).outboxPublisher.shutdownTimeoutMs).toBe(25_000);
+    expect(problemsOf({ ...validEnv, SHUTDOWN_BUDGET_MS: '10000' }).join()).toContain('(24000) deve ser menor ou igual a SHUTDOWN_BUDGET_MS (10000)');
+    expect(problemsOf({ ...validEnv, SHUTDOWN_BUDGET_MS: 'x' })).toEqual([
+      'SHUTDOWN_BUDGET_MS deve ser um inteiro entre 0 e 600000 (recebido: "x")',
+    ]);
   });
 
   it('aplica defaults quando só o obrigatório é informado', () => {
@@ -64,7 +90,7 @@ describe('loadConfig', () => {
       retryBaseSeconds: 30,
       retryMaxSeconds: 300,
       maxAttempts: 5,
-      shutdownTimeoutMs: 25_000,
+      shutdownTimeoutMs: 8_000,
     });
     const config = loadConfig({
       ...validEnv,
@@ -126,7 +152,7 @@ describe('loadConfig', () => {
       sqsTimeoutMs: 3_000,
       idleInTransactionTimeoutMs: 15_000,
       stuckAttempts: 10,
-      shutdownTimeoutMs: 25_000,
+      shutdownTimeoutMs: 8_000,
     });
     const config = loadConfig({ ...validEnv, OUTBOX_PUBLISHER_ENABLED: 'false', OUTBOX_POLL_INTERVAL_MS: '20' });
     expect(config.outboxPublisher.enabled).toBe(false);
@@ -154,7 +180,7 @@ describe('loadConfig', () => {
       pollIntervalMs: 1_000,
       gaugeIntervalMs: 10_000,
       ttlMs: 3_600_000,
-      shutdownTimeoutMs: 25_000,
+      shutdownTimeoutMs: 8_000,
     });
     const config = loadConfig({ ...validEnv, PENDING_REFERENCE_WORKER_ENABLED: 'false', PENDING_REFERENCE_TTL_MS: '60000' });
     expect(config.pendingReferences.workerEnabled).toBe(false);

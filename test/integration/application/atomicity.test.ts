@@ -1,7 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
 import type { ProcessWagerTransactionResult } from '../../../src/application/wagering/process-wager-transaction';
-import { expectLedgerConsistent, openOrm, seedWallet, truncateAll } from '../persistence/db';
+import { T0, expectLedgerConsistent, openOrm, seedWallet, truncateAll } from '../persistence/db';
+import { ManualClock } from '../workers/outbox-harness';
+import { buildPendingFixture, counterTotal, entriesOf, txByExternal } from '../workers/pending-harness';
 import { buildUseCase, command, countRows, walletBalance, type WalletRef } from './harness';
 
 /**
@@ -100,6 +102,58 @@ describe('atomicidade wallet + ledger + inbox + outbox (Postgres real)', () => {
     expect(replay.type).toBe('Processed');
     await expectFullyApplied(replay);
   });
+
+  it.each([
+    ['wager_transactions', 'update'],
+    ['wallets', 'update'],
+    ['wallet_ledger_entries', 'insert'],
+    ['outbox_messages', 'insert'],
+  ] as const)(
+    'resolução pelo worker de pendentes: falha na gravação de %s (%s) → continua PENDING_REFERENCE, saldo e ledger intactos; depois aplica uma vez',
+    async (table, event) => {
+      const fx = buildPendingFixture(orm, new ManualClock(T0));
+      const rollback = { externalTransactionId: 'rb-1', kind: 'ROLLBACK', referenceExternalTransactionId: 'bet-1', money: { amount: '30.00', currency: 'BRL' } };
+      expect((await fx.useCase.execute(command(wallet, rollback))).type).toBe('PendingReference');
+      // A BET chega e antecipa a pendente (caminho rápido): ela fica vencida para o worker.
+      expect((await fx.useCase.execute(command(wallet, { externalTransactionId: 'bet-1', money: { amount: '30.00', currency: 'BRL' } }))).type).toBe('Processed');
+      const before = await snapshot();
+      expect(before).toMatchObject({ balance: '70.00', version: 2, ledger: 2 });
+      const pendingBefore = await txByExternal(orm, 'rb-1');
+      expect(pendingBefore.status).toBe('PENDING_REFERENCE');
+
+      await failOn(table, event);
+      expect(await fx.worker.runOnce(), 'a candidata foi tentada e não avançou').toEqual({ candidates: 1, progressed: 0 });
+      expect(await counterTotal(fx.metrics.pendingReferenceSkipped, { reason: 'error' }), 'falha inesperada contada').toBe(1);
+      const rb = await txByExternal(orm, 'rb-1');
+      expect(rb, 'nada da resolução persistiu na transação (linha idêntica à de antes)').toEqual(pendingBefore);
+      expect(await snapshot(), 'saldo, version, ledger e outbox iguais aos de antes').toEqual(before);
+
+      await healAll();
+      expect(await fx.worker.runOnce()).toEqual({ candidates: 1, progressed: 1 });
+      expect(await txByExternal(orm, 'rb-1')).toMatchObject({ status: 'PROCESSED', observed_balance: '100.00' });
+      const after = await snapshot();
+      expect(after).toEqual({
+        balance: '100.00',
+        version: 3,
+        ledger: 3,
+        outbox: before.outbox + 2, // WagerTransactionProcessed + WalletBalanceChanged
+      });
+      expect(await entriesOf(orm, rb.id)).toBe(1);
+      // Nada mais a resolver: um novo ciclo não muda nada.
+      expect(await fx.worker.runOnce()).toEqual({ candidates: 0, progressed: 0 });
+      expect(await snapshot()).toEqual(after);
+    },
+  );
+
+  async function snapshot(): Promise<{ balance: string; version: number; ledger: number; outbox: number }> {
+    const [row] = await orm.em.getKnex()('wallets').select('balance', 'version').where({ id: wallet.walletId });
+    return {
+      balance: row.balance as string,
+      version: Number(row.version),
+      ledger: await countRows(orm, 'wallet_ledger_entries'),
+      outbox: await countRows(orm, 'outbox_messages'),
+    };
+  }
 
   it('falha só no 2º insert da outbox (WalletBalanceChanged): o débito e o 1º evento também somem', async () => {
     // O trigger deixa o 1º insert passar e derruba o seguinte, dentro da mesma transação.

@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import type { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { MikroORM } from '@mikro-orm/postgresql';
@@ -23,7 +23,20 @@ describe('API HTTP de wagering (Postgres real)', () => {
     url = `http://127.0.0.1:${address.port}`;
   });
 
-  beforeEach(async () => truncateAll(orm));
+  // Invariante final de todos os testes (CHALLENGE §13): saldo == ledger em todas as wallets.
+  // Só o teste que corrompe o saldo de propósito (reconciliação divergente) desliga a checagem.
+  let ledgerTampered = false;
+
+  beforeEach(async () => {
+    ledgerTampered = false;
+    await truncateAll(orm);
+  });
+
+  afterEach(async () => {
+    if (ledgerTampered) return;
+    const wallets = await knex()('wallets').select('id');
+    for (const { id } of wallets) await expectLedgerConsistent(orm, id as string);
+  });
 
   afterAll(async () => {
     await app.close();
@@ -379,6 +392,7 @@ describe('API HTTP de wagering (Postgres real)', () => {
 
     it('divergente: sinaliza, conta na métrica e não corrige o saldo', async () => {
       const wallet = await openWallet();
+      ledgerTampered = true; // saldo corrompido de propósito: o afterEach não confere o ledger
       // Corrompe o saldo por fora, com os triggers desligados só nesta transação.
       await knex().transaction(async (trx) => {
         await trx.raw('set local session_replication_role = replica');

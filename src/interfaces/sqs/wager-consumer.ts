@@ -61,6 +61,8 @@ export class WagerConsumer {
   /** Recebidas e ainda sem decisão aplicada (inclui as que esperam a vez no grupo). */
   private readonly unfinished = new Set<ReceivedMessage>();
   private wakeUp: (() => void) | undefined;
+  /** Aborta o receive em andamento no `stop()`: o long polling (até 20s) não segura o shutdown. */
+  private polling: AbortController | undefined;
 
   constructor(
     private readonly queue: Pick<WagerQueueClient, 'maxReceiveCount' | 'receive' | 'delete' | 'changeVisibility' | 'sendToDlq'>,
@@ -93,6 +95,7 @@ export class WagerConsumer {
     if (!loop) return;
     this.running = false;
     this.wakeUp?.();
+    this.polling?.abort();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finished = await Promise.race([
       loop.then(() => true),
@@ -112,17 +115,27 @@ export class WagerConsumer {
     let failures = 0;
     while (this.running) {
       let unavailable: boolean;
+      const polling = new AbortController();
       try {
         // A fila (maxReceiveCount) é a rede de segurança; o consumidor decide antes, com motivo.
         const limit = Math.min(this.options.maxAttempts, await this.queue.maxReceiveCount());
-        const messages = await this.queue.receive({
-          maxMessages: this.options.maxMessages,
-          waitTimeSeconds: this.options.waitTimeSeconds,
-          visibilityTimeoutSeconds: this.options.visibilityTimeoutSeconds,
-        });
+        this.polling = polling;
+        let messages: ReceivedMessage[];
+        try {
+          messages = await this.queue.receive({
+            maxMessages: this.options.maxMessages,
+            waitTimeSeconds: this.options.waitTimeSeconds,
+            visibilityTimeoutSeconds: this.options.visibilityTimeoutSeconds,
+            signal: polling.signal,
+          });
+        } finally {
+          this.polling = undefined;
+        }
         for (const message of messages) this.unfinished.add(message);
         unavailable = await this.processBatch(messages, limit);
       } catch (error) {
+        // Receive abortado pelo stop(): saída normal do loop, não falha de polling.
+        if (polling.signal.aborted && !this.running) break;
         this.logger.error({ event: 'sqs_poll_failed', errorName: errorName(error) }, 'sqs poll failed');
         unavailable = true;
       }
@@ -264,6 +277,22 @@ export class WagerConsumer {
   private async apply(decision: Decision, message: ReceivedMessage, limit: number, context: LogContext): Promise<Applied> {
     switch (decision.action) {
       case 'ack': {
+        if (this.options.faultInjection === 'exit_after_commit_before_ack' && decision.outcome === 'PROCESSED') {
+          // Só testes (NODE_ENV=test): o commit já aconteceu e o ack não. A reentrega cai na inbox.
+          this.logger.warn({ ...context, event: 'fault_injection_sigkill' }, 'fault injection: SIGKILL before ack');
+          process.kill(process.pid, 'SIGKILL');
+        }
+        try {
+          await this.queue.delete(message);
+        } catch (error) {
+          // O efeito já foi commitado: a reentrega cai na inbox e é confirmada sem efeito novo.
+          this.logger.warn(
+            { ...context, event: 'sqs_ack_failed', outcome: decision.outcome, errorName: errorName(error) },
+            'sqs ack failed',
+          );
+          return decision.action;
+        }
+        // Só depois do DeleteMessage bem-sucedido: `sqs_message_acked` significa ack de fato.
         const fields = {
           ...context,
           event: 'sqs_message_acked',
@@ -272,17 +301,6 @@ export class WagerConsumer {
         };
         if (decision.warn) this.logger.warn(fields, 'sqs message acked with conflict');
         else this.logger.info(fields, 'sqs message acked');
-        if (this.options.faultInjection === 'exit_after_commit_before_ack' && decision.outcome === 'PROCESSED') {
-          // Só testes: o commit já aconteceu e o ack não. A reentrega cai na inbox.
-          this.logger.warn({ ...context, event: 'fault_injection_sigkill' }, 'fault injection: SIGKILL before ack');
-          process.kill(process.pid, 'SIGKILL');
-        }
-        try {
-          await this.queue.delete(message);
-        } catch (error) {
-          // O efeito já foi commitado: a reentrega cai na inbox e é confirmada sem efeito novo.
-          this.logger.warn({ ...context, event: 'sqs_ack_failed', errorName: errorName(error) }, 'sqs ack failed');
-        }
         return decision.action;
       }
       case 'retry': {

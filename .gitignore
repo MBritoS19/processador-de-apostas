@@ -1,6 +1,8 @@
 # Instruções locais do agente
 CLAUDE.md
 .claude/settings.local.json
+.claudesignore
+.github/copilot-instructions.md
 
 # Dependências e build
 node_modules/

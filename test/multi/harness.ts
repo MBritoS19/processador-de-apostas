@@ -20,6 +20,13 @@ export function prng(seed: number): () => number {
   };
 }
 
+/** Seed da carga: `MULTI_SEED` (inteiro não negativo) ou o padrão. Valor inválido derruba o teste. */
+export function seedFromEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  if (!/^\d+$/.test(raw.trim())) throw new Error(`MULTI_SEED deve ser um inteiro não negativo (recebido: "${raw}")`);
+  return Number(raw.trim());
+}
+
 /** Dinheiro em centavos como bigint (nunca number), formatado com 2 casas. */
 export function cents(value: bigint): string {
   const negative = value < 0n;
@@ -63,13 +70,21 @@ export interface InstanceEnv {
   [name: string]: string;
 }
 
+/** Todos os processos já iniciados: mortos na saída do `bun test`, mesmo se interrompido. */
+const spawned = new Set<Subprocess>();
+process.on('exit', () => {
+  for (const proc of spawned) if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGKILL');
+});
+
 /** Um processo da aplicação, com a saída lida o tempo todo (para o pipe nunca encher). */
 export class Instance {
   private proc: Subprocess<'ignore', 'pipe', 'pipe'> | undefined;
+  /** Cauda de log de TODAS as vidas do processo (diagnóstico de falha). */
   private readonly tail: string[] = [];
-  /** Linhas JSON do pino já parseadas por tipo de evento (contadores para o relatório). */
-  readonly counts = new Map<string, number>();
-  private readonly seenEvents = new Set<string>();
+  /** Eventos do pino por tipo (e `evento:outcome`), contados só na vida atual do processo. */
+  private readonly counts = new Map<string, number>();
+  /** Incrementa a cada `start()`: linhas tardias de uma vida anterior não entram nos contadores. */
+  private generation = 0;
   pid = 0;
 
   constructor(
@@ -86,28 +101,15 @@ export class Instance {
     return this.proc !== undefined && this.proc.exitCode === null && this.proc.signalCode === null;
   }
 
-  /** Terminou por conta própria ou por SIGKILL. */
-  get exited(): Promise<number> {
-    if (!this.proc) throw new Error(`${this.label} nunca foi iniciada`);
-    return this.proc.exited;
-  }
-
-  has(event: string): boolean {
-    return this.seenEvents.has(event);
-  }
-
+  /** Eventos `event`, `event:outcome` ou `event@http|sqs` registrados desde o último `start()`. */
   count(event: string): number {
     return this.counts.get(event) ?? 0;
   }
 
-  /** Linhas de log que contêm o texto (para provar, por exemplo, um DUPLICATE_MESSAGE). */
-  linesMatching(text: string): string[] {
-    return this.tail.filter((line) => line.includes(text));
-  }
-
   start(): void {
     if (this.running) throw new Error(`${this.label} já está rodando`);
-    this.seenEvents.clear();
+    this.generation++;
+    this.counts.clear();
     this.proc = Bun.spawn([process.execPath, 'src/main.ts'], {
       cwd: ROOT,
       env: { ...process.env, ...this.env, HTTP_PORT: String(this.port) },
@@ -115,12 +117,14 @@ export class Instance {
       stdout: 'pipe',
       stderr: 'pipe',
     });
+    spawned.add(this.proc);
     this.pid = this.proc.pid;
-    void this.pump(this.proc.stdout);
-    void this.pump(this.proc.stderr);
+    this.tail.push(`--- start #${this.generation} (pid ${this.pid}) ---`);
+    void this.pump(this.proc.stdout, this.generation);
+    void this.pump(this.proc.stderr, this.generation);
   }
 
-  private async pump(stream: ReadableStream<Uint8Array>): Promise<void> {
+  private async pump(stream: ReadableStream<Uint8Array>, generation: number): Promise<void> {
     const decoder = new TextDecoder();
     let buffered = '';
     try {
@@ -128,7 +132,7 @@ export class Instance {
         buffered += decoder.decode(chunk, { stream: true });
         let newline = buffered.indexOf('\n');
         while (newline >= 0) {
-          this.record(buffered.slice(0, newline));
+          this.record(buffered.slice(0, newline), generation);
           buffered = buffered.slice(newline + 1);
           newline = buffered.indexOf('\n');
         }
@@ -136,24 +140,22 @@ export class Instance {
     } catch {
       // processo morto: o stream fecha com erro, e isso é esperado nos SIGKILL
     }
-    if (buffered) this.record(buffered);
+    if (buffered) this.record(buffered, generation);
   }
 
-  private record(line: string): void {
+  private record(line: string, generation: number): void {
     if (!line.trim()) return;
+    // Todas as linhas vão para a cauda (limitada); só as JSON da vida atual entram nos contadores.
     this.tail.push(line);
-    // Só linhas de decisão (ack/retry/DLQ/fault) ficam para consulta; o resto, só a cauda.
     if (this.tail.length > 4000) this.tail.splice(0, this.tail.length - 3000);
+    if (generation !== this.generation) return;
     try {
-      const parsed = JSON.parse(line) as { event?: string; outcome?: string };
+      const parsed = JSON.parse(line) as { event?: string; outcome?: string; messageId?: string };
       if (parsed.event) {
-        this.seenEvents.add(parsed.event);
-        this.counts.set(parsed.event, (this.counts.get(parsed.event) ?? 0) + 1);
-        if (parsed.outcome) {
-          const key = `${parsed.event}:${parsed.outcome}`;
-          this.seenEvents.add(key);
-          this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
-        }
+        // `evento`, `evento:outcome` e `evento@canal` (com messageId = veio do SQS; sem = HTTP).
+        const keys = [parsed.event, `${parsed.event}@${parsed.messageId === undefined ? 'http' : 'sqs'}`];
+        if (parsed.outcome) keys.push(`${parsed.event}:${parsed.outcome}`);
+        for (const key of keys) this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
       }
     } catch {
       // linha que não é JSON (ex.: erro de boot em texto): fica só na cauda
@@ -171,6 +173,19 @@ export class Instance {
       timeoutMs,
       200,
     );
+  }
+
+  /** Espera o processo terminar por conta própria (ex.: SIGKILL injetado), sem timer solto. */
+  async waitExit(timeoutMs: number): Promise<void> {
+    await eventually(
+      `${this.label} terminou`,
+      () => {
+        if (this.running) throw new Error('ainda rodando');
+      },
+      timeoutMs,
+      20,
+    );
+    await this.proc?.exited;
   }
 
   /** SIGKILL: sem handlers, sem shutdown gracioso, como uma queda real. */

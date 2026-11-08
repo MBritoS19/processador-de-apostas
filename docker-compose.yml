@@ -57,8 +57,9 @@ services:
     build: .
     deploy:
       replicas: 3
-    # Acima do SQS_SHUTDOWN_TIMEOUT_MS / OUTBOX_SHUTDOWN_TIMEOUT_MS (25s): o SIGTERM termina de forma
-    # graciosa antes do SIGKILL do Docker.
+    # Os três *_SHUTDOWN_TIMEOUT_MS (8s cada) rodam em sequência; o loadConfig recusa soma acima de
+    # SHUTDOWN_BUDGET_MS (25s), que fica abaixo destes 30s: o SIGTERM termina antes do SIGKILL do
+    # Docker (ARCHITECTURE §21).
     stop_grace_period: 30s
     environment:
       NODE_ENV: production

@@ -8,7 +8,7 @@ import { createSqsClient } from '../../../src/infrastructure/messaging/sqs.clien
 import { OutboxEventsClient } from '../../../src/infrastructure/outbox/outbox-events.client';
 import { OutboxStore } from '../../../src/infrastructure/outbox/outbox-store';
 import { buildUseCase, command } from '../application/harness';
-import { openOrm, seedWallet, truncateAll } from '../persistence/db';
+import { expectLedgerConsistent, openOrm, seedWallet, truncateAll } from '../persistence/db';
 import {
   ManualClock,
   SpyEvents,
@@ -134,6 +134,7 @@ describe('outbox publisher (Postgres + LocalStack reais)', () => {
     }
     expect(await counterValue(metrics.outboxPublished)).toBe(2);
     expect(await publisher.publishOnce()).toBe(0);
+    await expectLedgerConsistent(orm, wallet.walletId);
   });
 
   it('exceção depois de publicar e antes do commit → outra instância republica o mesmo eventId; marcado uma vez', async () => {

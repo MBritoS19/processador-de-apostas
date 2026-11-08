@@ -7,6 +7,7 @@ import type { ProcessWagerTransactionCommand } from '../../../src/application/wa
 import { loadConfig, type AppConfig } from '../../../src/infrastructure/config/app-config';
 import { createSqsClient } from '../../../src/infrastructure/messaging/sqs.client';
 import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
+import { WagerConsumer } from '../../../src/interfaces/sqs/wager-consumer';
 import { countRows } from '../application/harness';
 import { expectLedgerConsistent, openOrm, seedWallet, truncateAll } from '../persistence/db';
 import {
@@ -376,9 +377,21 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     const spy = spyQueue({ failDeletes: 1 });
     const counting = failing(0);
     const app = await start({ wrapProcess: counting.wrap, queueClient: spy.factory, consumer: { visibilityTimeoutSeconds: 2 } });
+    // `sqs_message_acked` só depois do DeleteMessage bem-sucedido; o delete que falhou loga só `sqs_ack_failed`.
+    const logger = (app.get(WagerConsumer) as unknown as { logger: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void } }).logger;
+    const events: string[] = [];
+    for (const level of ['info', 'warn'] as const) {
+      const original = logger[level].bind(logger);
+      logger[level] = (fields: unknown, ...rest: unknown[]) => {
+        const { event, outcome } = (fields ?? {}) as { event?: string; outcome?: string };
+        if (event === 'sqs_message_acked' || event === 'sqs_ack_failed') events.push(`${event}:${outcome}`);
+        original(fields, ...rest);
+      };
+    }
     await send(sqs, queues.queueUrl, envelope(wallet));
 
     await eventually(async () => expect(spy.client?.deletes).toBe(2), 20_000);
+    expect(events).toEqual(['sqs_ack_failed:PROCESSED', 'sqs_message_acked:DUPLICATE_MESSAGE']);
     await expectDrained();
     expect(counting.calls()).toBe(1);
     expect(await debits(wallet.walletId)).toBe(1);
@@ -471,6 +484,35 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     await Bun.sleep(1_500);
     expect(spy.client?.receives ?? []).toEqual([]);
     expect(await visibleCount(sqs, queues.queueUrl)).toBe(1);
+    expect(await debits(wallet.walletId)).toBe(0);
+  });
+
+  it('SIGTERM durante o long polling (20s): o receive é abortado e o shutdown não espera o poll nem estoura o prazo', async () => {
+    const wallet = await seedWallet(orm, '100.00');
+    const spy = spyQueue();
+    const app = await start({ queueClient: spy.factory, consumer: { waitTimeSeconds: 20, shutdownTimeoutMs: 15_000 } });
+    // Um receive de 20s em andamento, fila vazia.
+    await eventually(async () => expect(spy.client?.receives.length).toBeGreaterThan(0));
+    const logger = (app.get(WagerConsumer) as unknown as { logger: { warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void } }).logger;
+    const events: string[] = [];
+    for (const level of ['warn', 'error'] as const) {
+      const original = logger[level].bind(logger);
+      logger[level] = (fields: unknown, ...rest: unknown[]) => {
+        events.push(String((fields as { event?: string } | undefined)?.event));
+        original(fields, ...rest);
+      };
+    }
+
+    const startedAt = Date.now();
+    await stop(app);
+    // Bem abaixo dos 20s do poll e dos 15s do prazo: o stop não esperou o long polling.
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(events, 'sem shutdown_timeout nem poll_failed').toEqual([]);
+    // Mensagem enviada depois do stop: não é processada nem perdida. Abortar no cliente não cancela o
+    // poll no servidor, que pode entregá-la à conexão abortada; aí ela fica em voo até a visibilidade
+    // expirar e volta para outra instância (mesmo efeito de um processo que cai; ARCHITECTURE §18).
+    await send(sqs, queues.queueUrl, envelope(wallet));
+    expect(await queueDepth(sqs, queues.queueUrl)).toBe(1);
     expect(await debits(wallet.walletId)).toBe(0);
   });
 
