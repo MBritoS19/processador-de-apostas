@@ -1,0 +1,50 @@
+# Evidência do test:chaos (CHALLENGE §3: "PostgreSQL e SQS podem ficar temporariamente indisponíveis")
+#
+# Execução:  2026-11-08T16:51:05Z
+# Código:    f041ebf, mais o resumo por fase em test/chaos/infra-outage.test.ts (commit "docs: evidências e progresso")
+# Ambiente:  Windows 11, Bun 1.4.4, Docker 29.9.2 (Docker Desktop), Postgres 16.10 e LocalStack 4.9.2 do docker-compose.yml
+# Comando:   bun run test:chaos
+#
+# O que o teste faz (ARCHITECTURE.md → "Estratégia de testes" e "Modo \"banco fora\""):
+#  - Sobe 2 instâncias reais (API + consumidor + outbox publisher + worker de pendentes).
+#  - Fase postgres:
+#    - para o Postgres (docker compose stop) por ~40s, acima dos 22s que 5 tentativas com backoff
+#      2/4/8/8s cobririam com os números desta suíte; sem o modo "banco fora", mensagens válidas
+#      iriam para a DLQ (MAX_ATTEMPTS_EXCEEDED);
+#    - durante a queda, a cada ~0,5s: 1 POST HTTP (sem retry, para ver o status) e 1 mensagem SQS;
+#    - depois reenvia os HTTP que levaram 503 e espera a quiescência.
+#  - Fase localstack: pausa o LocalStack por 12s com 8 mensagens já na fila; durante a pausa, POST HTTP
+#    (a API não depende do SQS).
+#  - Verificações finais por SQL e pelas filas (expectConsistent):
+#    - DLQ vazia;
+#    - saldo == ledger e nenhum saldo negativo;
+#    - cada operação aplicada exatamente uma vez;
+#    - no máximo um lançamento por transação;
+#    - saldos iguais aos calculados pelo teste;
+#    - todo evento confirmado entregue à fila de eventos;
+#    - reconciliação HTTP consistente em todas as wallets.
+#
+# Leitura do resumo:
+#  - postgres:
+#    - todas as 74 submissões HTTP feitas na queda voltaram 503 com Retry-After;
+#    - as 2 instâncias entraram uma vez cada no modo "banco fora" e saíram dele;
+#    - só 2 retries no consumidor (a mensagem que acusou a queda em cada instância): nenhuma das
+#      outras mensagens SQS gastou tentativa; no máximo voltaram à fila sem tentativa, junto com o lote
+#      que acusou a queda, e o consumidor não recebeu mais nada até a sonda passar;
+#    - DLQ 0; as 150 operações aplicadas uma vez.
+#    - downMs ~61s = 40,5s de queda + start do Postgres + espera da próxima sonda (backoff
+#      1+2+4+8+16+30s, teto 30s): o consumidor voltou a receber ~16s depois de o banco voltar.
+#  - localstack: 23 transações confirmadas na pausa, com os 46 eventos retidos na outbox até a volta;
+#    11 falhas de publicação reagendadas; DLQ 0; as 31 operações aplicadas uma vez.
+
+$ CHAOS=1 bun test ./test/chaos
+bun test v1.4.4 (38afee6c8)
+
+test\chaos\infra-outage.test.ts:
+[chaos] postgres: {"paradoMs":40490,"httpNaQueda":74,"httpNaQueda503ComRetryAfter":74,"readyDown503":148,"mensagensSqsNaQueda":75,"entradasModoBancoFora":2,"saidasModoBancoFora":2,"downMsPorSaida":[61045,61036],"retriesConsumidor":2,"dlq":0,"operacoesConferidasUmaVez":150}
+[chaos] localstack: {"pausadoMs":12000,"mensagensNaFilaAntes":8,"transacoesHttpConfirmadasNaQueda":23,"eventosRetidosNaOutbox":46,"falhasDePublicacao":11,"dlq":0,"operacoesConferidasUmaVez":31}
+
+ 2 pass
+ 0 fail
+ 246 expect() calls
+Ran 2 tests across 1 file. [84.11s]

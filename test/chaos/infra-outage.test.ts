@@ -33,6 +33,11 @@ const BET = 1_000n; // 10.00
 
 type Wallet = { id: string; playerId: string; expected: bigint };
 
+/** Resumo de cada fase na saída do teste (evidência em docs/carga/chaos.txt). */
+function report(phase: string, values: Record<string, unknown>): void {
+  console.log(`[chaos] ${phase}: ${JSON.stringify(values)}`);
+}
+
 async function compose(...args: string[]): Promise<void> {
   const proc = Bun.spawn(['docker', 'compose', ...args], { cwd: ROOT, stdout: 'pipe', stderr: 'pipe' });
   const code = await proc.exited;
@@ -249,6 +254,7 @@ describe.skipIf(!ENABLED)('chaos: Postgres e SQS temporariamente indisponíveis'
     ).toEqual([]);
     expect(readyDown, '/health/ready acusou o banco fora').toBeGreaterThan(0);
 
+    const outageMs = Date.now() - stoppedAt;
     await compose('start', 'postgres');
     await compose('up', '-d', '--wait', 'postgres');
     down.delete('postgres-stopped');
@@ -268,6 +274,22 @@ describe.skipIf(!ENABLED)('chaos: Postgres e SQS temporariamente indisponíveis'
     expect(total('sqs_message_dead_lettered'), 'nenhuma mensagem na DLQ').toBe(0);
     expect(await metric('wagering_consumer_db_unavailable'), 'gauge de volta a 0').toBe(0);
     await expectConsistent(fromSeq, externals);
+    const downMs = instances.flatMap((instance) =>
+      [...instance.logTail(4_000).matchAll(/"event":"sqs_consumer_db_available","downMs":(\d+)/g)].map((m) => Number(m[1])),
+    );
+    report('postgres', {
+      paradoMs: outageMs,
+      httpNaQueda: duringOutage.length,
+      httpNaQueda503ComRetryAfter: duringOutage.filter((r) => r.status === 503 && r.retryAfter !== null).length,
+      readyDown503: readyDown,
+      mensagensSqsNaQueda: externals.filter((ext) => ext.startsWith('pg-sqs-') || ext === 'bet-pg-1').length,
+      entradasModoBancoFora: total('sqs_consumer_db_unavailable'),
+      saidasModoBancoFora: total('sqs_consumer_db_available'),
+      downMsPorSaida: downMs,
+      retriesConsumidor: (await metric('wagering_retries_total')) - retriesBefore,
+      dlq: (await readDlq(sqs, queues.dlqUrl)).length,
+      operacoesConferidasUmaVez: externals.length,
+    });
   }, 300_000);
 
   it('SQS fora do ar: eventos confirmados ficam na outbox até publicar; consumidor e publisher retomam sem perder nada', async () => {
@@ -312,7 +334,17 @@ describe.skipIf(!ENABLED)('chaos: Postgres e SQS temporariamente indisponíveis'
     await waitReady();
     await quiescent();
 
-    expect((await metric('wagering_outbox_publish_failures_total')) - failuresBefore, 'o publisher falhou e reagendou').toBeGreaterThan(0);
+    const publishFailures = (await metric('wagering_outbox_publish_failures_total')) - failuresBefore;
+    expect(publishFailures, 'o publisher falhou e reagendou').toBeGreaterThan(0);
     await expectConsistent(fromSeq, externals);
+    report('localstack', {
+      pausadoMs: SQS_OUTAGE_MS,
+      mensagensNaFilaAntes: 8,
+      transacoesHttpConfirmadasNaQueda: committed.length,
+      eventosRetidosNaOutbox: Number(held?.unpublished),
+      falhasDePublicacao: publishFailures,
+      dlq: (await readDlq(sqs, queues.dlqUrl)).length,
+      operacoesConferidasUmaVez: externals.length,
+    });
   }, 240_000);
 });

@@ -1,6 +1,6 @@
 # Rastreabilidade: exigência → teste
 
-Cada exigência verificável do `CHALLENGE.md`, com o teste que a prova. Gerada na varredura de 2026-11-07/08; revise ao mudar testes ou requisitos.
+Cada exigência verificável do `CHALLENGE.md`, com o teste que a prova. Gerada na varredura de 2026-11-07/08 e revisada em 2026-11-08, depois da banca avaliadora (testes marcados com **(banca)**). Revise ao mudar testes ou requisitos.
 
 **Resumo:** 138 exigências · 137 cobertas · 1 não testável (§14, mocks: é propriedade da própria suíte). Antes da varredura eram 16 parciais e 1 ausente; os testes que fecharam essas lacunas estão marcados com **(novo)**.
 
@@ -16,7 +16,7 @@ Abreviações: `U` = `test/unit`, `I` = `test/integration`, `C` = `test/concurre
 | 3.4 | Processo morre **antes** do commit | **(novo)** M/crash-before-commit "SIGKILL com a transação aberta: nada persiste, a mensagem volta e é processada uma única vez"; I/atomicity "falha na gravação de %s → nada persiste" | COBERTO |
 | 3.5 | Processo morre **depois** do commit | M/multi-instance item 5 (`FAULT_INJECTION`, SIGKILL antes do `DeleteMessage`); I/sqs-consumer "worker morto depois do commit e antes do ack" | COBERTO |
 | 3.6 | Eventos publicados mais de uma vez | I/outbox-publisher "exceção depois de publicar e antes do commit → outra instância republica o mesmo eventId; marcado uma vez" e "conexão do publisher morta (pg_terminate_backend)" | COBERTO |
-| 3.7 | PostgreSQL temporariamente indisponível | **(novo)** X/infra-outage "Postgres fora do ar durante a carga: API 503, consumidor em retry sem DLQ, tudo retoma e fica consistente" | COBERTO |
+| 3.7 | PostgreSQL temporariamente indisponível | **(novo)** X/infra-outage "Postgres fora do ar durante a carga: API 503, consumidor em retry sem DLQ, tudo retoma e fica consistente". **(banca)** A queda passou a durar 40s, acima da tolerância antiga do consumidor; o teste confere a entrada e a saída do modo "banco fora". Saída em [`docs/carga/chaos.txt`](carga/chaos.txt). **(banca)** I/sqs-consumer › modo "banco fora": "sem conexão: para de receber enquanto a sonda falha…", "banco fora não conta para o limite de tentativas…", "as mensagens em voo de outros grupos voltam sem tentativa…", "stop() interrompe a espera…" | COBERTO |
 | 3.8 | SQS temporariamente indisponível | **(novo)** X/infra-outage "SQS fora do ar: eventos confirmados ficam na outbox até publicar; consumidor e publisher retomam sem perder nada" | COBERTO |
 | 3.9 | Sem crédito duplicado | I/process "REFERENCE_ALREADY_REVERSED: %s sobre BET já estornada"; I/schema-constraints "rejeita ROLLBACK PROCESSED de uma BET que já tem REFUND"; M verificações 3–4 | COBERTO |
 | 3.10 | Sem débito duplicado | C "a mesma BET 50x"; M item 1; X (uma linha e um lançamento por operação) | COBERTO |
@@ -72,13 +72,13 @@ Abreviações: `U` = `test/unit`, `I` = `test/integration`, `C` = `test/concurre
 | 7.T3 | LOSS: sem saldo, sem ledger | I/process "LOSS › PROCESSED com o saldo observado, sem lançamento" | COBERTO |
 | 7.T4 | REFUND: crédito, uma vez | I/process "REFUND › reverte a BET", "REFERENCE_ALREADY_REVERSED: segundo REFUND" | COBERTO |
 | 7.T5 | ROLLBACK: inverso, uma vez | I/process "ROLLBACK › de BET → CREDIT", "de WIN → DEBIT", "de REFUND → DEBIT" | COBERTO |
-| 7.1 | REFUND/ROLLBACK exigem referência | U/wager-transaction "%s exige referência" | COBERTO |
+| 7.1 | REFUND/ROLLBACK exigem referência | U/wager-transaction "%s exige referência"; **(banca)** "BET com referência é inválida", "%s não pode referenciar a si mesma" (as duas regras passaram para `WagerTransaction.create`) | COBERTO |
 | 7.2 | Referência: mesmo provider, player, wallet, moeda e rodada | I/process "referência de outro provider não é encontrada", "REFERENCE_PLAYER_MISMATCH", "REFERENCE_WALLET_MISMATCH", "CURRENCY_MISMATCH na referência", "REFERENCE_ROUND_MISMATCH" | COBERTO |
 | 7.3 | REFUND só de BET; ROLLBACK de BET/WIN/REFUND | I/process "REFUND referenciando WIN → INVALID_REFERENCE_KIND", "ROLLBACK de LOSS → INVALID_REFERENCE_KIND" | COBERTO |
 | 7.4 | Não reverter duas vezes | I/process "REFERENCE_ALREADY_REVERSED" (3 testes); I/schema "uma reversão PROCESSED por referência" | COBERTO |
 | 7.5 | Valor igual ao da referência | I/process "AMOUNT_MISMATCH" | COBERTO |
 | 7.6 | REJECTED não altera saldo nem ledger | I/process "saldo insuficiente → … sem lançamento"; M verificação 5 | COBERTO |
-| 7.7 | Replay devolve o resultado e o saldo da época | I/process "replay devolve o resultado original com o saldo da época" | COBERTO |
+| 7.7 | Replay devolve o resultado e o saldo da época | I/process "replay devolve o resultado original com o saldo da época"; **(banca)** "replay e conflito respondem sem esperar o lock da wallet (leitura antes do lock)" | COBERTO |
 | 7.8 | Referência ausente → PENDING_REFERENCE | I/process "com referência inexistente → PENDING_REFERENCE", "referência ausente → PENDING_REFERENCE com evento na outbox" | COBERTO |
 | 7.9 | Reversão que deixaria saldo negativo: código próprio | I/process "de WIN já gasto → REVERSAL_WOULD_OVERDRAW"; U/failure-code "saldo insuficiente em BET e reversão … são códigos distintos" | COBERTO |
 | 7.1a | Worker agendado com backoff exponencial | I/workers/pending-references "backoff 5s, 10s, … com a última checagem no prazo" | COBERTO |
@@ -90,7 +90,7 @@ Abreviações: `U` = `test/unit`, `I` = `test/integration`, `C` = `test/concurre
 
 | # | Exigência | Teste | Status |
 |---|---|---|---|
-| 8.0 | Cenário obrigatório 100 − 80 − 80 | C "cenário obrigatório: … uma PROCESSED, uma REJECTED, saldo 20.00, um débito"; M item 4 (em duas instâncias) | COBERTO |
+| 8.0 | Cenário obrigatório 100 − 80 − 80 | C "cenário obrigatório: … uma PROCESSED, uma REJECTED, saldo 20.00, um débito"; **(banca)** o teste prova a sobreposição (as duas BETs esperando o lock ao mesmo tempo, via `pg_stat_activity`) e reenvia as duas depois (replay idêntico, sem novo débito); M item 4 (em duas instâncias) | COBERTO |
 | 8.1 | Duas apostas disputam o saldo | idem | COBERTO |
 | 8.2 | Vários workers na mesma wallet | I/sqs-consumer "duas instâncias com a mesma mensagem em paralelo"; M hot wallet | COBERTO |
 | 8.3 | Wallets diferentes em paralelo | **(novo)** C "wallet travada não bloqueia as outras"; M 12 wallets aleatórias | COBERTO |
@@ -114,7 +114,7 @@ Abreviações: `U` = `test/unit`, `I` = `test/integration`, `C` = `test/concurre
 | 9.12 | 422 rejeição de negócio | I/http "Rejected → 422 com failureCode" | COBERTO |
 | 9.13 | 202 aceite pendente | I/http "PendingReference → 202 com nextReferenceCheckAt" | COBERTO |
 | 9.14 | 503 falha transitória | I/http "lock da wallet ocupado → 503 TRANSIENT_FAILURE com Retry-After"; X/infra-outage (banco parado: toda submissão 503 com Retry-After) | COBERTO |
-| 9.15 | Reconciliação: log + métrica + sinalização, sem corrigir | I/http "divergente: sinaliza, conta na métrica e não corrige o saldo" (**novo**: verifica o log `reconciliation_divergence`) | COBERTO |
+| 9.15 | Reconciliação: log + métrica + sinalização, sem corrigir | I/http "divergente: sinaliza, conta na métrica e não corrige o saldo" (**novo**: verifica o log `reconciliation_divergence`; **(banca)** só tipos e ids, sem valores). **(banca)** I/http › "cruza ledger × transações": um teste por tipo de divergência (`ENTRY_WITHOUT_PROCESSED_TRANSACTION`, `ENTRY_TRANSACTION_DOES_NOT_MOVE_BALANCE`, `ENTRY_AMOUNT_MISMATCH`, `ENTRY_DIRECTION_MISMATCH` (BET e ROLLBACK de WIN), `PROCESSED_WITHOUT_ENTRY`, `PROCESSED_WITH_MULTIPLE_ENTRIES`, várias juntas), mais os consistentes: "wallet só com a abertura", "saldo zero", "BET, WIN, LOSS, REFUND e ROLLBACK de WIN" | COBERTO |
 | 9.16 | `/health/live` e `/health/ready` | I/health (5 testes, inclusive Postgres e SQS inalcançáveis) | COBERTO |
 | 9.17 | Health sem autenticação | **(novo)** I/health "health checks fora do AuthGuard" (guard negando tudo: health 200, wagering 403) | COBERTO |
 
@@ -123,10 +123,10 @@ Abreviações: `U` = `test/unit`, `I` = `test/integration`, `C` = `test/concurre
 | # | Exigência | Teste | Status |
 |---|---|---|---|
 | 10.1 | Mesmo use case do HTTP | M item 1 (HTTP e SQS com a mesma key → 1 transação); I/sqs-consumer "outro messageId com a mesma idempotencyKey: replay pelo use case" | COBERTO |
-| 10.2 | Dedup por inbox persistente | I/sqs-consumer "a mesma mensagem entregue duas vezes: a inbox confirma a 2ª sem chamar o use case" | COBERTO |
+| 10.2 | Dedup por inbox persistente | I/sqs-consumer "a mesma mensagem entregue duas vezes: a inbox confirma a 2ª sem chamar o use case"; **(banca)** "mesmo messageId com "25" e depois "25.00": mesma mensagem (hash normalizado)…"; U/wager-envelope "hash da inbox usa a normalização da transação…" | COBERTO |
 | 10.3 | Ack só depois do commit | I/sqs-consumer "worker morto depois do commit e antes do ack"; M item 5 | COBERTO |
 | 10.4 | Negócio (ack), transitório (retry), permanente (DLQ) | I/sqs-consumer "rejeição de negócio: ack…", "falha transitória: visibilidade 30/60/120/240…", "envelope que estoura o parser: DLQ INVALID_ENVELOPE" | COBERTO |
-| 10.5 | Limite de tentativas antes da DLQ | I/sqs-consumer "falha transitória além do limite do consumidor (5, fila em 10): DLQ MAX_ATTEMPTS_EXCEEDED" | COBERTO |
+| 10.5 | Limite de tentativas antes da DLQ | I/sqs-consumer "falha transitória além do limite do consumidor (5, fila em 10): DLQ MAX_ATTEMPTS_EXCEEDED"; **(banca)** "banco fora não conta para o limite de tentativas do consumidor" e "lock_timeout … não ativa o modo" | COBERTO |
 | 10.6 | SIGTERM: conclui ou devolve a visibilidade | I/sqs-consumer "SIGTERM com mensagem em andamento dentro do prazo", "SIGTERM além do prazo: devolve a visibilidade" | COBERTO |
 | 10.7 | Redelivery sem duplicar | I/sqs-consumer "a mesma mensagem entregue duas vezes"; M item 5 | COBERTO |
 
@@ -156,7 +156,7 @@ Abreviações: `U` = `test/unit`, `I` = `test/integration`, `C` = `test/concurre
 | 12.4 | Métrica: duplicatas | idem (`wagering_idempotent_replays_total`); I/sqs-consumer (contador `replays`) | COBERTO |
 | 12.5 | Métrica: retries | I/sqs-consumer "falha transitória …" (`retries` = 4); X (retries > 0 na queda do banco) | COBERTO |
 | 12.6 | Métrica: mensagens em DLQ | I/sqs-consumer "falha transitória além do limite" (`dlqMessages` = 1) | COBERTO |
-| 12.7 | Métrica: conflitos de lock | I/http "lock da wallet ocupado → 503 … e conflito na métrica" | COBERTO |
+| 12.7 | Métrica: conflitos de lock | I/http "lock da wallet ocupado → 503 … e conflito na métrica" (**(banca)** 2 conflitos: a tentativa extra interna também conta); U/process "lock_timeout no caminho com lock: 1 tentativa extra, depois TransientFailure" | COBERTO |
 | 12.8 | Métrica: outbox lag | I/outbox "outbox lag e eventos travados: gauges medidos a partir do pendente mais antigo" | COBERTO |
 | 12.9 | Métrica: latência de processamento | **(novo)** I/http "/metrics …": `wagering_processing_duration_seconds_count` cresce 1 por execução | COBERTO |
 | 12.10 | Liveness e readiness separados | I/health "GET /health/live continua 200 (liveness não depende de terceiros)" | COBERTO |
@@ -171,7 +171,7 @@ Abreviações: `U` = `test/unit`, `I` = `test/integration`, `C` = `test/concurre
 | 13.I3 | Inbox e redelivery | I/sqs-consumer (entrega dupla, worker morto antes do ack) | COBERTO |
 | 13.I4 | Publishers concorrentes | I/outbox (pg_terminate_backend, idle timeout); C/outbox-publishers | COBERTO |
 | 13.I5 | Retry e DLQ | I/sqs-consumer (backoff, limite, DLQ) | COBERTO |
-| 13.I6 | Recuperação após reinicialização | M item 8; I/outbox (sessão morta); X (Postgres reiniciado) | COBERTO |
+| 13.I6 | Recuperação após reinicialização | M item 8; I/outbox (sessão morta); X (Postgres reiniciado; saída em [`docs/carga/chaos.txt`](carga/chaos.txt)) | COBERTO |
 | 13.C1 | Mesma aposta 50x → um débito | C "a mesma BET 50x"; M item 1 | COBERTO |
 | 13.C2 | Disputa de saldo | C cenário 80+80 | COBERTO |
 | 13.C3 | Wallets distintas em paralelo | **(novo)** C "wallet travada não bloqueia as outras" | COBERTO |
