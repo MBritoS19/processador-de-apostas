@@ -98,6 +98,37 @@ export async function expectConsistent(
     'valor do lançamento diferente do valor da transação',
   ).toEqual([]);
 
+  // 5b. Diário de partidas dobradas: saldo da conta PLAYER == wallet.balance (== ledger, pelo item 1),
+  // um lançamento de diário por lançamento do ledger e vice-versa, e débito = crédito em cada um.
+  expect(
+    await rows(
+      `select w.id, w.balance::text as balance, coalesce(j.total, 0)::numeric(20,2)::text as journal
+         from wallets w
+         left join (select a.wallet_id, sum(case p.direction when 'CREDIT' then p.amount else -p.amount end) as total
+                      from accounts a join journal_postings p on p.account_id = a.id
+                     where a.kind = 'PLAYER' group by a.wallet_id) j on j.wallet_id = w.id
+        where w.balance <> coalesce(j.total, 0)`,
+    ),
+    'saldo da conta PLAYER no diário == wallet.balance',
+  ).toEqual([]);
+  expect(
+    await rows(
+      `select l.transaction_id from wallet_ledger_entries l
+         left join journal_entries j on j.wager_transaction_id = l.transaction_id where j.id is null
+       union all
+       select j.wager_transaction_id from journal_entries j
+         left join wallet_ledger_entries l on l.transaction_id = j.wager_transaction_id where l.id is null`,
+    ),
+    'lançamento do ledger sem diário, ou diário sem lançamento do ledger',
+  ).toEqual([]);
+  expect(
+    await rows(
+      `select journal_entry_id from journal_postings group by journal_entry_id
+       having sum(case direction when 'DEBIT' then amount else 0 end) <> sum(case direction when 'CREDIT' then amount else 0 end)`,
+    ),
+    'lançamento de diário com débito ≠ crédito',
+  ).toEqual([]);
+
   // 6. Outbox toda publicada, e cada eventId da outbox chegou à fila de eventos (duplicata pode, perda não).
   const outboxIds = (await rows<{ id: string }>('select id from outbox_messages')).map((row) => row.id);
   expect(outboxIds.length, 'houve eventos').toBeGreaterThan(0);
