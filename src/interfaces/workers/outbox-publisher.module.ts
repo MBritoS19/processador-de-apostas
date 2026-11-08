@@ -19,7 +19,7 @@ import { OutboxPublisher } from './outbox-publisher';
  * Cliente SQS só do publisher, com `maxAttempts: 1`: o `abortSignal` não interrompe a espera entre
  * retries do SDK, e o retry do publisher (backoff gravado na outbox) já cobre a falha.
  */
-export const OUTBOX_SQS_CLIENT = Symbol('OUTBOX_SQS_CLIENT');
+const OUTBOX_SQS_CLIENT = Symbol('OUTBOX_SQS_CLIENT');
 
 /**
  * Liga o publisher quando `OUTBOX_PUBLISHER_ENABLED=true`. Para em `beforeApplicationShutdown`,

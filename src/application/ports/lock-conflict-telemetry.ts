@@ -6,7 +6,7 @@ export interface LockConflict {
   correlationId: string;
 }
 
-/** Registra conflitos de concorrência por wallet (log estruturado + contador; métricas reais na Fase 8). */
+/** Registra conflitos de concorrência por wallet (log estruturado + métrica). */
 export interface LockConflictTelemetry {
   lockConflict(conflict: LockConflict): void;
 }

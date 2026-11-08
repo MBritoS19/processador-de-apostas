@@ -125,7 +125,8 @@ Provedores enviam `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK` por HTTP ou pela f
 
 ### Mapeamento: registros de persistência e mappers
 
-- Cada tabela tem uma classe de registro simples (`WalletRecord`, `WagerTransactionRecord`, `LedgerEntryRecord`, `InboxMessageRecord`, `OutboxMessageRecord`), mapeada por `EntitySchema` em `src/infrastructure/persistence/*.persistence.ts`, e um par de funções `toXRecord(domínio)` / `toX(registro)`. A volta sempre passa pelo `rehydrate` do domínio.
+- Cada tabela tem uma classe de registro simples (`WalletRecord`, `WagerTransactionRecord`, `LedgerEntryRecord`, `InboxMessageRecord`, `OutboxMessageRecord`), mapeada por `EntitySchema` em `src/infrastructure/persistence/*.persistence.ts`. Wallet, transação e lançamento têm o par `toXRecord(domínio)` / `toX(registro)`; a volta sempre passa pelo `rehydrate` do domínio.
+- **Inbox e outbox têm um único mapeador cada, o de escrita** (`toInboxMessageRecord`, `toOutboxMessageRecord`), porque produção nunca as lê como registro ORM: a inbox só é consultada pelo hash (`InboxLookup`), e a outbox é lida pelo claim em SQL cru do `OutboxStore`, que reidrata a linha com `OutboxMessage.rehydrate`. Um segundo mapeador de leitura só serviria aos testes e teria de ser mantido em sincronia; o teste de round-trip lê pelos mesmos caminhos de produção.
 - **Por que não mapear as classes de domínio direto:** o MikroORM hidrataria campos privados (`_balance`, `_status`) sem passar pelo `rehydrate`, e o `Money` exigiria um embeddable ou custom type acoplado ao ORM. As classes de domínio ficam sem decorators e sem nenhum import de ORM (CHALLENGE §6.1).
 - Os registros não têm relações ORM: as FKs são colunas `string`. Isso funciona porque **todas as FKs entre tabelas são `DEFERRABLE INITIALLY DEFERRED`**: são checadas no COMMIT, então a ordem de INSERT escolhida pelo flush não importa (há teste que persiste os lançamentos antes da transação e da wallet).
 - Colunas geradas pelo banco e não mapeadas: `wallet_ledger_entries.seq` (cursor do ledger) e `wager_transactions.wallet_fk_currency` (ver [Garantias no schema](#garantias-no-schema)).
@@ -692,7 +693,7 @@ Abertos, sem autenticação (CHALLENGE §2).
 - `GET /metrics` (formato Prometheus), aberto como os health checks. Em produção ficaria numa porta interna ou atrás da rede do scraper.
 - `InstrumentedProcessWagerTransaction` envolve o **use case**, não o controller, para que HTTP e consumidor SQS passem pelas mesmas métricas. Erros lançados também são medidos (`status="ERROR"`) e depois relançados.
 - **Registry próprio** (`new Registry()` por `ObservabilityMetrics`), nunca o default do prom-client: duas aplicações no mesmo processo (como nos testes) não colidem.
-- **Labels só de conjunto fechado:** `status`, `kind` e `failure_code`. Um `kind` fora do enum vira `UNKNOWN`, porque o valor cru vem do cliente e explodiria a cardinalidade. Ids nunca são labels.
+- **Labels só de conjunto fechado:** `status`, `kind`, `failure_code`, `scope` e `reason`. Um `kind` fora do enum vira `UNKNOWN`, porque o valor cru vem do cliente e explodiria a cardinalidade. Ids nunca são labels.
 
 | Métrica | Tipo | Labels | O que mede |
 |---|---|---|---|
@@ -700,7 +701,7 @@ Abertos, sem autenticação (CHALLENGE §2).
 | `wagering_processing_duration_seconds` | histogram | status, kind, failure_code | latência do use case |
 | `wagering_idempotent_replays_total` | counter | kind | duplicatas detectadas (HTTP e SQS) |
 | `wagering_idempotency_conflicts_total` | counter | kind | mesma key com outro payload |
-| `wagering_lock_conflicts_total` | counter | — | lock timeout, deadlock e `version_conflict` |
+| `wagering_lock_conflicts_total` | counter | reason (`lock_timeout`, `deadlock`, `version_conflict`) | conflitos de lock da wallet; o log `wallet_lock_conflict` (pino) traz os mesmos campos |
 | `wagering_reconciliation_divergences_total` | counter | — | reconciliações divergentes |
 | `wagering_retries_total` | counter | — | cada `ChangeMessageVisibility` de retry no consumidor |
 | `wagering_dlq_messages_total` | counter | — | mensagens enviadas à DLQ pelo consumidor (não conta o redrive nativo) |
@@ -810,8 +811,9 @@ Todas as variáveis são lidas e validadas por `loadConfig` (`src/infrastructure
 | `SHUTDOWN_BUDGET_MS` | `25000` | teto da soma dos três prazos de shutdown |
 | `FAULT_INJECTION` | `none` | só testes: `exit_after_commit_before_ack`, exige `NODE_ENV=test` |
 | `MULTI_SEED` | aleatória | só `test:multi`: reproduz a carga |
+| `LOG_LEVEL` | `info` | nível do pino (`trace`…`fatal`, `silent`); lida direto em `logger.ts`, fora do `loadConfig`, porque o logger existe antes da config |
 
-Constantes fixas no código (não configuráveis): `lock_timeout` 2s, `statement_timeout` do claim 5s, pool 10 / acquire 10s, backoff das pendências 5s→10min, backoff da outbox 1s→5min, pausa dos loops até 30s.
+Constantes fixas no código (não configuráveis): `lock_timeout` 2s, `statement_timeout` do claim 5s, pool 10 / acquire 10s, backoff das pendências 5s→10min, backoff da outbox 1s→5min, pausa dos loops até 30s (`errorPauseMs`, a mesma nos três loops). Todos os backoffs usam `exponentialBackoffMs` (`src/domain/backoff.ts`).
 
 ## Interpretações adotadas
 

@@ -20,7 +20,7 @@ import { WagerTransactionRecord, toWagerTransaction, toWagerTransactionRecord } 
 import { LedgerEntryRecord, toLedgerEntryRecord } from './wallet-ledger-entry.persistence';
 import { WalletRecord, toWallet, toWalletRecord } from './wallet.persistence';
 
-export const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
+const DEFAULT_LOCK_TIMEOUT_MS = 2_000;
 
 /** SQLSTATEs que significam "tente de novo": lock_not_available, deadlock, serialization_failure. */
 const TRANSIENT_SQLSTATES = {

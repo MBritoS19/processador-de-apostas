@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { parseEnvelope, type WagerEnvelope } from '../../../src/interfaces/sqs/wager-envelope';
-import { pollPauseMs, retryDelaySeconds } from '../../../src/interfaces/sqs/wager-consumer';
+import { errorPauseMs } from '../../../src/interfaces/error-pause';
+import { retryDelaySeconds } from '../../../src/interfaces/sqs/wager-consumer';
 
 const data = {
   providerId: 'provider-a',
@@ -80,6 +81,6 @@ describe('backoff do consumidor', () => {
   });
 
   it('pausa do polling: 1s·2^(n−1) até 30s', () => {
-    expect([1, 2, 3, 4, 5, 6, 7].map(pollPauseMs)).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+    expect([1, 2, 3, 4, 5, 6, 7].map(errorPauseMs)).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000]);
   });
 });

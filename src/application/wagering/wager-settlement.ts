@@ -22,12 +22,6 @@ export interface SettlementContext {
 }
 
 /**
- * Prazo para a referência aparecer, contado do `createdAt` da transação dependente. Esgotado:
- * REJECTED com REFERENCE_NOT_FOUND (justificativa no ARCHITECTURE.md → "Worker de referências pendentes").
- */
-export const PENDING_REFERENCE_TTL_MS = 60 * 60_000;
-
-/**
  * `insert`: transação nova (entrada HTTP/SQS). `update`: reprocessamento de uma PENDING_REFERENCE
  * já gravada (worker); nova tentativa sem resolução não gera evento.
  */
@@ -47,7 +41,11 @@ type ReferenceCheck = { type: 'ok'; reference: WagerTransaction } | { type: 'pen
 export class WagerSettlement {
   constructor(
     private readonly ids: IdGenerator,
-    private readonly referenceTtlMs: number = PENDING_REFERENCE_TTL_MS,
+    /**
+     * Prazo para a referência aparecer, contado do `createdAt` da transação dependente (PENDING_REFERENCE_TTL_MS).
+     * Esgotado: REJECTED com REFERENCE_NOT_FOUND (ARCHITECTURE.md → "Worker de referências pendentes").
+     */
+    private readonly referenceTtlMs: number,
   ) {
     if (!Number.isInteger(referenceTtlMs) || referenceTtlMs <= 0) {
       throw new RangeError('referenceTtlMs deve ser um inteiro positivo');

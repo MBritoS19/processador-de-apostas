@@ -10,9 +10,11 @@ const never = (name: string, seen?: { signal?: AbortSignal }) =>
     return new Promise<void>(() => {});
   });
 
+const ignore = () => {};
+
 describe('ReadinessService', () => {
   it('ready quando todos os checks passam', async () => {
-    const report = await new ReadinessService([up('postgres'), up('sqs')], 100).evaluate();
+    const report = await new ReadinessService([up('postgres'), up('sqs')], 100, ignore).evaluate();
     expect(report).toEqual({
       status: 'ready',
       dependencies: { postgres: { status: 'up' }, sqs: { status: 'up' } },
@@ -20,14 +22,14 @@ describe('ReadinessService', () => {
   });
 
   it('ready sem checks registrados', async () => {
-    expect(await new ReadinessService([], 100).evaluate()).toEqual({ status: 'ready', dependencies: {} });
+    expect(await new ReadinessService([], 100, ignore).evaluate()).toEqual({ status: 'ready', dependencies: {} });
   });
 
   it('dependência inalcançável → down/unreachable, sem afetar as demais', async () => {
     const failing = check('sqs', async () => {
       throw new DependencyUnreachableError('sqs');
     });
-    const report = await new ReadinessService([up('postgres'), failing], 100).evaluate();
+    const report = await new ReadinessService([up('postgres'), failing], 100, ignore).evaluate();
 
     expect(report.status).toBe('not_ready');
     expect(report.dependencies).toEqual({
@@ -40,7 +42,7 @@ describe('ReadinessService', () => {
     const seen: { signal?: AbortSignal } = {};
     const startedAt = performance.now();
 
-    const report = await new ReadinessService([never('postgres', seen)], 50).evaluate();
+    const report = await new ReadinessService([never('postgres', seen)], 50, ignore).evaluate();
 
     expect(performance.now() - startedAt).toBeLessThan(1000);
     expect(report.dependencies['postgres']).toEqual({ status: 'down', reason: 'timeout' });
@@ -51,7 +53,7 @@ describe('ReadinessService', () => {
     const leaky = check('postgres', async () => {
       throw new Error('connect ECONNREFUSED 10.0.3.7:5432 user=wagering');
     });
-    const report = await new ReadinessService([leaky], 100).evaluate();
+    const report = await new ReadinessService([leaky], 100, ignore).evaluate();
 
     expect(report.dependencies['postgres']).toEqual({ status: 'down', reason: 'error' });
     expect(JSON.stringify(report)).not.toContain('10.0.3.7');
@@ -61,7 +63,7 @@ describe('ReadinessService', () => {
     const weird = check('sqs', async () => {
       throw 'boom';
     });
-    const report = await new ReadinessService([weird], 100).evaluate();
+    const report = await new ReadinessService([weird], 100, ignore).evaluate();
     expect(report.dependencies['sqs']).toEqual({ status: 'down', reason: 'error' });
   });
 
@@ -89,6 +91,7 @@ describe('ReadinessService', () => {
         never('c'),
       ],
       50,
+      ignore,
     ).evaluate();
 
     for (const dependency of Object.values(report.dependencies)) {

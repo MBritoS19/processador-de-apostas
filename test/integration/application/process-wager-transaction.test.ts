@@ -11,6 +11,7 @@ import { Money } from '../../../src/domain/money';
 import { Wallet } from '../../../src/domain/wallet';
 import { MikroOrmWagerUnitOfWork } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
 import { T0, expectLedgerConsistent, openOrm, seedWallet, transactionRow, truncateAll } from '../persistence/db';
+import { counterTotal } from '../workers/pending-harness';
 import { buildUseCase, command, countRows, walletBalance, type WalletRef } from './harness';
 
 /** Espera até alguma sessão estar bloqueada em lock (o INSERT do use case esperando a unicidade). */
@@ -503,7 +504,7 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
 
   describe('concorrência (barreiras)', () => {
     it('lock da wallet ocupado além do lock_timeout → TransientFailure, conflito contado e logado', async () => {
-      const { useCase: impatient, telemetry, logs } = buildUseCase(orm, { lockTimeoutMs: 200 });
+      const { useCase: impatient, metrics, logs } = buildUseCase(orm, { lockTimeoutMs: 200 });
       const knex = orm.em.getKnex();
       const trx = await knex.transaction();
       try {
@@ -512,8 +513,9 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       } finally {
         await trx.rollback();
       }
-      expect(telemetry.count('lock_timeout')).toBe(1);
-      expect(JSON.parse(logs[0] ?? '{}')).toMatchObject({ event: 'wallet_lock_conflict', reason: 'lock_timeout', walletId: wallet.walletId });
+      expect(await counterTotal(metrics.lockConflicts)).toBe(1);
+      expect(await counterTotal(metrics.lockConflicts, { reason: 'lock_timeout' })).toBe(1);
+      expect(logs[0]).toMatchObject({ event: 'wallet_lock_conflict', reason: 'lock_timeout', walletId: wallet.walletId });
       expect(await countRows(orm, 'wager_transactions')).toBe(1);
     });
 

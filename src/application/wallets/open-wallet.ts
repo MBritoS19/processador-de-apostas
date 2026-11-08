@@ -18,7 +18,7 @@ import {
   type WagerUnitOfWork,
 } from '../ports/wager-unit-of-work';
 import { wagerPayloadHash } from '../wagering/payload-hash';
-import { textProblem } from '../wagering/process-wager-transaction';
+import { textProblem } from '../validation';
 
 /** Corpo do POST /wallets como chega da borda: ainda não validado. */
 export interface OpenWalletCommand {

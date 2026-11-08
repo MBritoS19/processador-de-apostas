@@ -6,6 +6,7 @@ import type {
 import { InstrumentedProcessWagerTransaction } from '../../../src/infrastructure/observability/instrumented-process-wager-transaction';
 import { LoggingLockConflictTelemetry } from '../../../src/infrastructure/observability/lock-conflict-telemetry';
 import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
+import pino from 'pino';
 
 const command = (payload: unknown): ProcessWagerTransactionCommand =>
   ({ idempotencyKey: 'k', correlationId: 'c', payload }) as ProcessWagerTransactionCommand;
@@ -67,12 +68,14 @@ describe('InstrumentedProcessWagerTransaction', () => {
 });
 
 describe('LoggingLockConflictTelemetry', () => {
-  it('incrementa wagering_lock_conflicts_total', async () => {
+  it('incrementa wagering_lock_conflicts_total por reason', async () => {
     const metrics = new ObservabilityMetrics();
-    const telemetry = new LoggingLockConflictTelemetry(() => {}, metrics);
+    const telemetry = new LoggingLockConflictTelemetry(metrics, pino({ level: 'silent' }));
     telemetry.lockConflict({ reason: 'deadlock', walletId: 'w', correlationId: 'c' });
     telemetry.lockConflict({ reason: 'lock_timeout', walletId: 'w', correlationId: 'c' });
-    expect(await value(metrics, 'wagering_lock_conflicts_total')).toBe(2);
+    telemetry.lockConflict({ reason: 'lock_timeout', walletId: 'w', correlationId: 'c' });
+    expect(await value(metrics, 'wagering_lock_conflicts_total', { reason: 'deadlock' })).toBe(1);
+    expect(await value(metrics, 'wagering_lock_conflicts_total', { reason: 'lock_timeout' })).toBe(2);
   });
 });
 
@@ -80,7 +83,7 @@ describe('ObservabilityMetrics', () => {
   it('usa registry próprio, isolado entre instâncias', async () => {
     const a = new ObservabilityMetrics();
     const b = new ObservabilityMetrics();
-    a.lockConflicts.inc();
+    a.lockConflicts.inc({ reason: 'deadlock' });
     expect(await value(b, 'wagering_lock_conflicts_total')).toBe(0);
   });
 });

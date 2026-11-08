@@ -197,7 +197,8 @@ export async function startConsumerApp(options: ConsumerAppOptions): Promise<INe
     const wrap = options.wrapProcess;
     builder = builder.overrideProvider(InstrumentedProcessWagerTransaction).useFactory({
       inject: [EntityManager, ObservabilityMetrics],
-      factory: (em: EntityManager, metrics: ObservabilityMetrics) => wrap(buildInstrumentedProcess(em, metrics)),
+      factory: (em: EntityManager, metrics: ObservabilityMetrics) =>
+        wrap(buildInstrumentedProcess(em, metrics, config.pendingReferences.ttlMs)),
     });
   }
   if (options.queueClient) {

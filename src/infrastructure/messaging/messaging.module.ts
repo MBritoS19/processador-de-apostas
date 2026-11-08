@@ -4,7 +4,7 @@ import { APP_CONFIG, type AppConfig } from '../config/app-config';
 import { createSqsClient } from './sqs.client';
 import { SqsReadinessCheck } from './sqs-readiness.check';
 
-/** Cliente SQS compartilhado (consumidor, outbox publisher) e seu ciclo de vida. */
+/** Cliente SQS do consumidor e do readiness check, e seu ciclo de vida. O outbox publisher tem cliente próprio. */
 @Module({
   providers: [
     {

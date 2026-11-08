@@ -4,6 +4,11 @@ import pino, { type Logger } from 'pino';
 /** Logger raiz (JSON, uma linha por evento). Cada componente usa um `child({ name })`. */
 export const rootLogger: Logger = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
+/** Nome do erro para o campo `errorName` dos logs (nunca a mensagem, que pode carregar dados). */
+export function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : typeof error;
+}
+
 /** Adapta o logger do Nest (boot, rotas, erros do framework) ao mesmo JSON do resto. */
 export class PinoNestLogger implements LoggerService {
   private readonly logger = rootLogger.child({ name: 'Nest' });

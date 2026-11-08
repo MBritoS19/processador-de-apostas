@@ -155,7 +155,7 @@ export class ManualClock implements Clock {
   }
 }
 
-export const TEST_PUBLISHER_OPTIONS: OutboxPublisherOptions = {
+const TEST_PUBLISHER_OPTIONS: OutboxPublisherOptions = {
   batchSize: 10,
   pollIntervalMs: 50,
   sqsTimeoutMs: 2_000,

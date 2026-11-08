@@ -4,9 +4,9 @@ import type {
   PendingReferenceOutcome,
   ResolvePendingReferences,
 } from '../../application/wagering/resolve-pending-references';
-import { rootLogger } from '../../infrastructure/observability/logger';
+import { errorName, rootLogger } from '../../infrastructure/observability/logger';
 import type { ObservabilityMetrics } from '../../infrastructure/observability/metrics';
-import { errorPauseMs } from './outbox-publisher';
+import { errorPauseMs } from '../error-pause';
 
 export interface PendingReferenceWorkerOptions {
   batchSize: number;
@@ -233,8 +233,4 @@ export class PendingReferenceWorker {
 function track(counters: Map<string, number>, id: string, value: number): void {
   if (!counters.has(id) && counters.size >= MAX_TRACKED) counters.clear();
   counters.set(id, value);
-}
-
-function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error;
 }

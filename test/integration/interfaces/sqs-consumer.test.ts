@@ -428,7 +428,7 @@ describe('consumidor SQS (LocalStack + Postgres reais)', () => {
     const failed = receives[first];
     const next = receives[first + 1];
     expect(failed?.endedAt).toBeDefined();
-    // pollPauseMs(1) = 1s entre o lote com falha e o próximo ReceiveMessage.
+    // errorPauseMs(1) = 1s entre o lote com falha e o próximo ReceiveMessage.
     expect((next?.startedAt ?? 0) - (failed?.endedAt ?? 0)).toBeGreaterThanOrEqual(900);
     await expectLedgerConsistent(orm, wallet.walletId);
   });

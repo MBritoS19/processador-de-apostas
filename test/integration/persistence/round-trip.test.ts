@@ -12,12 +12,10 @@ import {
 } from '../../../src/domain/wager-transaction';
 import { Wallet } from '../../../src/domain/wallet';
 import { WalletBalanceChanged } from '../../../src/domain/events/wallet-balance-changed';
+import { OutboxStore } from '../../../src/infrastructure/outbox/outbox-store';
 import {
   InboxMessageRecord,
-  OutboxMessageRecord,
-  toInboxMessage,
   toInboxMessageRecord,
-  toOutboxMessage,
   toOutboxMessageRecord,
 } from '../../../src/infrastructure/persistence/messages.persistence';
 import {
@@ -191,6 +189,7 @@ describe('persistência — round-trip pelo MikroORM', () => {
     expect(loadedRejected.observedBalance).toBeUndefined();
   });
 
+  // Inbox e outbox só têm o mapeador de escrita: a volta é pelos caminhos de leitura de produção.
   it('inbox e outbox (payload jsonb) voltam iguais', async () => {
     const inbox = InboxMessage.receive({ messageId: 'sqs-1', consumerName: 'wager-consumer', payloadHash: 'h', receivedAt: T0 });
     inbox.markProcessed(T1);
@@ -205,9 +204,13 @@ describe('persistência — round-trip pelo MikroORM', () => {
 
     const read = orm.em.fork();
     expect(
-      toInboxMessage(await read.findOneOrFail(InboxMessageRecord, { consumerName: 'wager-consumer', messageId: 'sqs-1' })),
-    ).toEqual(inbox);
-    const loaded = toOutboxMessage(await read.findOneOrFail(OutboxMessageRecord, { id: outbox.id }));
+      await read.findOneOrFail(InboxMessageRecord, { consumerName: 'wager-consumer', messageId: 'sqs-1' }),
+    ).toMatchObject({ payloadHash: 'h', receivedAt: T0, processedAt: T1 });
+    // O claim do publisher (sem publicar nada) devolve o evento como o publisher o vê.
+    const claimed = await new OutboxStore(orm.em, 15_000).claim(10, new Date(T1.getTime() + 3_600_000), async () => {});
+    expect(claimed).toHaveLength(1);
+    const loaded = claimed[0] as OutboxMessage;
+    expect(loaded.id).toBe(outbox.id);
     expect(loaded.payload).toEqual(outbox.payload);
     expect(loaded.attempts).toBe(1);
     expect(loaded.nextAttemptAt).toEqual(outbox.nextAttemptAt);

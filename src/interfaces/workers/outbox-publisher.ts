@@ -1,10 +1,11 @@
 import type { Logger } from 'pino';
 import type { Clock } from '../../application/ports/clock';
 import type { OutboxMessage } from '../../domain/outbox-message';
-import { rootLogger } from '../../infrastructure/observability/logger';
+import { errorName, rootLogger } from '../../infrastructure/observability/logger';
 import type { ObservabilityMetrics } from '../../infrastructure/observability/metrics';
 import type { OutboxEventsClient, PublishResult } from '../../infrastructure/outbox/outbox-events.client';
 import type { OutboxStore } from '../../infrastructure/outbox/outbox-store';
+import { errorPauseMs } from '../error-pause';
 
 export interface OutboxPublisherOptions {
   batchSize: number;
@@ -12,15 +13,6 @@ export interface OutboxPublisherOptions {
   sqsTimeoutMs: number;
   stuckAttempts: number;
   shutdownTimeoutMs: number;
-}
-
-/** Pausa quando o próprio ciclo falha (banco fora): 1s·2^(n−1), até 30s. */
-export const ERROR_PAUSE_BASE_MS = 1_000;
-export const ERROR_PAUSE_MAX_MS = 30_000;
-
-export function errorPauseMs(consecutiveFailures: number): number {
-  const exponent = Math.min(Math.max(consecutiveFailures - 1, 0), 30);
-  return Math.min(ERROR_PAUSE_MAX_MS, ERROR_PAUSE_BASE_MS * 2 ** exponent);
 }
 
 /**
@@ -212,8 +204,4 @@ export class OutboxPublisher {
 /** Erro do AWS SDK atribuído ao chamador (4xx): `$fault === 'client'`. */
 function isClientFault(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { $fault?: unknown }).$fault === 'client';
-}
-
-function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error;
 }

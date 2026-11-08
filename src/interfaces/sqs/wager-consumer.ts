@@ -5,10 +5,12 @@ import {
   kindLabel,
   type InstrumentedProcessWagerTransaction,
 } from '../../infrastructure/observability/instrumented-process-wager-transaction';
-import { rootLogger } from '../../infrastructure/observability/logger';
+import { errorName, rootLogger } from '../../infrastructure/observability/logger';
 import type { ObservabilityMetrics } from '../../infrastructure/observability/metrics';
 import type { InboxLookup } from '../../infrastructure/sqs/inbox-lookup';
 import type { DlqReason, ReceivedMessage, WagerQueueClient } from '../../infrastructure/sqs/wager-queue.client';
+import { exponentialBackoffMs } from '../../domain/backoff';
+import { errorPauseMs } from '../error-pause';
 import { parseEnvelope, type WagerEnvelope } from './wager-envelope';
 
 export interface WagerConsumerOptions {
@@ -24,10 +26,6 @@ export interface WagerConsumerOptions {
   faultInjection?: FaultInjection;
 }
 
-/** Pausa do polling quando o banco (ou o SQS) está fora: 1s·2^(n−1), até 30s. */
-export const POLL_PAUSE_BASE_MS = 1_000;
-export const POLL_PAUSE_MAX_MS = 30_000;
-
 type Decision =
   | { action: 'ack'; outcome: string; transactionId?: string; warn?: boolean }
   | { action: 'retry'; reason: string; unavailable: boolean }
@@ -40,13 +38,7 @@ type LogContext = Record<string, unknown>;
 
 /** Atraso da nova tentativa: base·2^(receiveCount−1), com teto. */
 export function retryDelaySeconds(receiveCount: number, baseSeconds: number, maxSeconds: number): number {
-  const exponent = Math.min(Math.max(receiveCount - 1, 0), 30);
-  return Math.min(maxSeconds, baseSeconds * 2 ** exponent);
-}
-
-export function pollPauseMs(consecutiveFailures: number): number {
-  const exponent = Math.min(Math.max(consecutiveFailures - 1, 0), 30);
-  return Math.min(POLL_PAUSE_MAX_MS, POLL_PAUSE_BASE_MS * 2 ** exponent);
+  return exponentialBackoffMs(Math.max(receiveCount, 1), baseSeconds, maxSeconds);
 }
 
 /**
@@ -144,7 +136,7 @@ export class WagerConsumer {
         continue;
       }
       failures++;
-      const pauseMs = pollPauseMs(failures);
+      const pauseMs = errorPauseMs(failures);
       this.logger.warn({ event: 'sqs_polling_paused', pauseMs, failures }, 'polling paused');
       await this.pause(pauseMs);
     }
@@ -358,8 +350,4 @@ export class WagerConsumer {
       this.wakeUp = done;
     });
   }
-}
-
-function errorName(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error;
 }

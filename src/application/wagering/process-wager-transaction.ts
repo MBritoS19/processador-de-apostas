@@ -21,8 +21,9 @@ import {
   type WagerProcessingRepository,
   type WagerUnitOfWork,
 } from '../ports/wager-unit-of-work';
+import { UUID_PATTERN, textProblem } from '../validation';
 import { wagerPayloadHash } from './payload-hash';
-import { WagerSettlement } from './wager-settlement';
+import type { WagerSettlement } from './wager-settlement';
 
 /** Payload de negócio como chega da borda (HTTP/SQS): ainda não validado. */
 export interface WagerTransactionPayload {
@@ -101,9 +102,6 @@ const SUBMITTABLE_KINDS = new Set<string>([
   WagerTransactionKind.Rollback,
 ]);
 const TEXT_FIELDS = ['providerId', 'externalTransactionId', 'playerId', 'walletId', 'roundId', 'gameId'] as const;
-/** Limite dos ids e da key: cabe folgado nos índices btree (o Postgres recusa entradas de ~2.7 KB). */
-export const MAX_TEXT_LENGTH = 256;
-export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Processa uma transação de aposta (BET, WIN, LOSS, REFUND, ROLLBACK) com idempotência
@@ -116,7 +114,7 @@ export class ProcessWagerTransaction {
     private readonly clock: Clock,
     private readonly ids: IdGenerator,
     private readonly telemetry: LockConflictTelemetry,
-    private readonly settlement: WagerSettlement = new WagerSettlement(ids),
+    private readonly settlement: WagerSettlement,
   ) {}
 
   async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
@@ -266,15 +264,6 @@ export class ProcessWagerTransaction {
     // Violação de idempotência sem linha correspondente: transações nunca são apagadas, então é bug.
     throw new Error(`violação de idempotência sem transação correspondente (key ${tx.idempotencyKey})`);
   }
-}
-
-/** Texto obrigatório, não vazio, até MAX_TEXT_LENGTH. Devolve o problema ou undefined. */
-export function textProblem(field: string, value: unknown): string | undefined {
-  if (value === undefined || value === null) return `${field} é obrigatório`;
-  if (typeof value !== 'string') return `${field} deve ser texto`;
-  if (value.trim() === '') return `${field} não pode ser vazio`;
-  if (value.length > MAX_TEXT_LENGTH) return `${field} excede ${MAX_TEXT_LENGTH} caracteres`;
-  return undefined;
 }
 
 /**

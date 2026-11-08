@@ -1,5 +1,5 @@
 /** Base de todos os erros de domínio. Nunca carrega payload financeiro completo na mensagem. */
-export abstract class DomainError extends Error {
+abstract class DomainError extends Error {
   constructor(message: string) {
     super(message);
     this.name = new.target.name;

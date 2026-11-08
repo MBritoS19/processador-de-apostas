@@ -10,7 +10,10 @@ import {
   ProcessWagerTransaction,
   type ProcessWagerTransactionCommand,
 } from '../../../src/application/wagering/process-wager-transaction';
+import pino from 'pino';
+import { WagerSettlement } from '../../../src/application/wagering/wager-settlement';
 import { LoggingLockConflictTelemetry } from '../../../src/infrastructure/observability/lock-conflict-telemetry';
+import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
 
 /** UoW falso: conta as chamadas e lança o erro configurado. A lógica com banco é testada na integração. */
 function fakeUnitOfWork(error: Error = new Error('não deveria abrir transação')): WagerUnitOfWork & { calls: number } {
@@ -25,10 +28,19 @@ function fakeUnitOfWork(error: Error = new Error('não deveria abrir transação
 
 function setup(error?: Error) {
   const unitOfWork = fakeUnitOfWork(error);
-  const logs: string[] = [];
-  const telemetry = new LoggingLockConflictTelemetry((line) => logs.push(line));
-  const useCase = new ProcessWagerTransaction(unitOfWork, { now: () => new Date(0) }, { uuid: randomUUID }, telemetry);
-  return { useCase, unitOfWork, telemetry, logs };
+  const logs: Array<Record<string, unknown>> = [];
+  const logger = pino({ level: 'info' }, { write: (line: string) => logs.push(JSON.parse(line) as Record<string, unknown>) });
+  const metrics = new ObservabilityMetrics();
+  const ids = { uuid: randomUUID };
+  const telemetry = new LoggingLockConflictTelemetry(metrics, logger);
+  const useCase = new ProcessWagerTransaction(unitOfWork, { now: () => new Date(0) }, ids, telemetry, new WagerSettlement(ids, 60 * 60_000));
+  return { useCase, unitOfWork, metrics, logs };
+}
+
+/** Conflitos de lock na métrica, opcionalmente filtrados por reason. */
+async function lockConflicts(metrics: ObservabilityMetrics, reason?: string): Promise<number> {
+  const { values } = await metrics.lockConflicts.get();
+  return values.filter((v) => reason === undefined || v.labels.reason === reason).reduce((sum, v) => sum + v.value, 0);
 }
 
 const walletId = '0192f291-27dd-7d3f-8071-5f8685deef37';
@@ -80,12 +92,14 @@ describe('ProcessWagerTransaction — validação antes de qualquer gravação',
 
 describe('ProcessWagerTransaction — falhas de concorrência', () => {
   it('version divergente no UPDATE → TransientFailure, contador e log estruturado sem payload', async () => {
-    const { useCase, telemetry, logs } = setup(new WalletVersionConflictError(walletId));
+    const { useCase, metrics, logs } = setup(new WalletVersionConflictError(walletId));
     expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason: 'version_conflict' });
-    expect(telemetry.count('version_conflict')).toBe(1);
+    expect(await lockConflicts(metrics, 'version_conflict')).toBe(1);
     expect(logs).toHaveLength(1);
-    expect(JSON.parse(logs[0] ?? '{}')).toEqual({
-      level: 'warn',
+    const { level, event, reason, walletId: loggedWallet, correlationId, ...rest } = logs[0] ?? {};
+    expect(Object.keys(rest).sort()).toEqual(['hostname', 'msg', 'pid', 'time']);
+    expect({ level, event, reason, walletId: loggedWallet, correlationId }).toEqual({
+      level: 40,
       event: 'wallet_lock_conflict',
       reason: 'version_conflict',
       walletId,
@@ -94,15 +108,15 @@ describe('ProcessWagerTransaction — falhas de concorrência', () => {
   });
 
   it.each(['lock_timeout', 'deadlock'] as const)('%s → TransientFailure e conflito contado', async (reason) => {
-    const { useCase, telemetry } = setup(new TransientPersistenceError(reason));
+    const { useCase, metrics } = setup(new TransientPersistenceError(reason));
     expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason });
-    expect(telemetry.count(reason)).toBe(1);
+    expect(await lockConflicts(metrics, reason)).toBe(1);
   });
 
   it('banco indisponível → TransientFailure sem contar conflito de lock', async () => {
-    const { useCase, telemetry } = setup(new TransientPersistenceError('unavailable'));
+    const { useCase, metrics } = setup(new TransientPersistenceError('unavailable'));
     expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason: 'unavailable' });
-    expect(telemetry.count()).toBe(0);
+    expect(await lockConflicts(metrics)).toBe(0);
   });
 
   it('erro desconhecido é relançado (bug, não falha transitória)', async () => {

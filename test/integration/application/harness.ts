@@ -7,23 +7,30 @@ import {
   type ProcessWagerTransactionResult,
   type WagerTransactionPayload,
 } from '../../../src/application/wagering/process-wager-transaction';
+import { WagerSettlement } from '../../../src/application/wagering/wager-settlement';
 import { LoggingLockConflictTelemetry } from '../../../src/infrastructure/observability/lock-conflict-telemetry';
+import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
 import { MikroOrmWagerUnitOfWork } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
 import { randomIdGenerator } from '../../../src/infrastructure/system-adapters';
 import { T0 } from '../persistence/db';
+import { captureLogger } from '../workers/outbox-harness';
 
-export const fixedClock: Clock = { now: () => new Date(T0) };
+const fixedClock: Clock = { now: () => new Date(T0) };
+
+/** Prazo das PENDING_REFERENCE nos testes: o mesmo padrão do config (PENDING_REFERENCE_TTL_MS). */
+export const TEST_REFERENCE_TTL_MS = 60 * 60_000;
 
 export function buildUseCase(orm: MikroORM, options: { lockTimeoutMs?: number } = {}) {
-  const logs: string[] = [];
-  const telemetry = new LoggingLockConflictTelemetry((line) => logs.push(line));
+  const metrics = new ObservabilityMetrics();
+  const log = captureLogger();
   const useCase = new ProcessWagerTransaction(
     new MikroOrmWagerUnitOfWork(orm.em, options.lockTimeoutMs),
     fixedClock,
     randomIdGenerator,
-    telemetry,
+    new LoggingLockConflictTelemetry(metrics, log.logger),
+    new WagerSettlement(randomIdGenerator, TEST_REFERENCE_TTL_MS),
   );
-  return { useCase, telemetry, logs };
+  return { useCase, metrics, logs: log.lines };
 }
 
 export interface WalletRef {

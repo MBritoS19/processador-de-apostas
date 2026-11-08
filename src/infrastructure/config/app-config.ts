@@ -68,7 +68,7 @@ export interface AppConfig {
 }
 
 /** `exit_after_commit_before_ack`: o consumidor se mata com SIGKILL depois do commit e antes do `DeleteMessage`. */
-export const FAULT_INJECTIONS = ['none', 'exit_after_commit_before_ack'] as const;
+const FAULT_INJECTIONS = ['none', 'exit_after_commit_before_ack'] as const;
 export type FaultInjection = (typeof FAULT_INJECTIONS)[number];
 
 export class InvalidConfigError extends Error {
@@ -83,11 +83,11 @@ export class InvalidConfigError extends Error {
  * a soma dos timeouts é o pior caso do shutdown e precisa caber antes do SIGKILL do orquestrador
  * (`stop_grace_period` de 30s no compose). Padrão 8s cada; orçamento 25s (ARCHITECTURE.md → "Estratégia de testes").
  */
-export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8_000;
-export const DEFAULT_SHUTDOWN_BUDGET_MS = 25_000;
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 8_000;
+const DEFAULT_SHUTDOWN_BUDGET_MS = 25_000;
 
 /** Folga mínima entre o timeout do SQS e o idle timeout da transação do claim. */
-export const OUTBOX_TIMEOUT_MARGIN_MS = 2_000;
+const OUTBOX_TIMEOUT_MARGIN_MS = 2_000;
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -104,17 +104,6 @@ export function loadConfig(env: Env = process.env): AppConfig {
   };
 
   const optional = (name: string): string | undefined => env[name]?.trim() || undefined;
-
-  const positiveInt = (name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number => {
-    const raw = env[name]?.trim();
-    if (raw === undefined || raw === '') return fallback;
-    const value = Number(raw);
-    if (!/^\d+$/.test(raw) || value <= 0 || value > max) {
-      problems.push(`${name} deve ser um inteiro entre 1 e ${max} (recebido: "${raw}")`);
-      return fallback;
-    }
-    return value;
-  };
 
   const intInRange = (name: string, fallback: number, min: number, max: number): number => {
     const raw = env[name]?.trim();
@@ -180,7 +169,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
 
   const config: AppConfig = {
     nodeEnv: optional('NODE_ENV') ?? 'development',
-    httpPort: positiveInt('HTTP_PORT', 3000, 65535),
+    httpPort: intInRange('HTTP_PORT', 3000, 1, 65535),
     databaseUrl,
     aws: {
       region: optional('AWS_REGION') ?? 'us-east-1',
@@ -221,7 +210,7 @@ export function loadConfig(env: Env = process.env): AppConfig {
       ttlMs: intInRange('PENDING_REFERENCE_TTL_MS', 3_600_000, 1_000, 7 * 24 * 3_600_000),
       shutdownTimeoutMs: intInRange('PENDING_REFERENCE_SHUTDOWN_TIMEOUT_MS', DEFAULT_SHUTDOWN_TIMEOUT_MS, 0, 600_000),
     },
-    healthCheckTimeoutMs: positiveInt('HEALTH_CHECK_TIMEOUT_MS', 2000, 60_000),
+    healthCheckTimeoutMs: intInRange('HEALTH_CHECK_TIMEOUT_MS', 2000, 1, 60_000),
     faultInjection: faultInjection(),
   };
   if (config.faultInjection !== 'none' && config.nodeEnv !== 'test') {

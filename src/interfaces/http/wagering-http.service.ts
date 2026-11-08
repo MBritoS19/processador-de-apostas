@@ -1,8 +1,7 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
 import type { OpenWallet } from '../../application/wallets/open-wallet';
+import { UUID_PATTERN, textProblem } from '../../application/validation';
 import {
-  UUID_PATTERN,
-  textProblem,
   type ProcessWagerTransaction,
   type ProcessWagerTransactionResult,
   type WagerTransactionPayload,
@@ -19,8 +18,8 @@ export interface HttpResult {
   body: Record<string, unknown>;
 }
 
-export const DEFAULT_LEDGER_LIMIT = 50;
-export const MAX_LEDGER_LIMIT = 200;
+const DEFAULT_LEDGER_LIMIT = 50;
+const MAX_LEDGER_LIMIT = 200;
 const MAX_SEQ = 9_223_372_036_854_775_807n;
 const CURSOR_PATTERN = /^v1:(\d{1,19})$/;
 

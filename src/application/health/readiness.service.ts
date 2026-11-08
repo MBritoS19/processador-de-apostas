@@ -31,7 +31,7 @@ export class ReadinessService {
   constructor(
     private readonly checks: readonly ReadinessCheck[],
     private readonly timeoutMs: number,
-    private readonly onFailure: ReadinessFailureListener = () => {},
+    private readonly onFailure: ReadinessFailureListener,
   ) {}
 
   async evaluate(): Promise<ReadinessReport> {

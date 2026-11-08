@@ -1,6 +1,9 @@
 import type { EntityManager } from '@mikro-orm/postgresql';
 import { OutboxMessage } from '../../domain/outbox-message';
 
+/** `statement_timeout` do claim: constante fixa (ARCHITECTURE.md → "Configuração"). */
+const STATEMENT_TIMEOUT_MS = 5_000;
+
 /**
  * Elegível = pendente, vencido e sem evento anterior (menor `seq`) pendente do mesmo agregado.
  * Um evento anterior travado por outro publisher, em backoff ou que falha para sempre bloqueia
@@ -45,10 +48,9 @@ export class OutboxStore {
   constructor(
     private readonly em: EntityManager,
     private readonly idleInTransactionTimeoutMs: number,
-    private readonly statementTimeoutMs = 5_000,
   ) {
-    for (const value of [idleInTransactionTimeoutMs, statementTimeoutMs]) {
-      if (!Number.isInteger(value) || value <= 0) throw new RangeError('timeouts devem ser inteiros positivos');
+    if (!Number.isInteger(idleInTransactionTimeoutMs) || idleInTransactionTimeoutMs <= 0) {
+      throw new RangeError('idleInTransactionTimeoutMs deve ser um inteiro positivo');
     }
   }
 
@@ -60,7 +62,7 @@ export class OutboxStore {
   async claim(limit: number, now: Date, work: (messages: OutboxMessage[]) => Promise<void>): Promise<OutboxMessage[]> {
     return this.em.fork().transactional(async (em) => {
       // Inteiros validados no construtor: sem risco de injeção.
-      await em.execute(`set local statement_timeout = '${this.statementTimeoutMs}ms'`);
+      await em.execute(`set local statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
       await em.execute(`set local idle_in_transaction_session_timeout = '${this.idleInTransactionTimeoutMs}ms'`);
       const rows = await em.execute<OutboxRow[]>(CLAIM_SQL, [now, limit]);
       const messages = rows.map(toMessage);
@@ -71,7 +73,10 @@ export class OutboxStore {
     });
   }
 
-  /** Grava o resultado. Público só para os testes simularem a morte entre a publicação e o commit. */
+  /**
+   * Grava o resultado. Público (e não privado) só para os testes: um override que lança aqui simula
+   * o processo morrendo depois da publicação no SQS e antes do commit (republicação at-least-once).
+   */
   async save(em: EntityManager, messages: readonly OutboxMessage[]): Promise<void> {
     for (const message of messages) {
       const result = await em.execute(

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { randomUUID } from 'node:crypto';
 import type { ProcessWagerTransactionResult } from '../../../src/application/wagering/process-wager-transaction';
-import { PENDING_REFERENCE_TTL_MS } from '../../../src/application/wagering/wager-settlement';
+import { TEST_REFERENCE_TTL_MS as PENDING_REFERENCE_TTL_MS } from '../application/harness';
 import { FailureCode } from '../../../src/domain/failure-code';
 import { command, walletBalance, type WalletRef } from '../application/harness';
 import { T0, expectLedgerConsistent, openOrm, processed, seedWallet, truncateAll } from '../persistence/db';

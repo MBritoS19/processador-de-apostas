@@ -5,7 +5,7 @@ import type {
   WagerTransactionPayload,
 } from '../../application/wagering/process-wager-transaction';
 import { WagerTransactionKind } from '../../domain/wager-transaction';
-import { rootLogger } from './logger';
+import { errorName, rootLogger } from './logger';
 import type { ObservabilityMetrics } from './metrics';
 
 const KNOWN_KINDS = new Set<string>(Object.values(WagerTransactionKind));
@@ -47,7 +47,7 @@ export class InstrumentedProcessWagerTransaction {
       this.metrics.transactions.inc(labels);
       this.metrics.processingLatency.observe(labels, (performance.now() - startedAt) / 1000);
       this.logger.error(
-        { ...ids, event: 'wager_transaction_error', errorName: error instanceof Error ? error.name : typeof error },
+        { ...ids, event: 'wager_transaction_error', errorName: errorName(error) },
         'wager transaction failed',
       );
       throw error;

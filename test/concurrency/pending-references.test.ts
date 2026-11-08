@@ -125,7 +125,10 @@ describe('worker de referências pendentes — concorrência', () => {
         expect(await entriesOf(orm, (await txByExternal(orm, `bet-${n}`)).id)).toBe(1);
       }
       // Deadlock apareceria como TransientFailure no use case (telemetria) ou transient no worker.
-      expect(entry.telemetry.count('deadlock') + other.telemetry.count('deadlock')).toBe(0);
+      expect(
+        (await counterTotal(entry.metrics.lockConflicts, { reason: 'deadlock' })) +
+          (await counterTotal(other.metrics.lockConflicts, { reason: 'deadlock' })),
+      ).toBe(0);
       expect(await counterTotal(workerInstance.metrics.pendingReferenceSkipped, { reason: 'transient' })).toBe(0);
       expect(await counterTotal(workerInstance.metrics.pendingReferenceSkipped, { reason: 'error' })).toBe(0);
       expect(await walletBalance(orm, wallet.walletId)).toBe('1000.00');

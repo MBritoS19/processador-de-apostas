@@ -14,9 +14,9 @@ import { randomIdGenerator, systemClock } from './system-adapters';
 export function buildInstrumentedProcess(
   em: EntityManager,
   metrics: ObservabilityMetrics,
-  referenceTtlMs?: number,
+  referenceTtlMs: number,
 ): InstrumentedProcessWagerTransaction {
-  const telemetry = new LoggingLockConflictTelemetry(undefined, metrics);
+  const telemetry = new LoggingLockConflictTelemetry(metrics);
   const settlement = new WagerSettlement(randomIdGenerator, referenceTtlMs);
   return new InstrumentedProcessWagerTransaction(
     new ProcessWagerTransaction(new MikroOrmWagerUnitOfWork(em), systemClock, randomIdGenerator, telemetry, settlement),

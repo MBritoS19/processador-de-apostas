@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import { GetQueueUrlCommand, SendMessageBatchCommand, type SQSClient } from '@aws-sdk/client-sqs';
 import { OutboxMessage } from '../../../src/domain/outbox-message';
 import { OutboxEventsClient } from '../../../src/infrastructure/outbox/outbox-events.client';
-import { errorPauseMs } from '../../../src/interfaces/workers/outbox-publisher';
+import { errorPauseMs } from '../../../src/interfaces/error-pause';
 
 function message(id: string, aggregateId = 'agg-1'): OutboxMessage {
   return OutboxMessage.rehydrate({

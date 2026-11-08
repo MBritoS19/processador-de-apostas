@@ -2,7 +2,7 @@ import { Counter, Gauge, Histogram, Registry } from 'prom-client';
 
 /**
  * Métricas Prometheus num registry próprio (nunca o default do prom-client). Labels só com
- * valores de conjunto fechado: `status`, `kind` e `failure_code`. Ids nunca são labels.
+ * valores de conjunto fechado (`status`, `kind`, `failure_code`, `reason`, ...). Ids nunca são labels.
  */
 export class ObservabilityMetrics {
   readonly registry = new Registry();
@@ -26,7 +26,8 @@ export class ObservabilityMetrics {
   });
   readonly lockConflicts = new Counter({
     name: 'wagering_lock_conflicts_total',
-    help: 'Conflitos de lock da wallet (lock timeout, deadlock, version).',
+    help: 'Conflitos de lock da wallet, por reason (lock_timeout, deadlock, version_conflict).',
+    labelNames: ['reason'] as const,
     registers: [this.registry],
   });
   readonly processingLatency = new Histogram({
@@ -42,7 +43,7 @@ export class ObservabilityMetrics {
     registers: [this.registry],
   });
 
-  // Declaradas agora; incrementadas nas Fases 5–7.
+  // Consumidor SQS e outbox publisher.
   readonly retries = new Counter({
     name: 'wagering_retries_total',
     help: 'Novas tentativas de mensagens recebidas ou de processamento.',

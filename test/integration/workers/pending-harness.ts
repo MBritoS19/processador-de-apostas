@@ -1,5 +1,5 @@
 import type { MikroORM } from '@mikro-orm/postgresql';
-import type { Logger } from 'pino';
+import pino, { type Logger } from 'pino';
 import type { Clock } from '../../../src/application/ports/clock';
 import { ProcessWagerTransaction } from '../../../src/application/wagering/process-wager-transaction';
 import { ResolvePendingReferences } from '../../../src/application/wagering/resolve-pending-references';
@@ -12,6 +12,7 @@ import {
   PendingReferenceWorker,
   type PendingReferenceWorkerOptions,
 } from '../../../src/interfaces/workers/pending-reference-worker';
+import { TEST_REFERENCE_TTL_MS } from '../application/harness';
 import { captureLogger } from './outbox-harness';
 
 export const TEST_WORKER_OPTIONS: PendingReferenceWorkerOptions = {
@@ -27,12 +28,13 @@ export function buildPendingFixture(
   clock: Clock,
   overrides: { ttlMs?: number; lockTimeoutMs?: number; options?: Partial<PendingReferenceWorkerOptions>; logger?: Logger } = {},
 ) {
-  const settlement = new WagerSettlement(randomIdGenerator, overrides.ttlMs);
+  const settlement = new WagerSettlement(randomIdGenerator, overrides.ttlMs ?? TEST_REFERENCE_TTL_MS);
   const unitOfWork = new MikroOrmWagerUnitOfWork(orm.em, overrides.lockTimeoutMs);
-  const telemetry = new LoggingLockConflictTelemetry(() => undefined);
+  const metrics = new ObservabilityMetrics();
+  // Logs de conflito fora de `logs` (que é do worker); a contagem fica na métrica.
+  const telemetry = new LoggingLockConflictTelemetry(metrics, pino({ level: 'silent' }));
   const useCase = new ProcessWagerTransaction(unitOfWork, clock, randomIdGenerator, telemetry, settlement);
   const resolver = new ResolvePendingReferences(unitOfWork, clock, settlement);
-  const metrics = new ObservabilityMetrics();
   const log = captureLogger();
   const worker = new PendingReferenceWorker(
     resolver,
@@ -40,7 +42,7 @@ export function buildPendingFixture(
     { ...TEST_WORKER_OPTIONS, ...overrides.options },
     overrides.logger ?? log.logger,
   );
-  return { useCase, resolver, worker, metrics, telemetry, logs: log.lines };
+  return { useCase, resolver, worker, metrics, logs: log.lines };
 }
 
 export interface TxRow {

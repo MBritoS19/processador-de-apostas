@@ -1,8 +1,11 @@
 import { EntitySchema } from '@mikro-orm/core';
-import { InboxMessage } from '../../domain/inbox-message';
-import { OutboxMessage } from '../../domain/outbox-message';
+import type { InboxMessage } from '../../domain/inbox-message';
+import type { OutboxMessage } from '../../domain/outbox-message';
 
-/** Linha de `inbox_messages`: chave primária (consumer_name, message_id). */
+/**
+ * Linha de `inbox_messages`: chave primária (consumer_name, message_id). Inbox e outbox só têm o
+ * mapeador de escrita: a inbox é lida só pelo hash (`InboxLookup`) e a outbox pelo `OutboxStore`.
+ */
 export class InboxMessageRecord {
   consumerName!: string;
   messageId!: string;
@@ -30,16 +33,6 @@ export function toInboxMessageRecord(message: InboxMessage): InboxMessageRecord 
     payloadHash: message.payloadHash,
     receivedAt: message.receivedAt,
     processedAt: message.processedAt ?? null,
-  });
-}
-
-export function toInboxMessage(record: InboxMessageRecord): InboxMessage {
-  return InboxMessage.rehydrate({
-    consumerName: record.consumerName,
-    messageId: record.messageId,
-    payloadHash: record.payloadHash,
-    receivedAt: record.receivedAt,
-    processedAt: record.processedAt ?? undefined,
   });
 }
 
@@ -80,18 +73,5 @@ export function toOutboxMessageRecord(message: OutboxMessage): OutboxMessageReco
     attempts: message.attempts,
     nextAttemptAt: message.nextAttemptAt ?? null,
     publishedAt: message.publishedAt ?? null,
-  });
-}
-
-export function toOutboxMessage(record: OutboxMessageRecord): OutboxMessage {
-  return OutboxMessage.rehydrate({
-    id: record.id,
-    aggregateId: record.aggregateId,
-    eventType: record.eventType,
-    payload: record.payload,
-    occurredAt: record.occurredAt,
-    attempts: record.attempts,
-    nextAttemptAt: record.nextAttemptAt ?? undefined,
-    publishedAt: record.publishedAt ?? undefined,
   });
 }
