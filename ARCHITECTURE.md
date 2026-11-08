@@ -754,7 +754,7 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
 
 ### Teste de carga (`test/load`)
 
-CHALLENGE §14, "Diferenciais opcionais". Esta seção descreve **como** se mede. Os números e a análise estão em `docs/CARGA.md`, e a execução bruta usada lá em `docs/carga/resultado.json`. As demais execuções vão para `test/load/results/`, fora do git.
+CHALLENGE §14, "Diferenciais opcionais". Esta seção descreve **como** se mede. Os números e a análise estão em `docs/CARGA.md`, e a execução bruta usada lá em `docs/carga/resultado.json`. As demais execuções vão para `test/load/results/`, fora do git. Sondas de diagnóstico (recursos, outbox por agregado, vazão da inbox, custo do claim, lote do LocalStack FIFO) ficam em `test/load/diagnostics/` e rodam à parte, fora do `bun test`.
 
 - **Sistema sob teste:** as 3 `Instance` do harness do multi (API + consumidor + outbox publisher + worker de pendentes), sobre o Postgres e o LocalStack do compose, com filas próprias da suíte. As configs são as de produção, exceto o backoff de retry do consumidor (1–5s em vez de 30–300s), para um `lock_timeout` eventual não segurar a quiescência por minutos. `src/` não tem nada específico para carga.
 - **Cenários:**

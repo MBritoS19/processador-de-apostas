@@ -117,7 +117,7 @@ Concorrência (paralelismo real):
 
 ## Opcionais (só depois de tudo acima)
 - [ ] Autenticação com Keycloak ou Zitadel
-- [x] Teste de carga (`bun run test:load`) com p50/p95/p99, erros, conflitos e outbox lag (metodologia em ARCHITECTURE.md → "Estratégia de testes"; análise dos números pendente em `docs/CARGA.md`)
+- [x] Teste de carga (`bun run test:load`) com p50/p95/p99, erros, conflitos e outbox lag (concluído em 2026-11-08; metodologia em ARCHITECTURE.md → "Estratégia de testes"; análise do outbox lag e do acúmulo na fila, com propostas não implementadas, em `docs/CARGA.md`; dados em `docs/carga/`)
 - [ ] Ledger de partidas dobradas
 
 ---
