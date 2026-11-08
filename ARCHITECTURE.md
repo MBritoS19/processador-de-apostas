@@ -301,7 +301,15 @@ O banco garante **diário → ledger** (todo lançamento de diário bate com um 
 
 ### Custo e medição
 
-Por transação que move saldo: +1 consulta de contas, +1 INSERT (lançamento e pernas) e o trigger deferido (3 execuções no COMMIT, cada uma com consultas por índice). Medido com o cenário `quente-frias` contra a `main` (3 + 3 rodadas alternadas, medianas): p95 geral +18,7% (critério do autor: até +20%, sem erros novos; atingido), nenhum erro novo, e vazão −18% na wallet disputada e no total, porque o custo cai dentro da seção crítica do lock da wallet. Dados e opções para reduzir o custo em `docs/CARGA.md` → "Diário de partidas dobradas: medição".
+Por transação que move saldo: +1 consulta de contas, +1 INSERT (lançamento e pernas) e o trigger deferido (3 execuções no COMMIT, cada uma com consultas por índice). Medido com o cenário `quente-frias` contra a `main` (3 + 3 rodadas alternadas, medianas): p95 geral +18,7% (critério do autor: até +20%, sem erros novos; atingido), nenhum erro novo, e vazão −18% na wallet disputada e no total, porque o custo cai dentro da seção crítica do lock da wallet. Dados em `docs/CARGA.md` → "Diário de partidas dobradas: medição".
+
+**Se o custo precisar cair** (não implementado; cada opção exige nova medição com o mesmo cenário):
+
+1. Disparar o trigger só pelas pernas, não também pelo lançamento: 2 execuções no COMMIT em vez de 3. O lançamento sem pernas passa a ser pego só pela reconciliação.
+2. Cache por processo dos ids das contas HOUSE e FUNDING (imutáveis, append-only), consultando no banco só a PLAYER.
+3. Juntar a consulta de contas e o INSERT do lançamento e das pernas num único statement.
+
+**Fora do diário, por enquanto:** saldo por conta e por período (fechamento por provider) e reconciliação global (Σ débitos = Σ créditos, HOUSE = − movimentos dos jogadores do provider), hoje conferidos só nos testes (`test/concurrency/journal.test.ts`).
 
 **Provas:** `test/unit/domain/journal-entry.test.ts`, `test/integration/persistence/journal-constraints.test.ts` (cada garantia com o SQLSTATE), `journal-repository.test.ts` (contas sob demanda e primeiro uso disputado), `test/integration/application/journal-dual-write.test.ts`, `test/integration/interfaces/journal-failure.test.ts` (atomicidade por HTTP e SQS, DLQ direto), `test/concurrency/journal.test.ts` e as checagens do diário em `test/multi/consistency.ts`.
 
@@ -1082,7 +1090,6 @@ O diário está implementado ([Diário de partidas dobradas](#diário-de-partida
 - **Como fechar:** constraint trigger deferido em `wallets` (`after insert or update of balance`), ao lado do `trg_wallets_balance_matches_ledger`: no COMMIT, o último lançamento da wallet (por `seq`) precisa ter lançamento de diário (`uq_journal_wager_tx`, uma busca por índice). Como todo movimento muda o saldo, isso cobre todo lançamento novo. Não toca o `wallet_ledger_entries`.
 - **Quando:** só depois que **todas** as instâncias gravarem o diário. Com o trigger ligado, uma instância com o código anterior teria todas as transações recusadas no COMMIT. Por isso fica fora da primeira entrega.
 - **Custo:** mais uma consulta por índice no COMMIT de cada transação que move saldo.
-- **Próximos passos contábeis:** saldo por conta e por período (fechamento por provider) e reconciliação global (Σ débitos = Σ créditos, HOUSE = − movimentos dos jogadores do provider), hoje conferidos só nos testes.
 
 ### Autenticação
 
