@@ -24,6 +24,7 @@ import {
 import { UUID_PATTERN, textProblem } from '../validation';
 import { wagerPayloadHash } from './payload-hash';
 import type { WagerSettlement } from './wager-settlement';
+import type { WalletMutex } from './wallet-mutex';
 
 /** Payload de negócio como chega da borda (HTTP/SQS): ainda não validado. */
 export interface WagerTransactionPayload {
@@ -92,7 +93,7 @@ export type ProcessWagerTransactionResult =
       existingTransactionId?: string;
     }
   | { type: 'InvalidInput'; reason: string }
-  | { type: 'TransientFailure'; reason: TransientPersistenceReason | 'version_conflict' };
+  | { type: 'TransientFailure'; reason: TransientPersistenceReason | 'version_conflict' | 'local_lock_timeout' };
 
 const SUBMITTABLE_KINDS = new Set<string>([
   WagerTransactionKind.Bet,
@@ -105,6 +106,13 @@ const TEXT_FIELDS = ['providerId', 'externalTransactionId', 'playerId', 'walletI
 
 /** Tentativas do caminho com lock quando o lock da wallet estoura o `lock_timeout` (1 + 1 extra). */
 const LOCK_TIMEOUT_ATTEMPTS = 2;
+/**
+ * Orçamento total de espera pelo lock (mutex local + `FOR UPDATE`) antes do 503: as 2 tentativas
+ * de 1s do adapter (`WAGER_LOCK_TIMEOUT_MS`). Cada tentativa recebe no máximo o que sobra dele.
+ */
+export const LOCK_BUDGET_MS = 2_000;
+/** Abaixo disto não vale abrir transação: o `FOR UPDATE` quase certamente estouraria. */
+export const MIN_LOCK_ATTEMPT_MS = 100;
 
 /**
  * Processa uma transação de aposta (BET, WIN, LOSS, REFUND, ROLLBACK) com idempotência
@@ -118,6 +126,7 @@ export class ProcessWagerTransaction {
     private readonly ids: IdGenerator,
     private readonly telemetry: LockConflictTelemetry,
     private readonly settlement: WagerSettlement,
+    private readonly mutex: WalletMutex,
   ) {}
 
   async execute(command: ProcessWagerTransactionCommand): Promise<ProcessWagerTransactionResult> {
@@ -143,24 +152,43 @@ export class ProcessWagerTransaction {
   }
 
   /**
-   * Caminho com lock, com UMA tentativa extra se o lock da wallet não sair no `lock_timeout`
-   * (a fila de espera numa wallet disputada costuma andar em menos de 2s). Cada tentativa é uma
-   * transação nova, e a idempotência é checada de novo sob o lock: repetir nunca duplica efeito.
-   * A segunda falha sai como `TransientFailure` (503 / retry do SQS), como antes.
+   * Caminho com lock. Primeiro o mutex local da wallet (nesta instância, só 1 requisição por
+   * wallet ocupa conexão esperando o `FOR UPDATE`), depois a transação. A espera no mutex
+   * consome o mesmo orçamento de ~2s do lock no banco; estourou → `local_lock_timeout`.
+   *
+   * No banco, UMA tentativa extra se o lock não sair no `lock_timeout` (o do adapter, limitado ao
+   * que sobra do orçamento). Cada tentativa é uma transação nova, e a idempotência é checada
+   * de novo sob o lock: repetir nunca duplica efeito. A falha final sai como `TransientFailure`
+   * (503 / retry do SQS). O mutex só é devolvido depois do COMMIT/ROLLBACK (`run` já terminou).
    */
   private async processWithLockRetry(
     tx: WagerTransaction,
     command: ProcessWagerTransactionCommand,
   ): Promise<ProcessWagerTransactionResult> {
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await this.unitOfWork.run((repository) => this.process(repository, tx, command));
-      } catch (error) {
-        const lockTimeout = error instanceof TransientPersistenceError && error.reason === 'lock_timeout';
-        if (!lockTimeout || attempt >= LOCK_TIMEOUT_ATTEMPTS) throw error;
-        this.telemetry.lockConflict({ reason: 'lock_timeout', walletId: tx.walletId, correlationId: command.correlationId });
+    const startedAt = this.clock.now().getTime();
+    const remaining = () => LOCK_BUDGET_MS - (this.clock.now().getTime() - startedAt);
+    const release = await this.mutex.acquire(tx.walletId, LOCK_BUDGET_MS - MIN_LOCK_ATTEMPT_MS);
+    if (release === undefined) return this.localLockTimeout(tx, command);
+    try {
+      if (remaining() < MIN_LOCK_ATTEMPT_MS) return this.localLockTimeout(tx, command);
+      for (let attempt = 1; ; attempt++) {
+        const maxLockTimeoutMs = Math.floor(remaining());
+        try {
+          return await this.unitOfWork.run((repository) => this.process(repository, tx, command), { maxLockTimeoutMs });
+        } catch (error) {
+          const lockTimeout = error instanceof TransientPersistenceError && error.reason === 'lock_timeout';
+          if (!lockTimeout || attempt >= LOCK_TIMEOUT_ATTEMPTS || remaining() < MIN_LOCK_ATTEMPT_MS) throw error;
+          this.telemetry.lockConflict({ reason: 'lock_timeout', walletId: tx.walletId, correlationId: command.correlationId });
+        }
       }
+    } finally {
+      release();
     }
+  }
+
+  private localLockTimeout(tx: WagerTransaction, command: ProcessWagerTransactionCommand): ProcessWagerTransactionResult {
+    this.telemetry.lockConflict({ reason: 'local_lock_timeout', walletId: tx.walletId, correlationId: command.correlationId });
+    return { type: 'TransientFailure', reason: 'local_lock_timeout' };
   }
 
   /** Validação completa antes de abrir transação: entrada inválida nunca é gravada. */

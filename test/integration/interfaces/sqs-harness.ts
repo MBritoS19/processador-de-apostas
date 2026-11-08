@@ -20,6 +20,7 @@ import { WagerQueueClient, type ReceivedMessage } from '../../../src/infrastruct
 import type { ReadinessCheck } from '../../../src/application/ports/readiness-check';
 import { PostgresReadinessCheck } from '../../../src/infrastructure/persistence/postgres-readiness.check';
 import { buildInstrumentedProcess } from '../../../src/infrastructure/wagering-core.module';
+import { WalletMutex } from '../../../src/application/wagering/wallet-mutex';
 
 export interface TestQueues {
   queueName: string;
@@ -217,7 +218,7 @@ export async function startConsumerApp(options: ConsumerAppOptions): Promise<INe
     builder = builder.overrideProvider(InstrumentedProcessWagerTransaction).useFactory({
       inject: [EntityManager, ObservabilityMetrics],
       factory: (em: EntityManager, metrics: ObservabilityMetrics) =>
-        wrap(buildInstrumentedProcess(em, metrics, config.pendingReferences.ttlMs)),
+        wrap(buildInstrumentedProcess(em, metrics, config.pendingReferences.ttlMs, new WalletMutex())),
     });
   }
   if (options.queueClient) {

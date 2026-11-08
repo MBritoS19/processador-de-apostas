@@ -44,21 +44,27 @@ export class MikroOrmWagerUnitOfWork implements WagerUnitOfWork {
     private readonly em: EntityManager,
     private readonly lockTimeoutMs: number = DEFAULT_LOCK_TIMEOUT_MS,
   ) {
-    if (!Number.isInteger(lockTimeoutMs) || lockTimeoutMs <= 0) {
-      throw new RangeError('lockTimeoutMs deve ser um inteiro positivo');
-    }
+    assertLockTimeout(lockTimeoutMs);
   }
 
-  async run<T>(work: (repository: WagerProcessingRepository) => Promise<T>): Promise<T> {
+  async run<T>(work: (repository: WagerProcessingRepository) => Promise<T>, options?: { maxLockTimeoutMs?: number }): Promise<T> {
+    const lockTimeoutMs = Math.min(this.lockTimeoutMs, options?.maxLockTimeoutMs ?? this.lockTimeoutMs);
+    assertLockTimeout(lockTimeoutMs);
     try {
       return await this.em.fork().transactional(async (em) => {
-        // Inteiro validado no construtor: sem risco de injeção.
-        await em.execute(`set local lock_timeout = '${this.lockTimeoutMs}ms'`);
+        // Inteiro positivo validado acima: sem risco de injeção.
+        await em.execute(`set local lock_timeout = '${lockTimeoutMs}ms'`);
         return work(new MikroOrmWagerProcessingRepository(em));
       });
     } catch (error) {
       throw translatePersistenceError(error);
     }
+  }
+}
+
+function assertLockTimeout(lockTimeoutMs: number): void {
+  if (!Number.isInteger(lockTimeoutMs) || lockTimeoutMs <= 0) {
+    throw new RangeError('lockTimeoutMs deve ser um inteiro positivo');
   }
 }
 

@@ -12,6 +12,8 @@ import {
 } from '../../../src/application/wagering/process-wager-transaction';
 import pino from 'pino';
 import { WagerSettlement } from '../../../src/application/wagering/wager-settlement';
+import { WalletMutex, type Release } from '../../../src/application/wagering/wallet-mutex';
+import type { Clock } from '../../../src/application/ports/clock';
 import { LoggingLockConflictTelemetry } from '../../../src/infrastructure/observability/lock-conflict-telemetry';
 import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
 
@@ -41,13 +43,17 @@ function lockPathFailing(error: Error): WagerUnitOfWork & { calls: number } {
   };
 }
 
-function setup(error?: Error, unitOfWork: WagerUnitOfWork & { calls: number } = fakeUnitOfWork(error)) {
+function setup(
+  error?: Error,
+  unitOfWork: WagerUnitOfWork & { calls: number } = fakeUnitOfWork(error),
+  { mutex = new WalletMutex(), clock = { now: () => new Date(0) } }: { mutex?: WalletMutex; clock?: Clock } = {},
+) {
   const logs: Array<Record<string, unknown>> = [];
   const logger = pino({ level: 'info' }, { write: (line: string) => logs.push(JSON.parse(line) as Record<string, unknown>) });
   const metrics = new ObservabilityMetrics();
   const ids = { uuid: randomUUID };
   const telemetry = new LoggingLockConflictTelemetry(metrics, logger);
-  const useCase = new ProcessWagerTransaction(unitOfWork, { now: () => new Date(0) }, ids, telemetry, new WagerSettlement(ids, 60 * 60_000));
+  const useCase = new ProcessWagerTransaction(unitOfWork, clock, ids, telemetry, new WagerSettlement(ids, 60 * 60_000), mutex);
   return { useCase, unitOfWork, metrics, logs };
 }
 
@@ -150,5 +156,154 @@ describe('ProcessWagerTransaction — falhas de concorrência', () => {
   it('erro desconhecido é relançado (bug, não falha transitória)', async () => {
     const { useCase } = setup(new Error('boom'));
     await expect(useCase.execute(cmd())).rejects.toThrow('boom');
+  });
+});
+
+/** Mutex real que registra a devolução e o timeout pedido; `afterAcquire` simula o tempo de espera. */
+class SpyMutex extends WalletMutex {
+  readonly timeouts: number[] = [];
+  constructor(
+    private readonly events: string[] = [],
+    private readonly afterAcquire: () => void = () => {},
+  ) {
+    super();
+  }
+  override async acquire(walletId: string, timeoutMs: number): Promise<Release | undefined> {
+    this.timeouts.push(timeoutMs);
+    const release = await super.acquire(walletId, timeoutMs);
+    this.afterAcquire();
+    if (release === undefined) return undefined;
+    return () => {
+      this.events.push('release');
+      release();
+    };
+  }
+}
+
+/** Relógio controlado pelo teste. */
+function manualClock(): Clock & { advance(ms: number): void } {
+  let t = 0;
+  return {
+    now: () => new Date(t),
+    advance: (ms) => {
+      t += ms;
+    },
+  };
+}
+
+/**
+ * Leitura sem lock vazia (1ª chamada). No caminho com lock, `attempt(n)` decide o desfecho de cada
+ * tentativa; `commit`/`rollback` é registrado quando a transação termina, antes de `run` voltar.
+ */
+function lockPath(events: string[], attempt: (n: number) => Promise<'commit' | Error>) {
+  const uow = {
+    calls: 0,
+    maxLockTimeouts: [] as Array<number | undefined>,
+    async run<T>(work: (repository: WagerProcessingRepository) => Promise<T>, options?: { maxLockTimeoutMs?: number }): Promise<T> {
+      uow.calls++;
+      if (uow.calls === 1) return work({ findByIdempotency: async () => [] } as unknown as WagerProcessingRepository);
+      uow.maxLockTimeouts.push(options?.maxLockTimeoutMs);
+      const outcome = await attempt(uow.calls - 1);
+      await Bun.sleep(5);
+      if (outcome === 'commit') {
+        events.push('commit');
+        const processed = { type: 'Processed', transactionId: 'tx', status: 'PROCESSED', balance: { amount: '1.00', currency: 'BRL' }, idempotentReplay: false };
+        return processed as T;
+      }
+      events.push('rollback');
+      throw outcome;
+    },
+  };
+  return uow;
+}
+
+describe('ProcessWagerTransaction — mutex local por wallet', () => {
+  it('devolve o mutex só depois do COMMIT', async () => {
+    const events: string[] = [];
+    const mutex = new SpyMutex(events);
+    const { useCase } = setup(undefined, lockPath(events, async () => 'commit'), { mutex });
+    expect((await useCase.execute(cmd())).type).toBe('Processed');
+    expect(events).toEqual(['commit', 'release']);
+    expect(mutex.size).toBe(0);
+  });
+
+  it('devolve o mutex só depois do ROLLBACK (erro transitório)', async () => {
+    const events: string[] = [];
+    const mutex = new SpyMutex(events);
+    const { useCase } = setup(undefined, lockPath(events, async () => new TransientPersistenceError('deadlock')), { mutex });
+    expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason: 'deadlock' });
+    expect(events).toEqual(['rollback', 'release']);
+    expect(mutex.size).toBe(0);
+  });
+
+  it('mutex não sai no orçamento → local_lock_timeout, contado, sem abrir transação', async () => {
+    const timeouts: number[] = [];
+    const busy = { acquire: async (_walletId: string, timeoutMs: number) => (timeouts.push(timeoutMs), undefined) } as unknown as WalletMutex;
+    const uow = lockPath([], async () => 'commit');
+    const { useCase, metrics } = setup(undefined, uow, { mutex: busy });
+    expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason: 'local_lock_timeout' });
+    // Orçamento de 2s menos o mínimo de 100ms para uma tentativa no banco.
+    expect(timeouts).toEqual([1_900]);
+    expect(uow.calls).toBe(1);
+    expect(await lockConflicts(metrics, 'local_lock_timeout')).toBe(1);
+  });
+
+  it('sobrou menos de 100ms depois do mutex → local_lock_timeout sem abrir transação, e devolve o mutex', async () => {
+    const events: string[] = [];
+    const clock = manualClock();
+    const mutex = new SpyMutex(events, () => clock.advance(1_950));
+    const uow = lockPath(events, async () => 'commit');
+    const { useCase, metrics } = setup(undefined, uow, { mutex, clock });
+    expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason: 'local_lock_timeout' });
+    expect(uow.calls).toBe(1);
+    expect(events).toEqual(['release']);
+    expect(mutex.size).toBe(0);
+    expect(await lockConflicts(metrics, 'local_lock_timeout')).toBe(1);
+  });
+
+  it('a espera no mutex desconta do orçamento do lock no banco', async () => {
+    const events: string[] = [];
+    const clock = manualClock();
+    const mutex = new SpyMutex(events, () => clock.advance(600));
+    // 1ª tentativa estoura depois de 1s; a 2ª recebe só o que sobra (2000 − 600 − 1000).
+    const uow = lockPath(events, async (n) => {
+      if (n > 1) return 'commit';
+      clock.advance(1_000);
+      return new TransientPersistenceError('lock_timeout');
+    });
+    const { useCase } = setup(undefined, uow, { mutex, clock });
+    expect((await useCase.execute(cmd())).type).toBe('Processed');
+    expect(uow.maxLockTimeouts).toEqual([1_400, 400]);
+    expect(events).toEqual(['rollback', 'commit', 'release']);
+  });
+
+  it('sem orçamento para a tentativa extra → lock_timeout, sem 2ª tentativa', async () => {
+    const clock = manualClock();
+    const mutex = new SpyMutex([], () => clock.advance(900));
+    const uow = lockPath([], async () => {
+      clock.advance(1_050);
+      return new TransientPersistenceError('lock_timeout');
+    });
+    const { useCase, metrics } = setup(undefined, uow, { mutex, clock });
+    expect(await useCase.execute(cmd())).toEqual({ type: 'TransientFailure', reason: 'lock_timeout' });
+    expect(uow.maxLockTimeouts).toEqual([1_100]);
+    expect(await lockConflicts(metrics, 'lock_timeout')).toBe(1);
+    expect(mutex.size).toBe(0);
+  });
+
+  it('conflito achado na leitura sem lock é decidido antes do mutex', async () => {
+    const mutex = new SpyMutex();
+    const known = { id: 'tx-0', idempotencyKey: 'provider-a:tx-1', matchesPayload: () => false };
+    const uow = {
+      calls: 0,
+      async run<T>(work: (repository: WagerProcessingRepository) => Promise<T>): Promise<T> {
+        uow.calls++;
+        return work({ findByIdempotency: async () => [known] } as unknown as WagerProcessingRepository);
+      },
+    };
+    const { useCase } = setup(undefined, uow, { mutex });
+    expect(await useCase.execute(cmd())).toEqual({ type: 'IdempotencyConflict', existingTransactionId: 'tx-0' });
+    expect(mutex.timeouts).toEqual([]);
+    expect(uow.calls).toBe(1);
   });
 });

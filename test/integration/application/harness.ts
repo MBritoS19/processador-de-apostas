@@ -8,6 +8,7 @@ import {
   type WagerTransactionPayload,
 } from '../../../src/application/wagering/process-wager-transaction';
 import { WagerSettlement } from '../../../src/application/wagering/wager-settlement';
+import { WalletMutex } from '../../../src/application/wagering/wallet-mutex';
 import { LoggingLockConflictTelemetry } from '../../../src/infrastructure/observability/lock-conflict-telemetry';
 import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
 import { MikroOrmWagerUnitOfWork, WAGER_LOCK_TIMEOUT_MS } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
@@ -29,6 +30,8 @@ export function buildUseCase(orm: MikroORM, options: { lockTimeoutMs?: number } 
     randomIdGenerator,
     new LoggingLockConflictTelemetry(metrics, log.logger),
     new WagerSettlement(randomIdGenerator, TEST_REFERENCE_TTL_MS),
+    // Um mutex por use case: cada buildUseCase faz o papel de uma instância.
+    new WalletMutex(),
   );
   return { useCase, metrics, logs: log.lines };
 }

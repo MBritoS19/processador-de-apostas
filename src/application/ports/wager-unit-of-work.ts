@@ -60,11 +60,12 @@ export interface PendingReferenceCandidate {
 }
 
 /**
- * Executa `work` numa transação SQL nova, com `lock_timeout` local. Erros do banco saem
+ * Executa `work` numa transação SQL nova, com `lock_timeout` local (o do adapter, limitado a
+ * `options.maxLockTimeoutMs`, em ms inteiros positivos). Erros do banco saem
  * traduzidos: `UniqueViolationError`, `TransientPersistenceError`; o resto é relançado.
  */
 export interface WagerUnitOfWork {
-  run<T>(work: (repository: WagerProcessingRepository) => Promise<T>): Promise<T>;
+  run<T>(work: (repository: WagerProcessingRepository) => Promise<T>, options?: { maxLockTimeoutMs?: number }): Promise<T>;
 }
 
 /** A segunda barreira (version) detectou escrita concorrente na wallet. */

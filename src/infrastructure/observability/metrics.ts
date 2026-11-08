@@ -26,7 +26,7 @@ export class ObservabilityMetrics {
   });
   readonly lockConflicts = new Counter({
     name: 'wagering_lock_conflicts_total',
-    help: 'Conflitos de lock da wallet, por reason (lock_timeout, deadlock, version_conflict).',
+    help: 'Conflitos de lock da wallet, por reason (lock_timeout, deadlock, version_conflict, local_lock_timeout).',
     labelNames: ['reason'] as const,
     registers: [this.registry],
   });

@@ -4,6 +4,7 @@ import type { Clock } from '../../../src/application/ports/clock';
 import { ProcessWagerTransaction } from '../../../src/application/wagering/process-wager-transaction';
 import { ResolvePendingReferences } from '../../../src/application/wagering/resolve-pending-references';
 import { WagerSettlement } from '../../../src/application/wagering/wager-settlement';
+import { WalletMutex } from '../../../src/application/wagering/wallet-mutex';
 import { LoggingLockConflictTelemetry } from '../../../src/infrastructure/observability/lock-conflict-telemetry';
 import { ObservabilityMetrics } from '../../../src/infrastructure/observability/metrics';
 import { MikroOrmWagerUnitOfWork } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
@@ -33,7 +34,7 @@ export function buildPendingFixture(
   const metrics = new ObservabilityMetrics();
   // Logs de conflito fora de `logs` (que é do worker); a contagem fica na métrica.
   const telemetry = new LoggingLockConflictTelemetry(metrics, pino({ level: 'silent' }));
-  const useCase = new ProcessWagerTransaction(unitOfWork, clock, randomIdGenerator, telemetry, settlement);
+  const useCase = new ProcessWagerTransaction(unitOfWork, clock, randomIdGenerator, telemetry, settlement, new WalletMutex());
   const resolver = new ResolvePendingReferences(unitOfWork, clock, settlement);
   const log = captureLogger();
   const worker = new PendingReferenceWorker(
