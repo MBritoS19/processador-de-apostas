@@ -7,6 +7,7 @@ import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed
 import { FailureCode } from '../../domain/failure-code';
 import { OutboxMessage } from '../../domain/outbox-message';
 import { addMs } from '../../domain/backoff';
+import { JournalEntry } from '../../domain/journal-entry';
 import { WagerTransactionStatus, type WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
 import { LedgerDirection, type WalletLedgerEntry } from '../../domain/wallet-ledger-entry';
@@ -71,6 +72,8 @@ export class WagerSettlement {
     if (entry !== undefined && wallet !== undefined && expectedVersion !== undefined) {
       await repository.updateWallet(wallet, expectedVersion);
       await repository.insertLedgerEntry(entry);
+      // Diário de partidas dobradas na mesma transação SQL; se ele falhar, nada é gravado.
+      await repository.insertJournalEntry(JournalEntry.forTransaction(this.ids.uuid(), tx, entry));
     }
     const retried = mode === 'update' && tx.status === WagerTransactionStatus.PendingReference;
     if (!retried) await repository.insertOutbox(this.events(tx, wallet, entry, context));

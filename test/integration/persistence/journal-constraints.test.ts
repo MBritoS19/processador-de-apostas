@@ -65,22 +65,23 @@ describe('schema — diário de partidas dobradas', () => {
   const commitJournal = (transactionId: string, postings: JournalPostingSeed[], currency?: string) =>
     db().transaction((trx) => insertJournal(trx, { transactionId, postings, ...(currency && { currency }) }));
 
-  const journalCount = async () => Number((await db()('journal_entries').count<{ count: string }[]>('* as count'))[0]!.count);
+  const journalCount = async (transactionId: string) =>
+    Number((await db()('journal_entries').where({ wager_transaction_id: transactionId }).count<{ count: string }[]>('* as count'))[0]!.count);
 
   describe('lançamentos aceitos', () => {
     it('BET: débito PLAYER, crédito HOUSE do provider', async () => {
       const { walletId, betId } = await walletWithBet();
       await commitJournal(betId, betPostings(walletId));
-      expect(await journalCount()).toBe(1);
+      expect(await journalCount(betId)).toBe(1);
     });
 
     it('OPENING: débito FUNDING, crédito PLAYER', async () => {
-      const { walletId, openingId } = await walletWithBet();
+      const { walletId, openingId } = await seedWallet(orm, '100.00', {}, { journal: false });
       await commitJournal(
         openingId,
         standardPostings({ walletId, kind: 'OPENING', providerId: 'internal', direction: 'CREDIT', amount: '100.00' }),
       );
-      expect(await journalCount()).toBe(1);
+      expect(await journalCount(openingId)).toBe(1);
     });
   });
 
@@ -89,7 +90,7 @@ describe('schema — diário de partidas dobradas', () => {
       const { walletId, betId } = await walletWithBet();
       const [player, house] = betPostings(walletId);
       await expectPgError(commitJournal(betId, [player!, { ...house!, amount: '9.99' }]), PG.checkViolation, BALANCED);
-      expect(await journalCount()).toBe(0);
+      expect(await journalCount(betId)).toBe(0);
     });
 
     it('rejeita lançamento com uma perna só', async () => {
@@ -235,7 +236,9 @@ describe('schema — diário de partidas dobradas', () => {
     });
 
     it('rejeita conta PLAYER em moeda diferente da wallet', async () => {
-      const { walletId } = await walletWithBet();
+      const wallet = walletRow();
+      await db()('wallets').insert(wallet);
+      const walletId = wallet.id as string;
       await expectPgError(
         db().transaction((trx) => accountId(trx, { kind: 'PLAYER', walletId }, 'USD')),
         PG.foreignKeyViolation,

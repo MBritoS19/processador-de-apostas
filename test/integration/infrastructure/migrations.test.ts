@@ -227,8 +227,8 @@ describe('migrations', () => {
     /** Wallets antes da migration: BRL com OPENING, BET, WIN e LOSS; EUR só com OPENING; BRL sem lançamento. */
     async function seedBeforeJournal() {
       const knex = orm.em.getKnex();
-      const brl = await seedWallet(orm, '100.00');
-      const eur = await seedWallet(orm, '50.00', { currency: 'EUR' });
+      const brl = await seedWallet(orm, '100.00', {}, { journal: false });
+      const eur = await seedWallet(orm, '50.00', { currency: 'EUR' }, { journal: false });
       const empty = walletRow();
       await knex('wallets').insert(empty);
       const bet = processed({ wallet_id: brl.walletId, player_id: brl.playerId, kind: 'BET', amount: '30.00', observed_balance: '70.00' });

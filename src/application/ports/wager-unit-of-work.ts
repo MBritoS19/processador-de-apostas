@@ -118,3 +118,15 @@ export class TransientPersistenceError extends Error {
     this.name = 'TransientPersistenceError';
   }
 }
+
+/**
+ * O diário de partidas dobradas recusou o lançamento no COMMIT (`trg_journal_balanced`: débito ≠ crédito,
+ * conta errada ou perna PLAYER ≠ ledger). Permanente: é bug, reenviar não resolve. A transação já sofreu
+ * rollback, então nada foi gravado. ARCHITECTURE.md → "Diário de partidas dobradas".
+ */
+export class JournalIntegrityError extends Error {
+  constructor(options?: { cause?: unknown }) {
+    super('o diário de partidas dobradas recusou o lançamento', options);
+    this.name = 'JournalIntegrityError';
+  }
+}

@@ -7,6 +7,7 @@ import {
   UniqueConstraintViolationException,
 } from '@mikro-orm/core';
 import {
+  JournalIntegrityError,
   TransientPersistenceError,
   UniqueViolationError,
 } from '../../../src/application/ports/wager-unit-of-work';
@@ -60,6 +61,18 @@ describe('translatePersistenceError', () => {
 
   it.each(['toString', 'constructor', '23514'])('código %p não é transitório', (code) => {
     const error = pgError({ code });
+    expect(translatePersistenceError(error)).toBe(error);
+  });
+
+  it('23514 do diário (trg_journal_balanced) → JournalIntegrityError, permanente', () => {
+    const cause = pgError({ code: '23514', constraint: 'trg_journal_balanced' });
+    const translated = translatePersistenceError(cause);
+    expect(translated).toBeInstanceOf(JournalIntegrityError);
+    expect((translated as JournalIntegrityError).cause).toBe(cause);
+  });
+
+  it('outro 23514 (ex.: saldo × ledger) não é traduzido: continua bug genérico', () => {
+    const error = pgError({ code: '23514', constraint: 'ck_wallets_balance_non_negative' });
     expect(translatePersistenceError(error)).toBe(error);
   });
 });

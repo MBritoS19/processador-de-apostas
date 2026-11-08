@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
 import { randomUUID } from 'node:crypto';
+import { JournalIntegrityError } from '../../../src/application/ports/wager-unit-of-work';
 import { JournalEntry } from '../../../src/domain/journal-entry';
 import { Money } from '../../../src/domain/money';
 import {
@@ -11,7 +12,7 @@ import {
 import { Wallet } from '../../../src/domain/wallet';
 import { LedgerDirection } from '../../../src/domain/wallet-ledger-entry';
 import { MikroOrmWagerUnitOfWork } from '../../../src/infrastructure/persistence/mikro-orm-wager-unit-of-work';
-import { PG, T0, expectPgError, openOrm, seedWallet, truncateAll } from './db';
+import { PG, T0, openOrm, seedWallet, truncateAll } from './db';
 
 const brl = (amount: string) => Money.from({ amount, currency: 'BRL' });
 
@@ -75,10 +76,11 @@ describe('persistência — diário de partidas dobradas', () => {
 
     const rows = await accounts();
     expect(rows.map((row) => [row.kind, row.wallet_id, row.provider_id, row.currency])).toEqual([
+      ['FUNDING', null, null, 'BRL'], // do OPENING do seed
       ['PLAYER', walletId, null, 'BRL'],
       ['PROVIDER_HOUSE', null, 'provider-a', 'BRL'],
     ]);
-    expect(await count('journal_entries')).toBe(2);
+    expect(await count('journal_entries')).toBe(3); // OPENING do seed + 2 BETs
 
     const legs = await db()('journal_postings as p')
       .join('journal_entries as j', 'j.id', 'p.journal_entry_id')
@@ -201,11 +203,18 @@ describe('persistência — diário de partidas dobradas', () => {
         postings: [entry.postings[0]!, { ...entry.postings[1]!, direction: LedgerDirection.Credit, money: brl('9.99') }],
       });
 
-    await expectPgError(bet(walletId, playerId, 'provider-a', '10.00', unbalanced), PG.checkViolation, 'trg_journal_balanced');
+    const error = await bet(walletId, playerId, 'provider-a', '10.00', unbalanced).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    // Traduzido para erro permanente; a causa é a violação do constraint trigger no COMMIT.
+    expect(error).toBeInstanceOf(JournalIntegrityError);
+    expect((error as JournalIntegrityError).cause).toMatchObject({ code: PG.checkViolation, constraint: 'trg_journal_balanced' });
 
-    expect(await count('journal_entries')).toBe(0);
-    expect(await count('journal_postings')).toBe(0);
-    expect(await count('accounts')).toBe(0);
+    // Só o que o seed gravou (OPENING): a HOUSE criada na transação também foi desfeita.
+    expect(await count('journal_entries')).toBe(1);
+    expect(await count('journal_postings')).toBe(2);
+    expect((await accounts()).map((row) => row.kind)).toEqual(['FUNDING', 'PLAYER']);
     expect(await db()('wager_transactions').where({ kind: 'BET' }).count<{ count: string }[]>('* as count')).toEqual([{ count: '0' }]);
     expect(await count('wallet_ledger_entries')).toBe(1); // só o OPENING do seed
     const wallet = await db()('wallets').where({ id: walletId }).first<{ balance: string; version: number }>();

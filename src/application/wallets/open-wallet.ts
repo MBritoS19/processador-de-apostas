@@ -1,5 +1,6 @@
 import { InvalidMoneyError } from '../../domain/errors';
 import { WalletBalanceChanged } from '../../domain/events/wallet-balance-changed';
+import { JournalEntry } from '../../domain/journal-entry';
 import { Money, type MoneyProps } from '../../domain/money';
 import { OutboxMessage } from '../../domain/outbox-message';
 import {
@@ -99,6 +100,7 @@ export class OpenWallet {
         });
         await repository.insertTransaction(opening);
         await repository.insertLedgerEntry(openingEntry);
+        await repository.insertJournalEntry(JournalEntry.forTransaction(this.ids.uuid(), opening, openingEntry));
         const event = WalletBalanceChanged.from(wallet, openingEntry, {
           eventId: this.ids.uuid(),
           correlationId: command.correlationId,

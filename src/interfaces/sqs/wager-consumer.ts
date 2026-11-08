@@ -1,6 +1,7 @@
 import type { FaultInjection } from '../../infrastructure/config/app-config';
 import type { ReadinessCheck } from '../../application/ports/readiness-check';
-import { TransientPersistenceError } from '../../application/ports/wager-unit-of-work';
+import { JournalIntegrityError, TransientPersistenceError } from '../../application/ports/wager-unit-of-work';
+import { InvalidJournalEntryError } from '../../domain/errors';
 import type { ProcessWagerTransactionResult } from '../../application/wagering/process-wager-transaction';
 import {
   kindLabel,
@@ -303,6 +304,12 @@ export class WagerConsumer {
       // Transitório do banco, ou erro inesperado (bug): retry até o limite de tentativas.
       if (error instanceof TransientPersistenceError) {
         return { action: 'retry', reason: error.reason, unavailable: error.reason === 'unavailable' };
+      }
+      // Erro do diário de partidas dobradas é bug, não falha passageira: reenviar daria o mesmo erro.
+      // DLQ direto, sem gastar tentativas (ARCHITECTURE.md → "Consumidor SQS").
+      if (error instanceof JournalIntegrityError || error instanceof InvalidJournalEntryError) {
+        this.logger.error({ ...context, event: 'sqs_message_journal_integrity_violation', errorName: errorName(error) }, 'journal integrity violation');
+        return { action: 'dlq', reason: 'JOURNAL_INTEGRITY_VIOLATION', detail: errorName(error) };
       }
       this.logger.error({ ...context, event: 'sqs_message_unexpected_error', errorName: errorName(error) }, 'unexpected error');
       return { action: 'retry', reason: 'unexpected_error', unavailable: false };
