@@ -96,6 +96,7 @@ Provedores enviam `BET`, `WIN`, `LOSS`, `REFUND` e `ROLLBACK` por HTTP ou pela f
 - **`.gitattributes` força LF.** No Windows, o Git converteria o script de init para CRLF, e o bash do container quebraria.
 - **Testes** usam o `.env.test`, carregado automaticamente pelo `bun test` com `NODE_ENV=test`. O arquivo é completo por conta própria, não depende do `.env` do desenvolvedor e é versionado com **somente** valores locais.
 - **Profile `multi`** do compose: o serviço `migrate` e 3 réplicas da imagem (`Dockerfile`, `oven/bun:1.4`, `NODE_ENV=production`) em `127.0.0.1:3000-3002`, com `stop_grace_period: 30s` (ver [Estratégia de testes](#estratégia-de-testes)).
+- **Profile `demo`** do compose: o mesmo `migrate` e um container `demo`, da mesma imagem, que roda `scripts/demo.ts` (o cenário obrigatório) e sai com o código dela: `docker compose --profile demo run --rm --build demo`. A imagem continua só com `src/` (a do `multi` não muda); `scripts/` entra por bind mount só leitura. Trade-off: depende do diretório do clone, o que basta para ver o serviço funcionando sem Bun no host.
 
 ### Filas
 
@@ -879,7 +880,7 @@ Postgres e LocalStack são **reais** em todas as suítes que não são de unidad
 | Integração | `bun run test:integration` | migrations e constraints; **atomicidade** (trigger real que derruba uma gravação no meio do commit, no use case e no worker de pendentes: nada persiste, e o reenvio aplica uma vez); inbox e redelivery; retry e DLQ; worker morto depois do commit e antes do ack (no processo); publishers concorrentes; recuperação de sessão morta (`pg_terminate_backend`, idle timeout); shutdown gracioso, inclusive com long polling em andamento | ~1 min |
 | Concorrência | `bun run test:concurrency` | paralelismo real num processo: 80+80 sobre 100; a mesma BET 50x → 1 débito; mesma key em wallets diferentes; esgotar o saldo sem ficar negativo; dois publishers sobre a mesma outbox; dois workers de pendentes, e worker + use case na mesma wallet | ~10s |
 | Multi-instância | `bun run test:multi` | itens 1, 4, 5 e 8 do CHALLENGE §13 com **processos reais** (abaixo); e processo morto **antes** do commit (SIGKILL com a transação aberta num trigger de teste: nada persiste, a mensagem volta e é aplicada uma vez) | ~45s |
-| Carga | `bun run test:load` | throughput, latência e efeitos colaterais (lock, retries, DLQ, outbox lag) com 3 processos reais, em 3 cenários × níveis de concorrência mais o quente-frias, e consistência completa ao fim de cada rodada (abaixo). Fora do `bun test` (só com `LOAD=1`) | ~10 min |
+| Carga | `bun run test:load` | throughput, latência e efeitos colaterais (lock, retries, DLQ, outbox lag) com 3 processos reais, em 3 cenários × níveis de concorrência mais o quente-frias, e consistência completa ao fim de cada rodada (abaixo). Fora do `bun test` (só com `LOAD=1`) | ~11 min |
 | Chaos | `bun run test:chaos` | §3 "PostgreSQL e SQS temporariamente indisponíveis" com 2 processos sob carga: Postgres **parado** por ~40s (`docker compose stop`/`start`) → API 503 com `Retry-After`, consumidor no modo "banco fora" sem DLQ, tudo retoma; LocalStack **pausado** → eventos confirmados ficam na outbox até publicar, consumidor e publisher retomam sem perder nada. Verificação só por comportamento (retries > 0, DLQ vazia, consistência por SQL) | ~1,5 min |
 
 \* Máquina de desenvolvimento (Windows 11, Docker Desktop).
@@ -915,7 +916,7 @@ CHALLENGE §14, "Diferenciais opcionais". Esta seção descreve **como** se mede
   - **misto:** 200 wallets; metade dos clientes por HTTP e metade como produtores SQS. Inclui 10% de reenvios duplicados (no HTTP com a mesma key; no SQS com o mesmo messageId e outro dedup do broker, ou com um messageId novo e a mesma key), 5% de REFUND/ROLLBACK enviados antes da BET referenciada (no SQS, no mesmo grupo FIFO) e 5% de BETs acima do saldo (422 esperado).
   - **quente-frias:** `LOAD_HOT_CLIENTS` (padrão 50) clientes numa wallet disputada e `LOAD_COLD_CLIENTS` (padrão 10) clientes em 300 wallets frias, ao mesmo tempo, só HTTP. Um nível só (a soma; ignora `LOAD_LEVELS`). Latência, status e 503 são medidos por grupo, e o throughput da wallet quente pelo banco. Mede quanto uma wallet disputada atrasa as outras na mesma instância (conexões do pool presas no `FOR UPDATE`).
 - **Rodada (cenário × nível):** começa com as tabelas **vazias** (TRUNCATE), para que o volume da rodada anterior não contamine a medição. As wallets são abertas fora da janela. Depois vêm o aquecimento (`LOAD_WARMUP_S`, padrão 10s, descartado) e a janela de medição (`LOAD_DURATION_S`, padrão 45s). Então a rodada espera a **quiescência** e roda as mesmas verificações de consistência do multi. A rodada falha se alguma verificação falhar, se aparecer uma resposta 4xx que não seja 422 ou se alguma instância não tiver atendido HTTP (e SQS, no misto).
-- **Níveis:** `LOAD_LEVELS`, padrão `10,50` (~10 min medidos, sendo boa parte esperando a quiescência). `LOAD_LEVELS=10,50,100` é opcional e leva mais (~15 min estimados, não medido). `LOAD_SCENARIOS` filtra cenários; `LOAD_SEED` fixa a sequência de operações de cada cliente. A intercalação entre clientes não é determinística.
+- **Níveis:** `LOAD_LEVELS`, padrão `10,50` (~11 min medidos, sendo boa parte esperando a quiescência). `LOAD_LEVELS=10,50,100` é opcional e leva mais (~15 min estimados, não medido). `LOAD_SCENARIOS` filtra cenários; `LOAD_SEED` fixa a sequência de operações de cada cliente. A intercalação entre clientes não é determinística.
 - **Geração:**
   - **Clientes HTTP:** laço fechado. Cada um envia, espera a resposta e envia de novo, em rodízio entre as instâncias. Um 503 ou uma falha de rede é reenviado com a mesma key (contrato do provedor) e conta como retry do cliente.
   - **Produtores SQS:** taxa fixa (`LOAD_SQS_RATE` mensagens/s por produtor, padrão 5), ou seja, chegada aberta.
@@ -1092,7 +1093,7 @@ Alguns requisitos do `CHALLENGE.md` se mostraram contraditórios entre si, ou s�
 
 ## Evolução futura
 
-Nada desta seção está implementado. É o que viria a seguir e onde cada peça entraria sem mexer no que já está provado.
+Nada do que é proposto aqui está implementado. É o que viria a seguir e onde cada peça entraria sem mexer no que já está provado.
 
 ### Diário de partidas dobradas: ledger → diário no schema
 
