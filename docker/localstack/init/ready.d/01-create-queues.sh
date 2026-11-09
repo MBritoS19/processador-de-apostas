@@ -54,7 +54,7 @@ awslocal sqs create-queue \
 
 echo "Filas criadas: ${QUEUE_NAME} -> DLQ ${DLQ_ARN} (maxReceiveCount=${MAX_RECEIVE_COUNT})"
 
-# Destino do outbox publisher (Fase 6): sem DLQ. O publisher nunca descarta eventos; a dedup
+# Destino do outbox publisher: sem DLQ. O publisher nunca descarta eventos; a dedup
 # do broker (MessageDeduplicationId = eventId) é só otimização, o consumidor deduplica por eventId.
 awslocal sqs create-queue \
   --region "$REGION" \

@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
- * Contrato dos scripts documentados (seção "Comandos" do CLAUDE.md / README).
+ * Contrato dos scripts documentados no README.
  * Se um script for criado, removido ou renomeado, atualize a documentação e esta lista.
  */
 const DOCUMENTED_SCRIPTS = [
