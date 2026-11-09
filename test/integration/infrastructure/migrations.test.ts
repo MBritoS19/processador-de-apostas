@@ -80,7 +80,7 @@ describe('migrations', () => {
     expect(await existingSchemaObjects()).toEqual(SCHEMA_OBJECTS);
   });
 
-  /** Reverte a da Fase 6 e as posteriores (`to` é inclusivo). */
+  /** Reverte a do `seq` da outbox e as posteriores (`to` é inclusivo). */
   const PHASE6_OUTBOX_SEQ = 'Migration20261107400000_outbox_seq';
 
   it('down das migrations da Fase 3 restaura os índices e constraints da Fase 2', async () => {
@@ -102,7 +102,7 @@ describe('migrations', () => {
     );
     expect(phase3.ck_wager_tx_failure_code).toContain('BALANCE_LIMIT_EXCEEDED');
 
-    // As 3 da Fase 3 e tudo depois delas (`to` é inclusivo).
+    // As 3 de regras (uma reversão, idempotência por provider, limite de saldo) e tudo depois delas (`to` é inclusivo).
     await migrator.down({ to: 'Migration20261107200000_one_reversal_per_reference' });
     const phase2 = await schemaObjects();
     expect(phase2).toHaveProperty('ux_wager_tx_one_reversal_per_kind');

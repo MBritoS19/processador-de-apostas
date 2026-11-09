@@ -15,10 +15,10 @@ export interface AppConfig {
   readonly sqs: {
     readonly wagerQueueName: string;
     readonly wagerDlqName: string;
-    /** Destino do outbox publisher (Fase 6). FIFO, sem DLQ. */
+    /** Destino do outbox publisher. FIFO, sem DLQ. */
     readonly wagerEventsQueueName: string;
   };
-  /** Outbox publisher (Fase 6). Números justificados no ARCHITECTURE.md → "Outbox publisher". */
+  /** Outbox publisher. Números justificados no ARCHITECTURE.md → "Outbox publisher". */
   readonly outboxPublisher: {
     readonly enabled: boolean;
     /** Até 10: limite do SendMessageBatch. */
@@ -33,7 +33,7 @@ export interface AppConfig {
     readonly stuckAttempts: number;
     readonly shutdownTimeoutMs: number;
   };
-  /** Consumidor da fila de transações (Fase 5). Números justificados no ARCHITECTURE.md → "Consumidor SQS". */
+  /** Consumidor da fila de transações. Números justificados no ARCHITECTURE.md → "Consumidor SQS". */
   readonly sqsConsumer: {
     readonly enabled: boolean;
     /** Chave da inbox: `(consumerName, messageId)`. */
@@ -47,7 +47,7 @@ export interface AppConfig {
     readonly maxAttempts: number;
     readonly shutdownTimeoutMs: number;
   };
-  /** Worker de referências pendentes (Fase 7). Números justificados no ARCHITECTURE.md → "Worker de referências pendentes". */
+  /** Worker de referências pendentes. Números justificados no ARCHITECTURE.md → "Worker de referências pendentes". */
   readonly pendingReferences: {
     readonly workerEnabled: boolean;
     readonly batchSize: number;
@@ -61,7 +61,7 @@ export interface AppConfig {
   };
   readonly healthCheckTimeoutMs: number;
   /**
-   * Injeção de falha SÓ para testes (Fase 9). Desligada por padrão e aceita apenas com
+   * Injeção de falha SÓ para testes. Desligada por padrão e aceita apenas com
    * `NODE_ENV=test` (lista de permissão). Documentada no ARCHITECTURE.md → "Estratégia de testes".
    */
   readonly faultInjection: FaultInjection;

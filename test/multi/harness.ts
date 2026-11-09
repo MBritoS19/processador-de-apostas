@@ -2,7 +2,7 @@ import type { Subprocess } from 'bun';
 import { join } from 'node:path';
 
 /**
- * Harness do teste multi-instância (Fase 9). Cada instância é um processo `bun src/main.ts`
+ * Harness do teste multi-instância. Cada instância é um processo `bun src/main.ts`
  * de verdade: PID próprio, pool de conexões próprio, nada compartilhado em memória.
  */
 

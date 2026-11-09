@@ -22,7 +22,7 @@ import {
 const brl = (amount: string) => ({ amount, currency: 'BRL' });
 
 /**
- * Worker de referências pendentes (Fase 7) com Postgres real e relógio manual: o teste avança o
+ * Worker de referências pendentes com Postgres real e relógio manual: o teste avança o
  * tempo e chama `runOnce()` direto (sem sleep). O loop/flag/shutdown têm testes próprios no fim.
  */
 describe('worker de referências pendentes (Postgres real)', () => {

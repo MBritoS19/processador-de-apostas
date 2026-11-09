@@ -51,7 +51,7 @@ describe('persistência — round-trip pelo MikroORM', () => {
   });
 
   function openingTransaction(wallet: Wallet, id: string): WagerTransaction {
-    // OPENING ainda não tem factory própria (Fase 4): reconstruído direto no estado final.
+    // OPENING reconstruído direto no estado final (round-trip do mapeamento, sem passar pela factory).
     return WagerTransaction.rehydrate({
       id,
       providerId: 'internal',

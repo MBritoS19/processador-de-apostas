@@ -4,7 +4,7 @@ import { WalletLedgerEntry, type LedgerDirection } from '../../domain/wallet-led
 
 /**
  * Linha de `wallet_ledger_entries` (append-only). A coluna `seq` (cursor do ledger) é gerada
- * pelo banco e não é mapeada aqui: a consulta paginada da Fase 4 a lê diretamente.
+ * pelo banco e não é mapeada aqui: a consulta paginada do ledger a lê diretamente.
  */
 export class LedgerEntryRecord {
   id!: string;

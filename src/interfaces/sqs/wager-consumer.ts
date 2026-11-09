@@ -24,7 +24,7 @@ export interface WagerConsumerOptions {
   retryMaxSeconds: number;
   maxAttempts: number;
   shutdownTimeoutMs: number;
-  /** Só testes (Fase 9): ver `FaultInjection`. Ausente = desligado. */
+  /** Só testes: ver `FaultInjection`. Ausente = desligado. */
   faultInjection?: FaultInjection;
 }
 
