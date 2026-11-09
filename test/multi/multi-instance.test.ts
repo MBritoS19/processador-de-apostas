@@ -225,8 +225,16 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
           async () => expect(await queueDepth(sqs, queues.queueUrl)).toBe(0),
           45_000,
         );
-        const duplicates = live.reduce((total, instance) => total + instance.count('sqs_message_acked:DUPLICATE_MESSAGE'), 0);
-        expect(duplicates, 'reentrega reconhecida pela inbox (DUPLICATE_MESSAGE), sem chamar o use case').toBe(1);
+        // O ack é logado depois do DeleteMessage e a linha chega pelo pipe de forma assíncrona:
+        // a fila pode zerar antes de a linha ser lida. Espera a linha, não só a fila.
+        await eventually(
+          'reentrega reconhecida pela inbox (DUPLICATE_MESSAGE), sem chamar o use case',
+          () => {
+            const duplicates = live.reduce((total, instance) => total + instance.count('sqs_message_acked:DUPLICATE_MESSAGE'), 0);
+            expect(duplicates).toBe(1);
+          },
+          20_000,
+        );
         const [afterRedelivery] = await rows<{ ledger: string; txs: string; inbox: string }>(
           `select (select count(*) from wallet_ledger_entries where wallet_id = ?)::text as ledger,
                   (select count(*) from wager_transactions where wallet_id = ? and kind = 'BET')::text as txs,
@@ -293,10 +301,12 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
         });
 
         // Antes do kill: cada uma das 3 instâncias atendeu HTTP e confirmou mensagens SQS.
-        for (const instance of live) {
-          expect(instance.count('wager_transaction_processed@http'), `${instance.label} atendeu HTTP antes do kill`).toBeGreaterThan(0);
-          expect(instance.count('sqs_message_acked'), `${instance.label} confirmou mensagens SQS antes do kill`).toBeGreaterThan(0);
-        }
+        await eventually('as 3 instâncias atenderam HTTP e confirmaram SQS antes do kill (linhas de log lidas)', () => {
+          for (const instance of live) {
+            expect(instance.count('wager_transaction_processed@http'), `${instance.label} atendeu HTTP antes do kill`).toBeGreaterThan(0);
+            expect(instance.count('sqs_message_acked'), `${instance.label} confirmou mensagens SQS antes do kill`).toBeGreaterThan(0);
+          }
+        }, 10_000);
 
         mark('onda 1: dispara HTTP e SQS juntos (hot wallet, duplicatas SQS, wallets aleatórias)');
         const pendingHttp: Array<Promise<{ op: string; result: HttpResult }>> = [];
@@ -429,10 +439,12 @@ describe(`multi-instância: 3 processos reais, SIGKILL e carga mista (seed ${SEE
         await waitQuiescence(rows, sqs, queues.queueUrl);
 
         // Depois do reinício (contadores zerados no start): cada instância atendeu HTTP e confirmou SQS.
-        for (const instance of live) {
-          expect(instance.count('wager_transaction_processed@http'), `${instance.label} atendeu HTTP depois do reinício`).toBeGreaterThan(0);
-          expect(instance.count('sqs_message_acked'), `${instance.label} confirmou mensagens SQS depois do reinício`).toBeGreaterThan(0);
-        }
+        await eventually('as 3 instâncias atenderam HTTP e confirmaram SQS depois do reinício (linhas de log lidas)', () => {
+          for (const instance of live) {
+            expect(instance.count('wager_transaction_processed@http'), `${instance.label} atendeu HTTP depois do reinício`).toBeGreaterThan(0);
+            expect(instance.count('sqs_message_acked'), `${instance.label} confirmou mensagens SQS depois do reinício`).toBeGreaterThan(0);
+          }
+        }, 10_000);
 
         // ───────────────────────── Verificações finais, todas por SQL
         mark('verificações finais por SQL');

@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Fase atual: **Concluído — opcionais** (Fases 0–10 concluídas em 2026-11-07)
+Estado: **entregue** (tag `v1.1-entrega`, com o diário de partidas dobradas mesclado na `main`; ajustes pós-avaliação em andamento para a `v1.2-entrega`). Fases 0–10 concluídas em 2026-11-07; opcionais e diário em 2026-11-08.
 
 ---
 
@@ -11,7 +11,7 @@ Fase atual: **Concluído — opcionais** (Fases 0–10 concluídas em 2026-11-07
 - [x] `docker-compose.yml`: PostgreSQL + LocalStack
 - [x] Criação das filas `wager-transactions.fifo` e `wager-transactions-dlq.fifo`, com redrive policy
 - [x] MikroORM configurado, com migrations rodando (up e down)
-- [x] Scripts do `package.json` batendo com o `CLAUDE.md`
+- [x] Scripts do `package.json` batendo com a documentação
 - [x] `GET /health/live` e `GET /health/ready` (Postgres + SQS)
 
 ## Fase 1 — Domínio (CHALLENGE.md §6, §7)
@@ -33,7 +33,7 @@ Fase atual: **Concluído — opcionais** (Fases 0–10 concluídas em 2026-11-07
 - [x] No máximo um lançamento por `(wallet_id, transaction_id)`
 - [x] CHECK de aritmética do ledger (`balance_before ± money = balance_after`)
 - [x] Trigger que bloqueia UPDATE e DELETE no ledger
-- [x] Uma reversão por referência e por tipo (índice único parcial)
+- [x] Uma reversão por referência e por tipo (índice único parcial; depois endurecida para uma reversão no total, `ux_wager_tx_one_reversal`)
 - [x] Inbox único por `(consumer_name, message_id)`
 - [x] Mapeamento de `Money` ↔ `numeric(20,2)` + `currency`
 - [x] Testes de integração das migrations e das constraints
@@ -110,45 +110,52 @@ Concorrência (paralelismo real):
 - [x] `README.md`: setup e comandos (provado num clone limpo)
 - [x] `ARCHITECTURE.md`: ORM, mapeamento de `Money`, estratégia transacional e de concorrência, transições de estado, `failureCode`, status HTTP, algoritmo de hash, TTL das pendências, autenticação, trade-offs e limitações
 
+
 ## Varredura de requisitos (2026-11-08)
 - [x] Matriz exigência → teste para todo o `CHALLENGE.md` (`docs/RASTREABILIDADE.md`): 137 cobertas, 1 não testável
 - [x] Lacunas fechadas: morte antes do commit (multi), Postgres/SQS fora do ar (`test:chaos`), evento antes do commit, sem lock global, tipos monetários no schema, fronteira do domínio, OPENING pela fila, health fora do guard, logs do consumidor, log da reconciliação, latência
 - [x] Teste de mutação manual: 8 mutações, todas pegas por pelo menos um teste
 
-## Correções da banca avaliadora (2026-11-08)
-- [x] Lote 1: `main` verde (`test:load` no contrato de scripts), CI em `.github/workflows/ci.yml` (typecheck + unit; integração com o próprio compose), README (nome fixo do projeto no compose, aplicação de pé nos testes, seed fixa do multi, tempos, Estrutura), ARCHITECTURE (seed, CI, retenção da inbox, replay de FAILED)
-- [x] Lote 2: reconciliação como use case (`ReconcileWallet`), cruzando ledger × transações (7 tipos de divergência, um teste de integração por tipo); consumidor com modo "banco fora" (só erro de conexão; para de receber e sonda o Postgres; mensagem fora do limite de tentativas; gauge `wagering_consumer_db_unavailable`); pool esgotado separado (`pool_exhausted`); `test:chaos` com o Postgres parado 40s
-- [x] Lote 3: 80+80 com sobreposição provada e reenvio; BET sem referência e "não referencia a si mesma" em `WagerTransaction.create`; leitura de idempotência sem lock antes do caminho com lock; hash da inbox normalizado; 1 tentativa extra interna em `lock_timeout`
+## Primeira avaliação independente e correções (2026-11-08)
+Avaliação a partir de um clone limpo, por critério da §14 do CHALLENGE: nenhuma falha eliminatória. Correções:
+- [x] `main` verde (`test:load` no contrato de scripts), CI em `.github/workflows/ci.yml` (typecheck + unit; integração com o próprio compose), README (nome fixo do projeto no compose, aplicação de pé nos testes, seed fixa do multi, tempos, Estrutura), ARCHITECTURE (seed, CI, retenção da inbox, replay de FAILED)
+- [x] Reconciliação como use case (`ReconcileWallet`), cruzando ledger × transações (7 tipos de divergência, um teste de integração por tipo); consumidor com modo "banco fora" (só erro de conexão; para de receber e sonda o Postgres; mensagem fora do limite de tentativas; gauge `wagering_consumer_db_unavailable`); pool esgotado separado (`pool_exhausted`); `test:chaos` com o Postgres parado 40s
+- [x] 80+80 com sobreposição provada e reenvio; BET sem referência e "não referencia a si mesma" em `WagerTransaction.create`; leitura de idempotência sem lock antes do caminho com lock; hash da inbox normalizado; 1 tentativa extra interna em `lock_timeout` (orçamento de espera mantido em ~2s: 2 tentativas de 1s); sonda do modo "banco fora" com teto de 5s
 - [x] Evidência do `test:chaos` em `docs/carga/chaos.txt`
-- [x] Ajustes finais: orçamento de espera pelo lock mantido em ~2s (2 tentativas de 1s); sonda do modo "banco fora" com teto de 5s
 
-## Fechamento
-- [x] Banca avaliadora (~82/100, nenhuma eliminatória; relatório local em `banca/`)
-- [x] Correções da banca (lotes 1 a 3 e ajustes finais)
-- [x] Comentários de "porquê" nos 10–15 pontos críticos, com referência à spec (commit `90ad45e`)
-- [x] Checklist de entrega (2026-11-08): `.env` e `CLAUDE.md` fora do git; clone limpo do remoto seguindo só o README (compose isolado, install, migration:up, `bun test`: 611 pass, 13 skip, 0 fail); README completado (URL real, `skip` explicado, demo); push junto com este fechamento
-- [ ] Preparação da apresentação
-- [x] Rodada final (2026-11-08), resumo em `docs/carga/final/RESUMO.md`: typecheck ok, unit 296, integração 304 (3 rodadas seguidas, 0 falha), concorrência 9, multi 2, chaos 2 (Postgres parado 40s: 2 entradas e 2 saídas do modo "banco fora", DLQ 0; LocalStack pausado 12s: 46 eventos retidos na outbox, DLQ 0)
+## Fechamento da entrega
+- [x] Comentários de "porquê" nos pontos críticos, com referência à spec
+- [x] Checklist de entrega: `.env` fora do git; clone limpo do remoto seguindo só o README (compose isolado, install, migration:up, `bun test`: 611 pass, 13 skip, 0 fail)
+- [x] Rodada final, resumo em `docs/carga/final/RESUMO.md`: typecheck ok, unit 296, integração 304 (3 rodadas seguidas, 0 falha), concorrência 9, multi 2, chaos 2
 - [x] `bun run demo`: cenário obrigatório (saldo 100, duas BETs de 80 em paralelo → uma PROCESSED, uma REJECTED `INSUFFICIENT_BALANCE`, saldo 20, reconciliação consistente)
-- [x] README: badge de CI e diagrama Mermaid do fluxo; ARCHITECTURE.md → "Evolução futura" (partidas dobradas, onde entra o `AuthGuard`, limitações e o que fecharia cada uma)
-- [x] Ledger de partidas dobradas: planejado em etapas (diário paralelo e aditivo) e implementado (ver Opcionais); em "Evolução futura" fica só ledger → diário no schema
-- [x] Mutex local por wallet: implementado no branch `feat/mutex-local` (não mesclado) e medido com o cenário `quente-frias` (3 rodadas antes + 3 depois, alternadas). Frias p95 −96%, mas quente PROCESSED/s −47% e 503 de 0 para 40: critério de merge não atingido. Resultado em `docs/CARGA.md` → "Mutex local por wallet: medido, não adotado"; JSONs em `docs/carga/mutex/`
+- [x] README: badge de CI e diagrama Mermaid do fluxo; ARCHITECTURE.md → "Evolução futura"
+- [x] Mutex local por wallet: implementado no branch `feat/mutex-local` e medido com o cenário `quente-frias` (3 rodadas antes + 3 depois, alternadas). Frias p95 −96%, mas quente PROCESSED/s −47% e 503 de 0 para 40: **não adotado**. Resultado em `docs/CARGA.md` → "Mutex local por wallet: medido, não adotado"; JSONs em `docs/carga/mutex/`
+- [x] Tag `v1.0-entrega`; desempate determinístico das pendentes (`511fee4`, tag `v1.0.1-entrega`)
 
-## Opcionais (só depois de tudo acima)
+## Opcionais
 - [ ] Autenticação com Keycloak ou Zitadel — não implementada por decisão: não vale pontos (CHALLENGE §2, "Autenticação — a cargo do candidato"); `AuthGuard` no-op e desenho (Keycloak client credentials, vínculo `wallet_providers`) documentados em ARCHITECTURE.md → "Autenticação"
-- [x] Teste de carga (`bun run test:load`) com p50/p95/p99, erros, conflitos e outbox lag (concluído em 2026-11-08; metodologia em ARCHITECTURE.md → "Estratégia de testes"; análise do outbox lag e do acúmulo na fila, com propostas não implementadas, em `docs/CARGA.md`; dados em `docs/carga/`)
-- [x] Ledger de partidas dobradas: diário paralelo ao ledger, implementado em `feat/partidas-dobradas` (ver abaixo) e mesclado na `main` (tag `v1.1-entrega`); ARCHITECTURE.md → "Diário de partidas dobradas"
+- [x] Teste de carga (`bun run test:load`) com p50/p95/p99, erros, conflitos e outbox lag (metodologia em ARCHITECTURE.md → "Estratégia de testes"; análise e dados em `docs/CARGA.md` e `docs/carga/`)
+- [x] Ledger de partidas dobradas: diário paralelo ao ledger, **mesclado na `main`** (tag `v1.1-entrega`); ARCHITECTURE.md → "Diário de partidas dobradas"
 
-## Diário de partidas dobradas (branch `feat/partidas-dobradas`, 2026-11-08)
-Plano aprovado. Prazo: passos 1–6 até 2026-11-09 15h; passo 7 até 18h; estourando, para no último passo verde. Critério de merge: todas as suítes verdes 3× e p95 de `quente-frias` até +20% sobre a main, sem erros novos; fora disso, não mescla e registra o resultado no ARCHITECTURE.md. Um commit e um push por passo; a main não é tocada.
-- [x] 1. Domínio: `JournalEntry` (débito = crédito, uma moeda, ≥ 2 pernas, imutável) e `forTransaction` (perna PLAYER com a direção do lançamento da wallet; contrapartida FUNDING no OPENING, PROVIDER_HOUSE do provider nos demais). Unit 319
-- [x] 2. Migration `…20261109000000_double_entry_journal`: `accounts`, `journal_entries`, `journal_postings`; append-only (23001); constraint trigger deferido `trg_journal_balanced` (23514: débito = crédito, transação PROCESSED que move saldo, contas certas, perna PLAYER = lançamento da wallet); FUNDING para BRL, USD e moedas existentes (moeda nova: sob demanda, decisão do autor); backfill do ledger; `down` remove só o diário. `bun test`: 670 pass, 13 skip, 0 fail
-- [x] 3. Persistência: porta `insertJournalEntry` e adaptador em SQL direto (`journal.persistence.ts`; sem EntitySchema, porque nada do diário é lido pelo ORM): contas pela chave natural numa consulta (índices parciais), as que faltam com `on conflict do nothing` + releitura; lançamento e pernas num statement. Testes: primeiro uso concorrente de HOUSE (espera e reaproveita; holder desiste → cria a própria), FUNDING sob demanda, diário desbalanceado derruba a transação inteira. `bun test`: 675 pass, 13 skip, 0 fail
-- [x] 4. Gravação dupla em `WagerSettlement` (use case e worker de pendentes) e `OpenWallet`, logo após o lançamento da wallet. 23514 de `trg_journal_balanced` → `JournalIntegrityError` (permanente). Antes: o consumidor tratava qualquer erro inesperado como retry (`unexpected_error`) até a 5ª tentativa e então DLQ `MAX_ATTEMPTS_EXCEEDED`; agora `JournalIntegrityError` e `InvalidJournalEntryError` vão para a DLQ `JOURNAL_INTEGRITY_VIOLATION` na 1ª entrega, sem retry. HTTP: 500. Worker de pendentes: inalterado (erro inesperado repetido → FAILED `INFRASTRUCTURE_FAILURE`). `seedWallet` grava o OPENING no diário; `expectJournalConsistent`. Testes: atomicidade por HTTP (BET e abertura) e SQS com falha real do diário, gravação dupla por kind e pelo worker. `bun test`: 683 pass, 13 skip, 0 fail; concorrência 3×
-- [x] 5. Reconciliação: saldo da conta PLAYER no diário lido no mesmo snapshot; `journalBalance` na resposta; `JOURNAL_BALANCE_MISMATCH` = diário ≠ saldo guardado (com `BALANCE_MISMATCH`, cobre diário == saldo == ledger sem acusar duas vezes a mesma causa). Testes de "cada divergência sozinha" alinham o diário ao saldo adulterado; saldo corrompido agora acusa as duas divergências; `afterEach` da API confere também o diário. Multi e chaos passam a conferir o diário via `consistent`. `bun test`: 690 pass, 13 skip, 0 fail
-- [x] 6. Concorrência (`test/concurrency/journal.test.ts`: 3 instâncias, 6 wallets, 2 providers, um deles novo a cada execução (HOUSE nasce disputada), BET/WIN/REFUND/ROLLBACK em paralelo; três saldos por wallet e pela reconciliação, contas únicas, débito = crédito por lançamento e no total, HOUSE = − movimentos dos jogadores do provider), 3× verde. `expectConsistent` (multi e carga) ganha as checagens do diário; `test:multi` 2 pass. `bun test`: 691 pass, 13 skip, 0 fail
-- [x] 7. Carga A/B `quente-frias` (3 + 3 rodadas alternadas, `main` `1052017` × branch `e3ad728`, medianas): p95 geral 2.192 → 2.603 ms (**+18,7%**, critério ≤ +20%: atingido), 0 erro HTTP, 0 503, 0 4xx inesperado nos dois lados, consistência ok 6/6. Fora do critério: vazão −18% (quente 70,6 → 58,4 PROCESSED/s; total 89,1 → 73,4 tx/s). Dados em `docs/carga/partidas-dobradas/`, análise em `docs/CARGA.md` → "Diário de partidas dobradas: medição". Docs: ARCHITECTURE.md → "Diário de partidas dobradas" (nova), garantias no schema, estratégia transacional, reconciliação, consumidor SQS, decisões; ledger → diário no schema em "Evolução futura"; README.
-- [ ] Critério de merge — suítes 3×: typecheck, unit (327), concorrência (10), multi (2) e chaos (2) verdes 3×; **integração verde 1×, 2× com 1 falha** em `pending-references.test.ts` → "referência existente mas ainda pendente…". A falha é **anterior à branch**: reproduz na `main` `1052017` (isolado e no arquivo inteiro). Causa provável: as duas pendentes vencem no mesmo instante e `findDuePendingReferences` ordena só por `next_reference_check_at`; se o REFUND é resolvido antes do ROLLBACK, o ROLLBACK vê a referência REJECTED (`REFERENCE_NOT_PROCESSED`). Pela regra combinada, **não mesclado**; aguardando decisão do autor.
+## Diário de partidas dobradas (2026-11-08, mesclado — tag `v1.1-entrega`)
+Critério de adoção: todas as suítes verdes 3× e p95 de `quente-frias` até +20% sobre a `main`, sem erros novos.
+- [x] 1. Domínio: `JournalEntry` (débito = crédito, uma moeda, ≥ 2 pernas, imutável) e `forTransaction` (perna PLAYER com a direção do lançamento da wallet; contrapartida FUNDING no OPENING, PROVIDER_HOUSE do provider nos demais)
+- [x] 2. Migration `…20261109000000_double_entry_journal`: `accounts`, `journal_entries`, `journal_postings`; append-only (23001); constraint trigger deferido `trg_journal_balanced` (23514); FUNDING para BRL, USD e moedas existentes (moeda nova: sob demanda); backfill do ledger; `down` remove só o diário
+- [x] 3. Persistência: `insertJournalEntry` em SQL direto (`journal.persistence.ts`): contas pela chave natural numa consulta, as que faltam com `on conflict do nothing` + releitura; lançamento e pernas num statement
+- [x] 4. Gravação dupla em `WagerSettlement` (use case e worker de pendentes) e `OpenWallet`, logo após o lançamento da wallet. Erro do diário: HTTP 500; SQS direto para a DLQ `JOURNAL_INTEGRITY_VIOLATION`, sem retry
+- [x] 5. Reconciliação: `journalBalance` na resposta; `JOURNAL_BALANCE_MISMATCH` = diário ≠ saldo guardado
+- [x] 6. Concorrência (`test/concurrency/journal.test.ts`: 3 instâncias, 6 wallets, 2 providers, HOUSE nascendo disputada); `expectConsistent` (multi e carga) confere o diário
+- [x] 7. Carga A/B `quente-frias` (3 + 3 rodadas alternadas, medianas): p95 geral +18,7% (critério ≤ +20%: atingido), 0 erro novo; vazão −18%. Dados em `docs/carga/partidas-dobradas/`, análise em `docs/CARGA.md`
+- [x] Critério de adoção: depois do desempate das pendentes (`511fee4`), 3 rodadas verdes (typecheck, unit 327, integração 354, concorrência 10, multi 2, chaos 2) e CI verde; merge `--no-ff` na `main`, tag `v1.1-entrega`
+
+## Ajustes pós-avaliação (branch `fix/pos-banca`, 2026-11-08)
+Segunda avaliação independente da `v1.1-entrega` (clone limpo, stack isolada): nenhuma falha eliminatória; principal achado, um intermitente no **teste** multi-instância.
+- [x] `test:multi`: contagens por linha de log esperam a linha (poll com prazo) em vez de ler logo depois de a fila zerar
+- [x] Docs: este arquivo como histórico neutro; README com "Limitações conhecidas", aviso do `test:chaos` e "Uso de IA"; ARCHITECTURE com o diário na lista de SQL da transação e nas migrations
+- [x] BET → REFUND → ROLLBACK do REFUND: comportamento documentado (ARCHITECTURE.md → "Regras de negócio", "Interpretações adotadas") e provado por teste de integração; regra inalterada
+- [x] `test:load` completo sobre o código entregue (`33f8049`): 7/7 rodadas com consistência ok, 0 erro, 0 503; `docs/CARGA.md` reescrito com a rodada oficial nova, a comparação com a anterior e o custo do diário
+- [x] Migration aditiva `…20261109100000_read_path_indexes` (`ix_wager_tx_wallet`, `ix_ledger_transaction`, `ix_outbox_aggregate`), com teste de up/down; EXPLAIN antes e depois em `docs/carga/explain-indices.txt`
+- [x] `test:load` com os índices (`1ce388e`): 7/7 com consistência ok, 0 erro, 0 503, sem regressão mensurável; é a rodada oficial de `docs/CARGA.md` (a de `33f8049` ficou arquivada)
 
 ---
 
@@ -167,7 +174,7 @@ Plano aprovado. Prazo: passos 1–6 até 2026-11-09 15h; passo 7 até 18h; estou
 - `Wallet.open` devolve a wallet (version 1) + lançamento OPENING; saldo inicial zero não gera lançamento; `debit`/`credit` devolvem o lançamento — "Modelo de domínio"
 - `markPendingReference(now)` cobre PENDING→PENDING_REFERENCE e as novas tentativas (`referenceAttempts`, `nextReferenceCheckAt`, backoff 5s·2^(n−1) até 10min) — "Modelo de domínio"
 - Backoff da outbox determinístico 1s·2^(n−1) até 5min; id da outbox = `eventId` — "Modelo de domínio"
-- `FailureCode` com 14 códigos estáveis; erros de domínio não carregam código (o use case da Fase 3 mapeia) — "Taxonomia de failureCode"
+- `FailureCode` com 15 códigos estáveis; erros de domínio não carregam código (o use case da Fase 3 mapeia) — "Taxonomia de failureCode"
 - Referência PENDING/PENDING_REFERENCE → aguardar; só referência REJECTED/FAILED gera `REFERENCE_NOT_PROCESSED` — "Taxonomia de failureCode"
 - Mapeamento por registros de persistência (`EntitySchema`) + mappers que chamam `rehydrate`; `numeric` como string direto para `Money.from` — "Persistência"
 - `WagerTransaction.observedBalance` (coluna `observed_balance`): obrigatório em `markProcessed`, opcional em `reject`; o replay devolve o saldo original — "Persistência"
@@ -178,7 +185,7 @@ Plano aprovado. Prazo: passos 1–6 até 2026-11-09 15h; passo 7 até 18h; estou
 - Constraint trigger deferido saldo × último lançamento, nos dois sentidos — "Garantias no schema"
 - Triggers: transação nunca é apagada, terminal não muda, identidade/payload imutáveis; ledger append-only (SQLSTATE 23001) — "Garantias no schema"
 - TRUNCATE não bloqueado (administrativo; testes usam) — "Persistência"
-- Lock pessimista por wallet (`FOR UPDATE` filtrando também `player_id`), `SET LOCAL lock_timeout` 2s, `version` no UPDATE como segunda barreira; timeout, deadlock e version → `TransientFailure` com log e contador — "Concorrência"
+- Lock pessimista por wallet (`FOR UPDATE` filtrando também `player_id`), `SET LOCAL lock_timeout` 1s com 1 tentativa extra (orçamento ~2s), `version` no UPDATE como segunda barreira; timeout, deadlock e version → `TransientFailure` com log e contador — "Concorrência"
 - Idempotência checada sob o lock; `23505` só das constraints esperadas (idempotência, inbox) é relido como replay/conflito; o resto é bug — "Idempotência"
 - Idempotency key única por `(provider_id, idempotency_key)` (migration nova) — "Idempotência"
 - `payloadHash`: SHA-256 hex do JSON canônico só com campos de negócio; amount normalizado, walletId minúsculo, referência ausente = `null` — "Idempotência"
@@ -200,7 +207,7 @@ Plano aprovado. Prazo: passos 1–6 até 2026-11-09 15h; passo 7 até 18h; estou
 - Logs pino JSON (inclusive logger do Nest); `X-Correlation-Id` aceito só se `^[A-Za-z0-9._:-]{1,128}$` — "Observabilidade"
 - Métricas em registry próprio; labels `status`, `kind` (enum ou `UNKNOWN`), `failure_code` — "Observabilidade"
 - Consumidor SQS reutiliza o use case instrumentado (`WageringCoreModule`, compartilhado com o HTTP); ligado por `SQS_CONSUMER_ENABLED` — "Consumidor SQS"
-- Hash da inbox = SHA-256 do JSON canônico de `{ type, data }` (sem messageId/occurredAt); pré-checagem da inbox + releitura no conflito — "Consumidor SQS"
+- Hash da inbox = SHA-256 do JSON canônico de `{ idempotencyKey, payloadHash }`, com o mesmo hash normalizado da transação; pré-checagem da inbox + releitura no conflito — "Consumidor SQS"
 - Classificação: negócio → ack; transitório/bug → retry; envelope/payload inválido e inbox divergente → DLQ com `dlqReason` — "Consumidor SQS"
 - Limite 5 no consumidor, redrive 10 na fila; backoff 30/60/120/240 (teto 300s); visibilidade 60s; long polling 20s; pausa do polling até 30s com banco fora — "Consumidor SQS"
 - Ordem do grupo preservada sem depender do broker (as seguintes recebem a mesma visibilidade da que falhou) — "Consumidor SQS"
@@ -220,38 +227,34 @@ Plano aprovado. Prazo: passos 1–6 até 2026-11-09 15h; passo 7 até 18h; estou
 - `stop()` do consumidor aborta o long polling (mensagem entregue ao poll abortado volta após a visibilidade) — "Consumidor SQS"
 - Docker: imagem `oven/bun:1.4`, profile `multi` com `migrate` + 3 réplicas em `127.0.0.1:3000-3002` — "Estratégia de testes"
 
-## Pendências e bloqueios
-- Limitação: o banco não garante que só transação PROCESSED tenha lançamento, nem valor e direção do lançamento = os da transação, nem o encadeamento `balance_before` (ARCHITECTURE.md → "Limitações"). O use case garante, e `expectLedgerConsistent` verifica nos testes. Em produção, a reconciliação (refeita na banca) detecta tudo isso, menos o encadeamento lançamento a lançamento (ARCHITECTURE.md → "Reconciliação").
-- Limitação: `inbox_messages` não tem retenção (ARCHITECTURE.md → "Idempotência").
-- Limitação: o modo "banco fora" volta a receber até ~5s depois de o banco voltar (teto da sonda); com várias quedas seguidas, a mensagem pode chegar ao `maxReceiveCount` 10 da fila e ir para a DLQ pelo redrive nativo, sem motivo (ARCHITECTURE.md → "Modo \"banco fora\"").
-- Decisão pendente: amarrar `payload.providerId` ao provider autenticado e escopar as consultas por provider (desenho em ARCHITECTURE.md → "Autenticação"). Sem isso, qualquer cliente submete em nome de qualquer provider e lê transações e saldos alheios.
-- Limitação: wallets não têm vínculo com provider; qualquer provider que conheça `walletId` + `playerId` movimenta a wallet. O vínculo (`wallet_providers`) está no desenho de ARCHITECTURE.md → "Autenticação", não implementado.
-- Lock da wallet antes da checagem de dono: resolvido na Fase 3 (`FOR UPDATE ... AND player_id`); rate limit por provider/wallet na borda continua recomendado.
-- `InvalidInput` tem código único (`INVALID_INPUT`) e motivo em texto; códigos por campo ficam para quando um consumidor precisar.
-- Limitação conhecida: REFUND de BET que já tem WIN PROCESSED é aceito (ARCHITECTURE.md → "Regras de negócio").
-- Deploy: usuário da aplicação sem permissão de TRUNCATE.
-- Resolvido (Fase 9): `stop_grace_period: 30s` no serviço `app` do profile `multi`, com a soma dos prazos de shutdown validada no boot (ARCHITECTURE.md → "Estratégia de testes").
-- Limitação (C4a, ARCHITECTURE.md → "Consumidor SQS"): se a primeira entrega de um `messageId` termina em `IdempotencyConflict` ou `InvalidInput`, a inbox não é gravada; o mesmo `messageId` com outro payload válido depois é processado. Fechar exige mudar o use case.
-- O vínculo `SIGTERM` → shutdown hooks (`enableShutdownHooks`) não tem teste automatizado (os testes usam `app.close()`); verificado manualmente no `down` do profile `multi` (3 réplicas, saída 0, sem timeout).
-- Limitações do `test:multi` (ARCHITECTURE.md → "Estratégia de testes"): a sobreposição na hot wallet não é provada; "pegou trabalho em andamento" no item 8 é sanidade; a distribuição da fila entre instâncias depende do broker; a seed reproduz a carga, não a intercalação.
+
+## Pendências e limitações
+Lista completa em ARCHITECTURE.md → "Limitações"; aqui só o que ficou em aberto.
+- Autenticação não implementada; sem vínculo wallet ↔ provider (desenho em ARCHITECTURE.md → "Autenticação").
+- O banco não garante que só transação PROCESSED tenha lançamento, nem valor e direção do lançamento = os da transação, nem o encadeamento `balance_before`. O use case garante; a reconciliação detecta, menos o encadeamento lançamento a lançamento.
+- `inbox_messages` sem retenção.
+- Modo "banco fora": volta a receber até ~5s depois de o banco voltar; várias quedas seguidas podem levar uma mensagem ao `maxReceiveCount` 10 da fila e à DLQ pelo redrive nativo.
+- REFUND de BET que já tem WIN PROCESSED é aceito.
+- Mensagem cuja primeira entrega termina em `IdempotencyConflict` ou `InvalidInput` não grava inbox (ARCHITECTURE.md → "Limitações").
+- `InvalidInput` com código único; rate limit por provider/wallet só na borda; deploy sem permissão de TRUNCATE para o usuário da aplicação.
+- O vínculo `SIGTERM` → shutdown hooks foi verificado só manualmente (profile `multi`).
+- Limitações do `test:multi`: a sobreposição na hot wallet não é provada; a distribuição da fila entre instâncias depende do broker; a seed reproduz a carga, não a intercalação.
 
 ## Registro de sessões
-<!-- Data — o que foi feito — próximo passo -->
-- 2026-11-07 — Fase 0 concluída: projeto Bun+Nest+TS strict, compose (Postgres 16 + LocalStack 4.9.2), filas FIFO + DLQ, MikroORM + migrator, health live/ready. 21 testes passando (12 unit, 9 integração). — Próximo: Fase 1 (domínio), aguardando aprovação do plano.
-- 2026-11-07 — Revisão (6 revisores) da Fase 0: 2 médios + 13 baixos corrigidos (reason do readiness fechado e sem vazamento, nome de migration validado, CLI valida args antes de conectar, .env.test autossuficiente, portas em loopback, healthcheck do LocalStack checa falha de script, módulos Nest, boot tolerante a Postgres fora). 64 testes passando (44 unit, 20 integração). — Próximo: Fase 1.
-- 2026-11-07 — Fase 1 concluída: Money (bigint), Wallet, WagerTransaction, WalletLedgerEntry, Inbox/Outbox, 4 eventos de integração, FailureCode; ARCHITECTURE §7–9. 160 testes unitários passando (116 do domínio). — Próximo: Fase 2 (schema), aguardando plano.
-- 2026-11-07 — Fase 2 concluída: migration com 5 tabelas, CHECKs, UNIQUEs, FKs compostas deferidas, índices parciais, triggers de imutabilidade/append-only e constraint trigger saldo × ledger; mapeamento EntitySchema + mappers; ARCHITECTURE §10–11. 248 testes passando (162 unit, 86 integração). — Próximo: Fase 3 (use case), aguardando plano.
-- 2026-11-07 — Fase 3 concluída: use case `ProcessWagerTransaction` (lock pessimista por wallet, idempotência sob lock, regras §7, outbox/inbox na mesma transação), 3 migrations novas (uma reversão no total, idempotência por provider, `BALANCE_LIMIT_EXCEEDED`); revisão com 6 revisores (5 médios + lows corrigidos); ARCHITECTURE §12–15. 370 testes passando (210 unit, 156 integração, 4 concorrência — este 5x seguidas sem falha). — Próximo: Fase 4 (API HTTP), aguardando plano.
-- 2026-11-07 — Fase 4 concluída: API HTTP de wallets, transações, consultas, ledger paginado, reconciliação e AuthGuard no-op; status HTTP documentados em ARCHITECTURE §16. Typecheck e testes HTTP de integração passando. — Próximo: Fase 5 (SQS), aguardando plano.
-- 2026-11-07 — Fase 8 parcial concluída: logs JSON com correlação HTTP, métricas Prometheus em registry próprio e wrapper compartilhado do use case; retries/DLQ/outbox lag apenas declaradas para as Fases 5–7. — Próximo: Fase 5 (SQS), aguardando plano.
-- 2026-11-07 — Validação das Fases 4 e 8 (implementadas pelo Copilot; revisores correctness + interface): 14 achados corrigidos (erros do banco viravam 400, id não-UUID dava 500, FAILED em 503, label `kind` sem limite, reconciliação sem métrica, OPENING sem evento, envelope de erro, nomes reservados, cursor, correlationId, wrapper, convenções Prometheus, 202/409). Novo use case `OpenWallet`, factory `WagerTransaction.opening`, filtro global; ARCHITECTURE §16–17 reescritos. 437 testes passando (240 unit, 193 integração, 4 concorrência). — Próximo: Fase 5 (SQS), aguardando plano.
-- 2026-11-07 — Fase 5 concluída: consumidor SQS (inbox, ack após commit, retry com backoff, DLQ com motivo, FIFO por grupo, pausa do polling com banco fora, shutdown gracioso), `WageringCoreModule` compartilhado; revisão (correctness + test-evidence): 6 achados de código e 10 de testes corrigidos (redrive 10 / limite 5, ordem do grupo sem depender do broker, releitura da inbox, envelope ilegível → DLQ, loop único). ARCHITECTURE §18. 483 testes passando (259 unit, 220 integração, 4 concorrência). — Próximo: Fase 6 (outbox publisher), aguardando plano.
-- 2026-11-07 — Fase 6 concluída: outbox publisher em `wager-events.fifo` (claim com `FOR UPDATE SKIP LOCKED` publicando ainda com o lock, ordem por agregado via `seq`, `SendMessageBatch` com falha por entrada, backoff sem descarte nem DLQ, timeouts do SQS abaixo do idle timeout, métricas published/failures/retries/stuck e outbox lag, shutdown gracioso). Revisão (correctness + test-evidence): 4 achados de código e 14 de testes corrigidos (backfill ordenado do `seq`, reenvio um a um em 4xx, SDK sem retries + folga de 2s, falha parcial real do LocalStack, `pg_terminate_backend`, idle timeout, shutdown com timeout). ARCHITECTURE §19. 513 testes passando (263 unit, 244 integração, 6 concorrência). Observação: uma execução da integração travou uma vez sem atividade no banco e não se repetiu em duas execuções seguidas. — Próximo: Fase 7 (referências pendentes), aguardando plano.
-- 2026-11-07 — Fase 7 concluída: `WagerSettlement` extraído (commit próprio), worker de referências pendentes (SKIP LOCKED na wallet, TTL 1h, caminho rápido, `correlation_id`, FAILED após 5 erros, espera do lock após 5 `wallet_busy`), métricas e flag. Corrigido o travamento intermitente da suíte de integração (`killClaimSession` agora espera o término do backend). Revisão (correctness + test-evidence): 3 achados de código e 12 de testes corrigidos. ARCHITECTURE §20. — Próximo: Fase 9 (testes de integração e concorrência), aguardando plano.
-- 2026-11-07 — Fase 9 validada e concluída (feita no Antigravity, revisada aqui com test-evidence + correctness): 5 achados apontados e 7 novos corrigidos (50 envios em paralelo HTTP+SQS nas 3 instâncias, prova de tráfego por instância antes e depois do reinício, contadores por vida do processo, ack logado só após o DeleteMessage, atomicidade da resolução pelo worker, checagens transação → evento, ledger no wagering-http/outbox, FAULT_INJECTION só com NODE_ENV=test, shutdown 8s ×3 com orçamento de 25s validado no boot, abort do long polling). Docker: build, profile multi com 3 réplicas ready, StopTimeout=30, down gracioso (saída 0, ~4s). 3 rodadas seguidas verdes: unit 281 (~4s), integração 282 (~57s), concorrência 8 (~8s), multi 1 (~40s). ARCHITECTURE §21 e README. — Próximo: Fase 10 (documentação), aguardando plano.
-- 2026-11-07 — Fase 10 concluída: auditoria da documentação contra o código (variáveis, scripts, failureCodes, métricas e números batendo); ARCHITECTURE.md reorganizado por tema e sem números de seção (índice, visão geral em 1 minuto, estratégia transacional, configuração, interpretações, decisões/trade-offs/limitações); desenho de autenticação com leitura de wallet/ledger e vínculo `wallet_providers` (AuthGuard segue no-op); citações "§N" trocadas pelo nome da seção no código, nas configs e nas listas acima (este registro mantém os números antigos); README reescrito e provado num clone limpo com compose isolado (install, up, migrations, unit 281, integração 282, exemplos curl). Typecheck e unit verdes no repositório. — Próximo: opcionais, só com pedido.
-- 2026-11-08 — Banca avaliadora (clone limpo do GitHub, um subagente por área da §14 do CHALLENGE + eliminatórias): nota estimada ~82/100, nenhuma falha eliminatória; relatório local em `banca/` (fora do git). Correções em 3 lotes e 4 commits (main verde + CI + docs; reconciliação completa + consumidor resiliente a queda do banco; ajustes de custo baixo; evidências). Fechamento: typecheck ok, unit 295, integração 304, concorrência 9, multi 2, chaos 2 (Postgres parado 40s: 2 entradas e 2 saídas do modo "banco fora", 2 retries, DLQ 0; saída em `docs/carga/chaos.txt`). — Próximo: revisão e push pelo autor.
-- 2026-11-08 — Fechamento: itens registrados no PROGRESSO; cenário de carga `quente-frias` (50 clientes numa wallet + 10 em 300 wallets, medido por grupo). Mutex local por wallet implementado em `feat/mutex-local` (unit 309, integração 304 em 3 de 4 rodadas (1 falha intermitente não identificada), concorrência 9, multi 2) e medido A/B alternado 3×3: frias p95 2.148→88ms, mas quente 55,7→29,3 PROCESSED/s e 0→40 respostas 503; não mesclado, documentado em docs/CARGA.md e ARCHITECTURE.md. — Próximo: comentários de "porquê" nos pontos críticos.
-- 2026-11-08 — Fechamento final da main: rodada completa com resumo em `docs/carga/final/RESUMO.md` (unit 296, integração 304 ×3, concorrência 9, multi 2, chaos 2, tudo verde); clone limpo do remoto pelo README (611 pass, 13 skip); `bun run demo`; ARCHITECTURE.md → "Evolução futura"; README com badge de CI, Mermaid e lacunas do clone corrigidas. — Próximo: preparação da apresentação.
-- 2026-11-08 — Diário de partidas dobradas em `feat/partidas-dobradas` (passos 1–7, um commit e um push por passo): domínio, migration com backfill, repositório, gravação dupla (erro do diário → DLQ direto), reconciliação (`journalBalance`, `JOURNAL_BALANCE_MISMATCH`), concorrência e multi, carga A/B. p95 +18,7% (critério atingido), vazão −18%. Suítes 3×: tudo verde, menos a integração (2× uma falha em `pending-references.test.ts`, que reproduz na `main`). — Próximo: decisão do autor sobre o teste intermitente e o merge.
-- 2026-11-08 — Diário mesclado: desempate das pendentes resolvido na `main` (`511fee4`, tag `v1.0.1-entrega`); `feat/partidas-dobradas` rebaseada sem conflito; migration aplicada no `wagering_test`; 3 rodadas verdes (typecheck, unit 327, integração 354, concorrência 10, multi 2, chaos 2) e CI verde; docs revisados; merge `--no-ff` na `main`, tag `v1.1-entrega`. — Próximo: preparação da apresentação.
+<!-- Data — o que foi feito -->
+- 2026-11-07 — Fase 0: projeto Bun + Nest + TS strict, compose (Postgres 16 + LocalStack 4.9.2), filas FIFO + DLQ, MikroORM + migrator, health live/ready.
+- 2026-11-07 — Fase 1: `Money` (bigint), `Wallet`, `WagerTransaction`, `WalletLedgerEntry`, inbox/outbox, 4 eventos de integração, `FailureCode`. 160 testes unitários.
+- 2026-11-07 — Fase 2: migration com 5 tabelas, CHECKs, UNIQUEs, FKs compostas deferidas, índices parciais, triggers de imutabilidade/append-only e constraint trigger saldo × ledger. 248 testes.
+- 2026-11-07 — Fase 3: `ProcessWagerTransaction` (lock pessimista por wallet, idempotência sob lock, regras, outbox/inbox na mesma transação) e 3 migrations novas. 370 testes; concorrência 5× seguidas sem falha.
+- 2026-11-07 — Fases 4 e 8: API HTTP (wallets, transações, consultas, ledger paginado, reconciliação, `AuthGuard` no-op), logs JSON e métricas Prometheus; revisão de correção e de interface com 14 ajustes. 437 testes.
+- 2026-11-07 — Fase 5: consumidor SQS (inbox, ack após commit, retry com backoff, DLQ com motivo, FIFO por grupo, shutdown gracioso). 483 testes.
+- 2026-11-07 — Fase 6: outbox publisher (`SKIP LOCKED`, ordem por agregado via `seq`, backoff sem descarte, timeouts do SQS abaixo do idle timeout). 513 testes.
+- 2026-11-07 — Fase 7: `WagerSettlement` como fonte única das regras; worker de referências pendentes (TTL 1h, caminho rápido, FAILED após 5 erros).
+- 2026-11-07 — Fase 9: testes multi-instância com processos reais, SIGKILL depois do commit e antes do ack, profile `multi` do compose. 3 rodadas verdes.
+- 2026-11-07 — Fase 10: documentação auditada contra o código; README provado num clone limpo.
+- 2026-11-08 — Varredura de requisitos (`docs/RASTREABILIDADE.md`) e teste de mutação manual.
+- 2026-11-08 — Primeira avaliação independente; correções (reconciliação completa, modo "banco fora", CI, docs); evidência do caos. Tag `v1.0-entrega`.
+- 2026-11-08 — Cenário de carga `quente-frias`; mutex local por wallet medido e não adotado.
+- 2026-11-08 — Desempate determinístico das pendentes (tag `v1.0.1-entrega`).
+- 2026-11-08 — Diário de partidas dobradas: 7 passos, carga A/B, 3 rodadas verdes e CI; mesclado na `main` (tag `v1.1-entrega`).
+- 2026-11-08 — Segunda avaliação independente da `v1.1-entrega`; ajustes em `fix/pos-banca`.

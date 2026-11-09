@@ -1,7 +1,7 @@
 import { Migration } from '@mikro-orm/migrations';
 
 /**
- * Fase 7: `correlation_id` da requisição que criou a transação. O worker de referências
+ * `correlation_id` da requisição que criou a transação. O worker de referências
  * pendentes usa esse valor nos eventos da resolução. Nulo nas linhas anteriores a esta
  * migration (o worker usa o id da transação como fallback; ARCHITECTURE.md → "Worker de referências pendentes").
  *

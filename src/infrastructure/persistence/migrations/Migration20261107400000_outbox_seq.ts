@@ -1,7 +1,7 @@
 import { Migration } from '@mikro-orm/migrations';
 
 /**
- * Ordem por agregado no outbox publisher (Fase 6). `seq` é atribuído no INSERT, que acontece
+ * Ordem por agregado no outbox publisher. `seq` é atribuído no INSERT, que acontece
  * sob o lock da wallet: dentro de um agregado, ordem de `seq` = ordem de commit. O índice
  * parcial serve o `not exists` do claim ("há evento anterior pendente do mesmo agregado?").
  *

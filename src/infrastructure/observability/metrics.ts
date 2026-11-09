@@ -65,7 +65,7 @@ export class ObservabilityMetrics {
     registers: [this.registry],
   });
 
-  // Outbox publisher (Fase 6).
+  // Outbox publisher.
   readonly outboxPublished = new Counter({
     name: 'wagering_outbox_published_total',
     help: 'Eventos da outbox publicados e marcados como publicados (commit).',
@@ -88,7 +88,7 @@ export class ObservabilityMetrics {
     registers: [this.registry],
   });
 
-  // Worker de referências pendentes (Fase 7).
+  // Worker de referências pendentes.
   readonly pendingReferences = new Gauge({
     name: 'wagering_pending_references',
     help: 'Transações em PENDING_REFERENCE (medido em intervalo fixo pelo worker).',

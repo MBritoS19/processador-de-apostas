@@ -80,7 +80,7 @@ describe('migrations', () => {
     expect(await existingSchemaObjects()).toEqual(SCHEMA_OBJECTS);
   });
 
-  /** Reverte a da Fase 6 e as posteriores (`to` é inclusivo). */
+  /** Reverte a do `seq` da outbox e as posteriores (`to` é inclusivo). */
   const PHASE6_OUTBOX_SEQ = 'Migration20261107400000_outbox_seq';
 
   it('down das migrations da Fase 3 restaura os índices e constraints da Fase 2', async () => {
@@ -102,7 +102,7 @@ describe('migrations', () => {
     );
     expect(phase3.ck_wager_tx_failure_code).toContain('BALANCE_LIMIT_EXCEEDED');
 
-    // As 3 da Fase 3 e tudo depois delas (`to` é inclusivo).
+    // As 3 de regras (uma reversão, idempotência por provider, limite de saldo) e tudo depois delas (`to` é inclusivo).
     await migrator.down({ to: 'Migration20261107200000_one_reversal_per_reference' });
     const phase2 = await schemaObjects();
     expect(phase2).toHaveProperty('ux_wager_tx_one_reversal_per_kind');
@@ -209,6 +209,27 @@ describe('migrations', () => {
       .execute<Array<{ seq: string }>>('select max(seq)::text as seq from outbox_messages');
     expect(last?.seq).toBe('4');
     await knex.raw('truncate outbox_messages');
+  });
+
+  it('índices dos caminhos de leitura: up cria, down remove só eles', async () => {
+    const migrator = orm.getMigrator();
+    await migrator.up();
+    const READ_PATH = ['ix_ledger_transaction', 'ix_outbox_aggregate', 'ix_wager_tx_wallet'];
+    const present = async () =>
+      (
+        await orm.em.getConnection().execute<{ name: string }[]>(
+          `select indexname as name from pg_indexes where indexname in (${READ_PATH.map(() => '?').join(', ')}) order by name`,
+          READ_PATH,
+        )
+      ).map((row) => row.name);
+    expect(await present()).toEqual(READ_PATH);
+
+    await migrator.down({ to: 'Migration20261109100000_read_path_indexes' });
+    expect(await present()).toEqual([]);
+    expect(await appliedNames()).toContain('Migration20261109000000_double_entry_journal');
+
+    await migrator.up();
+    expect(await present()).toEqual(READ_PATH);
   });
 
   describe('diário de partidas dobradas', () => {

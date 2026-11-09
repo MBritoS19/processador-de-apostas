@@ -48,7 +48,7 @@ describe('diário de partidas dobradas — concorrência', () => {
       const run = (wallet: WalletRef, payload: Record<string, unknown>) =>
         untilSettled(() => useCases[n++ % INSTANCES]!.execute(command(wallet, payload)));
 
-      // Fase 1: 8 BETs de 15 por wallet (só 6 cabem em 100), alternando providers, tudo em paralelo.
+      // Etapa 1: 8 BETs de 15 por wallet (só 6 cabem em 100), alternando providers, tudo em paralelo.
       const bets = wallets.flatMap((wallet, w) =>
         Array.from({ length: 8 }, (_, i) => {
           const providerId = providers[i % 2]!;
@@ -70,7 +70,7 @@ describe('diário de partidas dobradas — concorrência', () => {
       const processedBets = bets.filter((_, i) => betResults[i]!.type === 'Processed');
       expect(processedBets).toHaveLength(WALLETS * 6);
 
-      // Fase 2, em paralelo: por BET processada, WIN (i%3=0), REFUND (i%3=1) ou ROLLBACK (i%3=2).
+      // Etapa 2, em paralelo: por BET processada, WIN (i%3=0), REFUND (i%3=1) ou ROLLBACK (i%3=2).
       // Depois, em paralelo também, ROLLBACK de cada WIN (reverte um crédito: pode faltar saldo).
       const follow = (kind: string, bet: (typeof bets)[number], amount: string, reference: string, external: string) =>
         run(bet.wallet, {

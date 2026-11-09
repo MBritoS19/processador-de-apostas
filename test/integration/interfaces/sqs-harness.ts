@@ -28,7 +28,7 @@ export interface TestQueues {
   dlqUrl: string;
 }
 
-/** Fila + DLQ próprias do teste (LocalStack real), com a mesma redrive policy da Fase 0. */
+/** Fila + DLQ próprias do teste (LocalStack real), com a mesma redrive policy do compose. */
 export async function createQueues(sqs: SQSClient, maxReceiveCount = 10): Promise<TestQueues> {
   const suffix = randomUUID().slice(0, 8);
   const queueName = `test-wager-${suffix}.fifo`;

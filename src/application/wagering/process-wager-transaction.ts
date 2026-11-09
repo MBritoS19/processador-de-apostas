@@ -38,7 +38,7 @@ export interface WagerTransactionPayload {
   referenceExternalTransactionId?: unknown;
 }
 
-/** Contexto da entrada por SQS (Fase 5): a inbox é gravada na mesma transação. */
+/** Contexto da entrada por SQS: a inbox é gravada na mesma transação. */
 export interface InboxContext {
   consumerName: string;
   messageId: string;
@@ -46,7 +46,7 @@ export interface InboxContext {
 }
 
 /**
- * `payload.providerId` precisa ser, na borda (Fase 4/5), o provider autenticado: o use case
+ * `payload.providerId` precisa ser, na borda (HTTP e SQS), o provider autenticado: o use case
  * confia nele para escopar idempotência e referências.
  */
 export interface ProcessWagerTransactionCommand {
@@ -112,7 +112,7 @@ const LOCK_TIMEOUT_ATTEMPTS = 2;
 
 /**
  * Processa uma transação de aposta (BET, WIN, LOSS, REFUND, ROLLBACK) com idempotência
- * persistida e lock pessimista por wallet. Usado pela entrada HTTP (Fase 4) e SQS (Fase 5).
+ * persistida e lock pessimista por wallet. Usado pelas entradas HTTP e SQS.
  * Estratégia e SQL exato no ARCHITECTURE.md → "Concorrência".
  */
 export class ProcessWagerTransaction {

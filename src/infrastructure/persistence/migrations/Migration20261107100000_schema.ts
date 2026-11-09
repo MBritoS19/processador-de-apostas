@@ -1,7 +1,7 @@
 import { Migration } from '@mikro-orm/migrations';
 
 /**
- * Schema da Fase 2. Toda garantia de unicidade, imutabilidade e não-negatividade
+ * Schema inicial. Toda garantia de unicidade, imutabilidade e não-negatividade
  * está aqui (CHALLENGE §5.9), duplicada de propósito com as verificações do domínio.
  * A tabela "garantia → constraint/trigger" está no ARCHITECTURE.md.
  *

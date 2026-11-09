@@ -194,6 +194,39 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
       expect((await expectType(rollback(refund.external), 'Processed')).balance.amount).toBe('90.00');
     });
 
+    it('de REFUND: a BET volta a ficar debitada e não aceita mais WIN/LOSS com referência nem reversão; sem dinheiro duplicado', async () => {
+      const bet = await processedTx({});
+      const refund = await processedTx({ kind: 'REFUND', referenceExternalTransactionId: bet.external });
+      expect((await expectType(rollback(refund.external), 'Processed')).balance.amount).toBe('90.00');
+
+      const attempts = [
+        command(wallet, { kind: 'WIN', referenceExternalTransactionId: bet.external, money: { amount: '50.00', currency: 'BRL' } }),
+        command(wallet, { kind: 'LOSS', referenceExternalTransactionId: bet.external, money: { amount: '0.00', currency: 'BRL' } }),
+        command(wallet, { kind: 'ROLLBACK', referenceExternalTransactionId: bet.external }),
+        command(wallet, { kind: 'REFUND', referenceExternalTransactionId: bet.external }),
+        rollback(refund.external),
+      ];
+      for (const attempt of attempts) {
+        const result = await expectType(attempt, 'Rejected');
+        expect(result, `${attempt.payload.kind} → ${attempt.payload.referenceExternalTransactionId}`).toMatchObject({
+          failureCode: FailureCode.ReferenceAlreadyReversed,
+          balance: { amount: '90.00' },
+        });
+      }
+      expect(await walletBalance(orm, wallet.walletId)).toBe('90.00');
+
+      // O prêmio ainda pode ser pago por um WIN sem referência.
+      expect((await expectType(command(wallet, { kind: 'WIN', money: { amount: '50.00', currency: 'BRL' } }), 'Processed')).balance.amount).toBe('140.00');
+      const entries = await orm.em.getKnex()('wallet_ledger_entries').where({ wallet_id: wallet.walletId }).orderBy('seq').select('direction', 'amount');
+      expect(entries.map((e) => `${e.direction} ${e.amount}`), 'OPENING, BET, REFUND, ROLLBACK do REFUND, WIN; nenhum crédito a mais').toEqual([
+        'CREDIT 100.00',
+        'DEBIT 10.00',
+        'CREDIT 10.00',
+        'DEBIT 10.00',
+        'CREDIT 50.00',
+      ]);
+    });
+
     it('de LOSS → INVALID_REFERENCE_KIND', async () => {
       const loss = await processedTx({ kind: 'LOSS' });
       expect((await expectType(rollback(loss.external), 'Rejected')).failureCode).toBe(FailureCode.InvalidReferenceKind);
