@@ -83,7 +83,7 @@ describe('migrations', () => {
   /** Reverte a do `seq` da outbox e as posteriores (`to` é inclusivo). */
   const PHASE6_OUTBOX_SEQ = 'Migration20261107400000_outbox_seq';
 
-  it('down das migrations da Fase 3 restaura os índices e constraints da Fase 2', async () => {
+  it('down de one_reversal, idempotency_per_provider e balance_limit restaura os índices e constraints do schema inicial', async () => {
     const migrator = orm.getMigrator();
     await migrator.up();
     const schemaObjects = async () => {
@@ -96,26 +96,26 @@ describe('migrations', () => {
       return Object.fromEntries(rows.map((row) => [row.name, row.definition]));
     };
 
-    const phase3 = await schemaObjects();
-    expect(Object.keys(phase3)).toEqual(
+    const comRegras = await schemaObjects();
+    expect(Object.keys(comRegras)).toEqual(
       expect.arrayContaining(['ux_wager_tx_one_reversal', 'uq_wager_tx_provider_idempotency_key']),
     );
-    expect(phase3.ck_wager_tx_failure_code).toContain('BALANCE_LIMIT_EXCEEDED');
+    expect(comRegras.ck_wager_tx_failure_code).toContain('BALANCE_LIMIT_EXCEEDED');
 
     // As 3 de regras (uma reversão, idempotência por provider, limite de saldo) e tudo depois delas (`to` é inclusivo).
     await migrator.down({ to: 'Migration20261107200000_one_reversal_per_reference' });
-    const phase2 = await schemaObjects();
-    expect(phase2).toHaveProperty('ux_wager_tx_one_reversal_per_kind');
-    expect(phase2).toHaveProperty('uq_wager_tx_idempotency_key');
-    expect(phase2).not.toHaveProperty('ux_wager_tx_one_reversal');
-    expect(phase2).not.toHaveProperty('uq_wager_tx_provider_idempotency_key');
-    expect(phase2.ck_wager_tx_failure_code).not.toContain('BALANCE_LIMIT_EXCEEDED');
+    const schemaInicial = await schemaObjects();
+    expect(schemaInicial).toHaveProperty('ux_wager_tx_one_reversal_per_kind');
+    expect(schemaInicial).toHaveProperty('uq_wager_tx_idempotency_key');
+    expect(schemaInicial).not.toHaveProperty('ux_wager_tx_one_reversal');
+    expect(schemaInicial).not.toHaveProperty('uq_wager_tx_provider_idempotency_key');
+    expect(schemaInicial.ck_wager_tx_failure_code).not.toContain('BALANCE_LIMIT_EXCEEDED');
 
     await migrator.up();
-    expect(await schemaObjects()).toEqual(phase3);
+    expect(await schemaObjects()).toEqual(comRegras);
   });
 
-  it('down da migration da Fase 6 remove seq e o índice da ordem por agregado', async () => {
+  it('down de outbox_seq remove seq e o índice da ordem por agregado', async () => {
     const migrator = orm.getMigrator();
     await migrator.up();
     const outboxSchema = async () => {
@@ -136,7 +136,7 @@ describe('migrations', () => {
     expect(await outboxSchema()).toEqual(['ix_outbox_pending_aggregate', 'seq']);
   });
 
-  it('down da migration da Fase 7 remove correlation_id e devolve o guard sem ela; up volta a proteger a coluna', async () => {
+  it('down de correlation_id remove a coluna e devolve o guard sem ela; up volta a proteger a coluna', async () => {
     const migrator = orm.getMigrator();
     await migrator.up();
     const knex = orm.em.getKnex();
@@ -169,7 +169,7 @@ describe('migrations', () => {
     await knex.raw('truncate wallets, wager_transactions, wallet_ledger_entries, inbox_messages, outbox_messages cascade');
   });
 
-  it('up da Fase 6 numera linhas existentes por (occurred_at, id), não pela ordem física, e a sequência continua', async () => {
+  it('up de outbox_seq numera linhas existentes por (occurred_at, id), não pela ordem física, e a sequência continua', async () => {
     const migrator = orm.getMigrator();
     await migrator.up();
     await migrator.down({ to: PHASE6_OUTBOX_SEQ }); // sem seq

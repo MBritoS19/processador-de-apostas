@@ -516,7 +516,7 @@ describe('ProcessWagerTransaction (Postgres real)', () => {
     });
   });
 
-  describe('inbox (contexto da Fase 5)', () => {
+  describe('inbox (contexto do consumidor SQS)', () => {
     const inbox = (messageId: string) => ({ consumerName: 'wager-consumer', messageId, payloadHash: 'h' });
 
     it('grava a inbox processada na mesma transação, e a causation dos eventos é a mensagem', async () => {
