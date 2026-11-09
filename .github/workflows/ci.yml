@@ -6,10 +6,10 @@ on:
 
 jobs:
   unit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
@@ -20,10 +20,10 @@ jobs:
   # Postgres e LocalStack sobem pelo próprio docker-compose.yml (não por `services:`): os service
   # containers do Actions sobem antes do checkout e não montam os scripts de init (banco de testes e filas).
   integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4

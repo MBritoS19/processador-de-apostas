@@ -2,7 +2,7 @@
 
 Legenda: `[ ]` pendente · `[~]` em andamento · `[x]` concluído (com testes passando)
 
-Estado: **entregue** (tag `v1.1-entrega`, com o diário de partidas dobradas mesclado na `main`; ajustes pós-avaliação em andamento para a `v1.2-entrega`). Fases 0–10 concluídas em 2026-11-07; opcionais e diário em 2026-11-08.
+Estado: **entregue** (tag `v1.2-entrega`; limpeza final de docs, comentários e CI na `v1.2.1-entrega`). Fases 0–10 concluídas em 2026-11-07; opcionais e diário em 2026-11-08; ajustes pós-avaliação em 2026-11-08 e 2026-11-09.
 
 ---
 
@@ -157,6 +157,15 @@ Segunda avaliação independente da `v1.1-entrega` (clone limpo, stack isolada):
 - [x] Migration aditiva `…20261109100000_read_path_indexes` (`ix_wager_tx_wallet`, `ix_ledger_transaction`, `ix_outbox_aggregate`), com teste de up/down; EXPLAIN antes e depois em `docs/carga/explain-indices.txt`
 - [x] `test:load` com os índices (`1ce388e`): 7/7 com consistência ok, 0 erro, 0 503, sem regressão mensurável; é a rodada oficial de `docs/CARGA.md` (a de `33f8049` ficou arquivada)
 
+## Limpeza final (branch `chore/limpeza`, 2026-11-09)
+Sem mudança de comportamento: só docs, comentários, títulos de teste, CI e o profile `demo`.
+- [x] Docs: tempo do `test:load` (~11 min) no ARCHITECTURE, frase de "Evolução futura", estado deste arquivo, `docs/carga/final/RESUMO.md` refeito com a rodada desta limpeza
+- [x] Comentários sem "Fase N" (`.env.example`, init do LocalStack) e sem citar o `CLAUDE.md` (não versionado)
+- [x] Títulos de teste sem "Fase N" (5) e variáveis `comRegras`/`schemaInicial` no teste de migrations
+- [x] CI em `ubuntu-24.04` com `actions/checkout@v5`
+- [x] Profile `demo` do compose (`docker compose --profile demo run --rm --build demo`) e seção "Subir e ver funcionando só com Docker" no README
+- [x] 3 rodadas verdes (typecheck, unit 327, integração 356, concorrência 10, multi 2, chaos 2) e clone limpo (`bun test`: 695 pass, 13 skip, 0 fail; demo e profile `demo` ok)
+
 ---
 
 ## Decisões tomadas
@@ -226,6 +235,7 @@ Segunda avaliação independente da `v1.1-entrega` (clone limpo, stack isolada):
 - Shutdown: os 3 hooks são sequenciais no Nest; padrão 8s cada, soma ≤ `SHUTDOWN_BUDGET_MS` (25s) < `stop_grace_period` (30s), validado no boot — "Estratégia de testes"
 - `stop()` do consumidor aborta o long polling (mensagem entregue ao poll abortado volta após a visibilidade) — "Consumidor SQS"
 - Docker: imagem `oven/bun:1.4`, profile `multi` com `migrate` + 3 réplicas em `127.0.0.1:3000-3002` — "Estratégia de testes"
+- Profile `demo`: mesma imagem, `scripts/` por bind mount só leitura (a imagem segue só com `src/`) — "Infraestrutura local"
 
 
 ## Pendências e limitações
@@ -258,3 +268,4 @@ Lista completa em ARCHITECTURE.md → "Limitações"; aqui só o que ficou em ab
 - 2026-11-08 — Desempate determinístico das pendentes (tag `v1.0.1-entrega`).
 - 2026-11-08 — Diário de partidas dobradas: 7 passos, carga A/B, 3 rodadas verdes e CI; mesclado na `main` (tag `v1.1-entrega`).
 - 2026-11-08 — Segunda avaliação independente da `v1.1-entrega`; ajustes em `fix/pos-banca`.
+- 2026-11-09 — Limpeza final em `chore/limpeza`: docs, comentários, títulos de teste, CI e profile `demo`; 3 rodadas verdes e clone limpo.

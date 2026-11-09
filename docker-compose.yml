@@ -41,8 +41,9 @@ services:
   # Profile `multi` (3 réplicas da aplicação sobre o mesmo Postgres e LocalStack):
   #   docker compose --profile multi up -d --build --wait
   # Fora da suíte de testes; o `bun run test:multi` sobe processos locais, não estes containers.
+  # O `migrate` também serve ao profile `demo` (abaixo).
   migrate:
-    profiles: ["multi"]
+    profiles: ["multi", "demo"]
     build: .
     command: ["bun", "src/infrastructure/persistence/migrate.ts", "up"]
     restart: "no"
@@ -80,6 +81,35 @@ services:
       interval: 3s
       timeout: 3s
       retries: 20
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Profile `demo`: o cenário obrigatório (`bun run demo`) só com Docker, sem Bun no host:
+  #   docker compose --profile demo run --rm --build demo
+  # Mesma imagem do `app`; a imagem só tem `src/`, então `scripts/` entra por bind mount (só leitura).
+  # A demo sobe a API no próprio processo, com os loops de fundo desligados, e sai com 0 (OK) ou 1.
+  demo:
+    profiles: ["demo"]
+    build: .
+    command: ["bun", "scripts/demo.ts"]
+    restart: "no"
+    volumes:
+      - ./scripts:/app/scripts:ro
+    environment:
+      LOG_LEVEL: warn
+      DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_WAGER_QUEUE_NAME: ${SQS_WAGER_QUEUE_NAME:-wager-transactions.fifo}
+      SQS_WAGER_DLQ_NAME: ${SQS_WAGER_DLQ_NAME:-wager-transactions-dlq.fifo}
+      SQS_WAGER_EVENTS_QUEUE_NAME: ${SQS_WAGER_EVENTS_QUEUE_NAME:-wager-events.fifo}
     depends_on:
       postgres:
         condition: service_healthy

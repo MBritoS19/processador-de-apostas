@@ -58,6 +58,19 @@ O `--wait` só volta quando o Postgres aceita conexões e o script de criação 
 
 **O `docker-compose.yml` fixa o nome do projeto** (`name: processador-de-apostas`). Um segundo clone na mesma máquina reaproveita os mesmos containers e o mesmo volume do Postgres. Como o volume já existe, o init (que cria o `wagering_test`) não roda de novo. Para isolar um clone, use outro nome de projeto em **todos** os comandos do compose, por exemplo `docker compose -p outro-nome up -d --wait` e `docker compose -p outro-nome down`. As portas 5432 e 4566 continuam as mesmas, então só um dos stacks pode estar de pé por vez.
 
+## Subir e ver funcionando só com Docker
+
+Sem Bun no host: o profile `demo` sobe Postgres e LocalStack, aplica as migrations e roda o cenário obrigatório dentro de um container (a mesma imagem do profile `multi`).
+
+```bash
+git clone https://github.com/MBritoS19/processador-de-apostas.git
+cd processador-de-apostas
+docker compose --profile demo run --rm --build demo   # termina com "OK: uma PROCESSED, uma REJECTED, saldo 20.00"
+docker compose --profile demo down                    # sem -v: os dados do Postgres ficam no volume
+```
+
+Precisa só das portas `5432` e `4566` livres. Pode rodar quantas vezes quiser: cada execução usa uma wallet nova.
+
 ## Rodar a API e os workers
 
 ```bash
@@ -207,7 +220,7 @@ scripts/           demo.ts (bun run demo)
 docs/              RASTREABILIDADE.md (exigência → teste), CARGA.md e carga/ (resultados do teste de carga; final/RESUMO.md com a rodada final)
 docker/            init do Postgres (banco de testes) e do LocalStack (filas)
 .github/workflows/ CI: typecheck, unidade e integração
-docker-compose.yml Postgres + LocalStack; profile `multi` com 3 réplicas
+docker-compose.yml Postgres + LocalStack; profiles `multi` (3 réplicas) e `demo` (cenário obrigatório)
 Dockerfile         imagem da aplicação (oven/bun:1.4)
 ```
 
