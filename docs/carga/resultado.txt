@@ -2,57 +2,57 @@ $ LOAD=1 bun test ./test/load
 bun test v1.4.4 (38afee6c8)
 
 test\load\load.test.ts:
-[load] ambiente: {"capturedAt":"2026-11-08T23:42:39.489Z","gitCommit":"33f8049","host":{"os":"win32 10.0.26300 (Windows 11 Home Single Language)","cpuModel":"11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz","logicalCores":8,"ramGiB":7.7,"freeRamGiBAtStart":0.5},"bun":"1.4.4","docker":{"server":"29.9.2","vm":"Docker Desktop | 8 CPUs | 3948609536 bytes"},"postgres":{"version":"PostgreSQL 16.10 on x86_64-pc-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit","max_connections":"100","shared_buffers":"128MB","synchronous_commit":"on"},"localstack":"4.9.2","app":{"instances":3,"poolPerInstance":{"min":0,"max":10,"acquireTimeoutMillis":10000},"lockTimeoutMs":1000,"lockAttempts":2,"instanceEnv":{"NODE_ENV":"test","SQS_CONSUMER_ENABLED":"true","OUTBOX_PUBLISHER_ENABLED":"true","PENDING_REFERENCE_WORKER_ENABLED":"true","SQS_WAGER_QUEUE_NAME":"test-wager-547ef815.fifo","SQS_WAGER_DLQ_NAME":"test-wager-547ef815-dlq.fifo","SQS_WAGER_EVENTS_QUEUE_NAME":"test-events-cad87606.fifo","SQS_RETRY_BASE_SECONDS":"1","SQS_RETRY_MAX_SECONDS":"5"},"logLevel":"info"},"caveat":"gerador de carga, 3 instâncias, Postgres e LocalStack na MESMA máquina (competem por CPU)"}
+[load] ambiente: {"capturedAt":"2026-11-09T00:16:55.693Z","gitCommit":"1ce388e","host":{"os":"win32 10.0.26300 (Windows 11 Home Single Language)","cpuModel":"11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz","logicalCores":8,"ramGiB":7.7,"freeRamGiBAtStart":0.6},"bun":"1.4.4","docker":{"server":"29.9.2","vm":"Docker Desktop | 8 CPUs | 3948609536 bytes"},"postgres":{"version":"PostgreSQL 16.10 on x86_64-pc-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit","max_connections":"100","shared_buffers":"128MB","synchronous_commit":"on"},"localstack":"4.9.2","app":{"instances":3,"poolPerInstance":{"min":0,"max":10,"acquireTimeoutMillis":10000},"lockTimeoutMs":1000,"lockAttempts":2,"instanceEnv":{"NODE_ENV":"test","SQS_CONSUMER_ENABLED":"true","OUTBOX_PUBLISHER_ENABLED":"true","PENDING_REFERENCE_WORKER_ENABLED":"true","SQS_WAGER_QUEUE_NAME":"test-wager-004ecd63.fifo","SQS_WAGER_DLQ_NAME":"test-wager-004ecd63-dlq.fifo","SQS_WAGER_EVENTS_QUEUE_NAME":"test-events-f602d51e.fifo","SQS_RETRY_BASE_SECONDS":"1","SQS_RETRY_MAX_SECONDS":"5"},"logLevel":"info"},"caveat":"gerador de carga, 3 instâncias, Postgres e LocalStack na MESMA máquina (competem por CPU)"}
 [load wallet-disputada/10] aquecimento 10s + medição 45s (HTTP 10, SQS 0)
 [load wallet-disputada/10] carga encerrada; esperando a quiescência
-[load wallet-disputada/10] ok: 43.2 req/s, p99 4599.5ms, quiescência 22.0s, consistência ok
+[load wallet-disputada/10] ok: 58.9 req/s, p99 3616.3ms, quiescência 39.7s, consistência ok
 [load wallet-disputada/50] aquecimento 10s + medição 45s (HTTP 50, SQS 0)
 [load wallet-disputada/50] carga encerrada; esperando a quiescência
-[load wallet-disputada/50] ok: 65.3 req/s, p99 2516.6ms, quiescência 20.7s, consistência ok
+[load wallet-disputada/50] ok: 65.4 req/s, p99 2461.3ms, quiescência 11.2s, consistência ok
 [load muitas-wallets/10] aquecimento 10s + medição 45s (HTTP 10, SQS 0)
 [load muitas-wallets/10] carga encerrada; esperando a quiescência
-[load muitas-wallets/10] ok: 175.8 req/s, p99 112.9ms, quiescência 0.6s, consistência ok
+[load muitas-wallets/10] ok: 174.0 req/s, p99 104.0ms, quiescência 0.6s, consistência ok
 [load muitas-wallets/50] aquecimento 10s + medição 45s (HTTP 50, SQS 0)
 [load muitas-wallets/50] carga encerrada; esperando a quiescência
-[load muitas-wallets/50] ok: 246.8 req/s, p99 345.2ms, quiescência 25.8s, consistência ok
+[load muitas-wallets/50] ok: 268.9 req/s, p99 303.0ms, quiescência 28.4s, consistência ok
 [load quente-frias/60] aquecimento 10s + medição 45s (HTTP 60, SQS 0)
 [load quente-frias/60] carga encerrada; esperando a quiescência
-[load quente-frias/60] ok: 70.9 req/s, p99 4124.6ms, quiescência 31.1s, consistência ok
+[load quente-frias/60] ok: 80.3 req/s, p99 2572.8ms, quiescência 23.6s, consistência ok
 [load misto/10] aquecimento 10s + medição 45s (HTTP 5, SQS 5)
 [load misto/10] carga encerrada; esperando a quiescência
-[load misto/10] ok: 102.0 req/s, p99 99.1ms, quiescência 0.8s, consistência ok
+[load misto/10] ok: 137.4 req/s, p99 70.6ms, quiescência 0.8s, consistência ok
 [load misto/50] aquecimento 10s + medição 45s (HTTP 25, SQS 25)
 [load misto/50] carga encerrada; esperando a quiescência
-[load misto/50] ok: 206.8 req/s, p99 266.3ms, quiescência 79.0s, consistência ok
+[load misto/50] ok: 232.2 req/s, p99 220.1ms, quiescência 80.5s, consistência ok
 
 HTTP (janela de medição; latência por tentativa, em ms)
 cenário           cli    req/s     tx/s   proc/s     p50     p95     p99      máx     2xx    422   erro  erro%   lock  ok?
-wallet-disputada   10     43.2     43.2     43.2    74.7   335.0  4599.5  12237.5    1943      0      0   0.00      0  sim
-wallet-disputada   50     65.3     65.3     65.3    94.1  2270.3  2516.6   2782.5    2938      0      0   0.00      0  sim
-muitas-wallets     10    175.8    175.8    175.8    54.6    82.4   112.9    189.6    7913      0      0   0.00      0  sim
-muitas-wallets     50    246.8    246.8    246.8   201.4   291.1   345.2    483.5   11106      0      0   0.00      0  sim
-quente-frias       60     70.9     70.9     70.9    75.2  2916.3  4124.6   4769.8    3191      0      0   0.00      0  sim
-misto              10    102.0    114.9    109.0    48.9    79.6    99.1    144.5    4352    237      0   0.00      0  sim
-misto              50    206.8    200.5    189.6   117.6   193.9   266.3    437.1    8800    506      0   0.00      0  sim
+wallet-disputada   10     58.9     58.9     58.9    53.3   283.4  3616.3  11915.5    2652      0      0   0.00      0  sim
+wallet-disputada   50     65.4     65.4     65.4    65.9  2345.8  2461.3   2663.6    2942      0      0   0.00      0  sim
+muitas-wallets     10    174.0    174.0    173.9    55.6    82.8   104.0    155.1    7829      0      0   0.00      0  sim
+muitas-wallets     50    268.9    268.9    268.9   183.7   267.8   303.0    414.7   12102      0      0   0.00      0  sim
+quente-frias       60     80.3     80.3     80.3    65.6  2407.5  2572.8   2918.8    3612      0      0   0.00      0  sim
+misto              10    137.4    146.8    139.4    36.7    57.2    70.6    101.0    5855    329      0   0.00      0  sim
+misto              50    232.2    224.7    212.6   104.7   169.3   220.1    780.5    9885    564      0   0.00      0  sim
 
 Assíncrono (fila, outbox, retries; ms salvo indicação)
 cenário           cli  sqs env  e2e p50  e2e p95  e2e p99  e2e máx  lag máx  lag p95 fila máx  retry  DLQ  replay quiesc s
-wallet-disputada   10        0        -        -        -        -    22920    21427        0      0    0       0     22.0
-wallet-disputada   50        0        -        -        -        -    18892    17938        0      0    0       0     20.7
-muitas-wallets     10        0        -        -        -        -      465      387        0      0    0       0      0.6
-muitas-wallets     50        0        -        -        -        -    38080    36683        0      0    0       0     25.8
-quente-frias       60        0        -        -        -        -    27996    26612        0      0    0       0     31.1
-misto              10     1124     96.0    172.0    213.0    303.0      369      258        6      0    0     543      0.8
-misto              50     5497  70199.0  86462.0  92894.0 100241.0    42750    41104     5787      0    0     677     79.0
+wallet-disputada   10        0        -        -        -        -    28730    27168        0      0    0       0     39.7
+wallet-disputada   50        0        -        -        -        -    10123     9409        0      0    0       0     11.2
+muitas-wallets     10        0        -        -        -        -      609      481        0      0    0       0      0.6
+muitas-wallets     50        0        -        -        -        -    37731    36345        0      0    0       0     28.4
+quente-frias       60        0        -        -        -        -    19926    18704        0      0    0       0     23.6
+misto              10     1124     73.0    116.0    158.0    199.0      191      161        6      0    0     700      0.8
+misto              50     5358  73397.0  88540.0  94343.0 105825.0    44738    43084     5863      0    0     725     80.5
 
 Por grupo de clientes (quente-frias; latência por tentativa, em ms; proc/s da wallet quente pelo banco)
 cenário            grupo    ops/s     p50     p95     p99      máx    503   proc/s
-quente-frias      quente     56.2    84.1  3079.6  4211.0   4769.8      0     56.2
-quente-frias       frias     14.7    35.9  2453.7  3472.3   3623.4      0        -
+quente-frias      quente     63.6    73.5  2438.6  2593.2   2918.8      0     63.6
+quente-frias       frias     16.7    30.9  1825.0  1871.4   1929.3      0        -
 
-[load] resultados brutos: C:\processador-de-apostas\test\load\results\2026-11-08T23-52-18.json
+[load] resultados brutos: C:\processador-de-apostas\test\load\results\2026-11-09T00-26-40.json
 
  7 pass
  0 fail
  167 expect() calls
-Ran 7 tests across 1 file. [581.00s]
+Ran 7 tests across 1 file. [587.23s]

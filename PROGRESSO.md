@@ -155,6 +155,7 @@ Segunda avaliação independente da `v1.1-entrega` (clone limpo, stack isolada):
 - [x] BET → REFUND → ROLLBACK do REFUND: comportamento documentado (ARCHITECTURE.md → "Regras de negócio", "Interpretações adotadas") e provado por teste de integração; regra inalterada
 - [x] `test:load` completo sobre o código entregue (`33f8049`): 7/7 rodadas com consistência ok, 0 erro, 0 503; `docs/CARGA.md` reescrito com a rodada oficial nova, a comparação com a anterior e o custo do diário
 - [x] Migration aditiva `…20261109100000_read_path_indexes` (`ix_wager_tx_wallet`, `ix_ledger_transaction`, `ix_outbox_aggregate`), com teste de up/down; EXPLAIN antes e depois em `docs/carga/explain-indices.txt`
+- [x] `test:load` com os índices (`1ce388e`): 7/7 com consistência ok, 0 erro, 0 503, sem regressão mensurável; é a rodada oficial de `docs/CARGA.md` (a de `33f8049` ficou arquivada)
 
 ---
 

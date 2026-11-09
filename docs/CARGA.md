@@ -2,55 +2,71 @@
 
 Resultados do `bun run test:load` e a análise deles. A metodologia (cenários, janela, o que é medido) está em ARCHITECTURE.md → "Estratégia de testes".
 
-## Rodada oficial (commit `33f8049`, 2026-11-08)
+## Rodada oficial (commit `1ce388e`, 2026-11-09)
 
-Execução completa, sobre o código entregue (com o diário de partidas dobradas): 3 instâncias, aquecimento de 10s e janela de 45s por rodada, seed fixa. Dados brutos em [`docs/carga/resultado.json`](carga/resultado.json) e saída do terminal em [`docs/carga/resultado.txt`](carga/resultado.txt). **7 rodadas, 7 com consistência ok** (saldo = ledger = diário, invariantes do banco inteiro), nenhum erro HTTP, nenhum 503, nenhum retry nem DLQ no SQS.
+Execução completa sobre o código entregue (diário de partidas dobradas e índices dos caminhos de leitura): 3 instâncias, aquecimento de 10s e janela de 45s por rodada, seed fixa. Dados brutos em [`docs/carga/resultado.json`](carga/resultado.json) e saída do terminal em [`docs/carga/resultado.txt`](carga/resultado.txt). **7 rodadas, 7 com consistência ok** (saldo = ledger = diário, invariantes do banco inteiro), nenhum erro HTTP, nenhum 503, nenhum 4xx inesperado, nenhum retry nem DLQ no SQS.
 
 **HTTP** (janela de medição; latência por tentativa, em ms):
 
 | Cenário | Clientes | req/s | tx/s | p50 | p95 | p99 | máx | 2xx | 422 | Erros | Conflitos de lock |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| wallet-disputada | 10 | 43,2 | 43,2 | 74,7 | 335,0 | 4.599,5 | 12.237,5 | 1.943 | 0 | 0 | 0 |
-| wallet-disputada | 50 | 65,3 | 65,3 | 94,1 | 2.270,3 | 2.516,6 | 2.782,5 | 2.938 | 0 | 0 | 0 |
-| muitas-wallets | 10 | 175,8 | 175,8 | 54,6 | 82,4 | 112,9 | 189,6 | 7.913 | 0 | 0 | 0 |
-| muitas-wallets | 50 | 246,8 | 246,8 | 201,4 | 291,1 | 345,2 | 483,5 | 11.106 | 0 | 0 | 0 |
-| quente-frias | 50 + 10 | 70,9 | 70,9 | 75,2 | 2.916,3 | 4.124,6 | 4.769,8 | 3.191 | 0 | 0 | 0 |
-| misto | 10 | 102,0 | 114,9 | 48,9 | 79,6 | 99,1 | 144,5 | 4.352 | 237 | 0 | 0 |
-| misto | 50 | 206,8 | 200,5 | 117,6 | 193,9 | 266,3 | 437,1 | 8.800 | 506 | 0 | 0 |
+| wallet-disputada | 10 | 58,9 | 58,9 | 53,3 | 283,4 | 3.616,3 | 11.915,5 | 2.652 | 0 | 0 | 0 |
+| wallet-disputada | 50 | 65,4 | 65,4 | 65,9 | 2.345,8 | 2.461,3 | 2.663,6 | 2.942 | 0 | 0 | 0 |
+| muitas-wallets | 10 | 174,0 | 174,0 | 55,6 | 82,8 | 104,0 | 155,1 | 7.829 | 0 | 0 | 0 |
+| muitas-wallets | 50 | 268,9 | 268,9 | 183,7 | 267,8 | 303,0 | 414,7 | 12.102 | 0 | 0 | 0 |
+| quente-frias | 50 + 10 | 80,3 | 80,3 | 65,6 | 2.407,5 | 2.572,8 | 2.918,8 | 3.612 | 0 | 0 | 0 |
+| misto | 10 | 137,4 | 146,8 | 36,7 | 57,2 | 70,6 | 101,0 | 5.855 | 329 | 0 | 0 |
+| misto | 50 | 232,2 | 224,7 | 104,7 | 169,3 | 220,1 | 780,5 | 9.885 | 564 | 0 | 0 |
 
-Os 422 do misto são todos `INSUFFICIENT_BALANCE`, rejeições de negócio que o gerador provoca de propósito; nenhum 4xx inesperado.
+Os 422 do misto são todos `INSUFFICIENT_BALANCE`, rejeições de negócio que o gerador provoca de propósito.
 
 **Assíncrono** (ms, salvo indicação):
 
 | Cenário | Clientes | Msgs SQS | e2e p50 | e2e p95 | Outbox lag p95 | Outbox lag máx | Fila máx | Retry | DLQ | Quiescência |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| wallet-disputada | 10 | — | — | — | 21.427 | 22.920 | 0 | 0 | 0 | 22,0s |
-| wallet-disputada | 50 | — | — | — | 17.938 | 18.892 | 0 | 0 | 0 | 20,7s |
-| muitas-wallets | 10 | — | — | — | 387 | 465 | 0 | 0 | 0 | 0,6s |
-| muitas-wallets | 50 | — | — | — | 36.683 | 38.080 | 0 | 0 | 0 | 25,8s |
-| quente-frias | 50 + 10 | — | — | — | 26.612 | 27.996 | 0 | 0 | 0 | 31,1s |
-| misto | 10 | 1.124 | 96 | 172 | 258 | 369 | 6 | 0 | 0 | 0,8s |
-| misto | 50 | 5.497 | 70.199 | 86.462 | 41.104 | 42.750 | 5.787 | 0 | 0 | 79,0s |
+| wallet-disputada | 10 | — | — | — | 27.168 | 28.730 | 0 | 0 | 0 | 39,7s |
+| wallet-disputada | 50 | — | — | — | 9.409 | 10.123 | 0 | 0 | 0 | 11,2s |
+| muitas-wallets | 10 | — | — | — | 481 | 609 | 0 | 0 | 0 | 0,6s |
+| muitas-wallets | 50 | — | — | — | 36.345 | 37.731 | 0 | 0 | 0 | 28,4s |
+| quente-frias | 50 + 10 | — | — | — | 18.704 | 19.926 | 0 | 0 | 0 | 23,6s |
+| misto | 10 | 1.124 | 73 | 116 | 161 | 191 | 6 | 0 | 0 | 0,8s |
+| misto | 50 | 5.358 | 73.397 | 88.540 | 43.084 | 44.738 | 5.863 | 0 | 0 | 80,5s |
 
-**quente-frias por grupo:** quente 56,2 ops/s (p95 3.080 ms), frias 14,7 ops/s (p95 2.454 ms), 0 503. A wallet quente ocupa o pool e atrasa as frias da mesma instância, o mesmo quadro da medição do mutex (ver "Mutex local por wallet").
+**quente-frias por grupo:** quente 63,6 ops/s (p95 2.439 ms), frias 16,7 ops/s (p95 1.825 ms), 0 503. A wallet quente ocupa o pool e atrasa as frias da mesma instância, o mesmo quadro da medição do mutex (ver "Mutex local por wallet").
 
 **Leitura:**
 - **Correção:** nenhuma inconsistência, perda ou duplicidade em 7 rodadas, com 3 instâncias.
-- **Wallet disputada:** a vazão é limitada pela seção crítica do lock da wallet; o p99 de 4,6s com 10 clientes vem de poucas requisições que pegaram a fila do lock no início da janela (máximo 12,2s, sem pausa de amostragem: o maior intervalo entre amostras foi 1,0s). Nenhuma passou do orçamento de lock (0 conflitos, 0 503).
-- **Outbox lag** e **fila do misto/50**: mesmo comportamento analisado abaixo ("Análise do outbox lag e do acúmulo na fila"): serialização por agregado numa wallet quente e vazão do publisher sob CPU saturada; a fila absorve a sobrecarga dos produtores SQS e esvazia depois (quiescência 79s).
+- **Wallet disputada:** a vazão é limitada pela seção crítica do lock da wallet. No wallet-disputada/10 houve uma pausa do host de 4,5s entre amostras (nas demais rodadas, ~1,0s), que coincide com o máximo de 11,9s e puxa o p99; a cauda dessa rodada é suspeita (ver "Fatores do ambiente"). Nenhuma requisição passou do orçamento de lock (0 conflitos, 0 503).
+- **Outbox lag** e **fila do misto/50**: mesmo comportamento analisado abaixo ("Análise do outbox lag e do acúmulo na fila"): serialização por agregado numa wallet quente e vazão do publisher sob CPU saturada; a fila absorve a sobrecarga dos produtores SQS e esvazia depois (quiescência 80,5s).
 
-### Comparação com a rodada anterior (`4dd9bd7`)
+### Custo dos índices dos caminhos de leitura
 
-| Cenário | tx/s antes | tx/s agora | Δ | p95 antes | p95 agora | p99 antes | p99 agora |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| wallet-disputada/10 | 63,6 | 43,2 | −32% | 260,5 | 335,0 | 600,2 | 4.599,5 |
-| wallet-disputada/50 | 93,8 | 65,3 | −30% | 1.061,6 | 2.270,3 | 1.188,8 | 2.516,6 |
-| muitas-wallets/10 | 250,9 | 175,8 | −30% | 58,3 | 82,4 | 72,6 | 112,9 |
-| muitas-wallets/50 | 389,5 | 246,8 | −37% | 195,0 | 291,1 | 232,5 | 345,2 |
-| misto/10 | 123,6 | 114,9 | −7% | 77,5 | 79,6 | 100,9 | 99,1 |
-| misto/50 | 204,9 | 200,5 | −2% | 182,5 | 193,9 | 219,6 | 266,3 |
+A rodada anterior, no mesmo código sem os três índices (`33f8049`, mesma sessão da máquina, ~30 min antes), está arquivada em [`resultado-33f8049.json`](carga/resultado-33f8049.json) e [`resultado-33f8049.txt`](carga/resultado-33f8049.txt):
 
-**Isto não é um A/B.** As duas rodadas foram feitas em sessões diferentes da mesma máquina, e entre elas entraram 29 commits: o diário de partidas dobradas, a reconciliação completa, o `lock_timeout` de 1s com uma tentativa extra (antes, 2s numa tentativa), o modo "banco fora" e o desempate das pendentes. A rodada anterior está em [`docs/carga/resultado-4dd9bd7.json`](carga/resultado-4dd9bd7.json). A queda de ~30% nos cenários só HTTP é maior que o custo isolado do diário (abaixo, −18% de vazão), e o resto não foi atribuído a uma causa: a máquina e o ambiente variam entre sessões (RAM livre no início: 0,6 GiB antes, 0,5 GiB agora; ver "Fatores do ambiente"). Os cenários mistos, limitados pelo LocalStack, quase não mudaram.
+| Cenário | tx/s sem | tx/s com | Δ | p95 sem | p95 com | Δ | p99 sem | p99 com |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| wallet-disputada/10 | 43,2 | 58,9 | +36% | 335,0 | 283,4 | −15% | 4.599,5 | 3.616,3 |
+| wallet-disputada/50 | 65,3 | 65,4 | +0% | 2.270,3 | 2.345,8 | +3% | 2.516,6 | 2.461,3 |
+| muitas-wallets/10 | 175,8 | 174,0 | −1% | 82,4 | 82,8 | +0% | 112,9 | 104,0 |
+| muitas-wallets/50 | 246,8 | 268,9 | +9% | 291,1 | 267,8 | −8% | 345,2 | 303,0 |
+| quente-frias/60 | 70,9 | 80,3 | +13% | 2.916,3 | 2.407,5 | −17% | 4.124,6 | 2.572,8 |
+| misto/10 | 114,9 | 146,8 | +28% | 79,6 | 57,2 | −28% | 99,1 | 70,6 |
+| misto/50 | 200,5 | 224,7 | +12% | 193,9 | 169,3 | −13% | 266,3 | 220,1 |
+
+**O custo de escrita dos índices não aparece na medição.** Os três índices acrescentam uma entrada de índice por INSERT de transação, lançamento e evento; nenhum cenário piorou além do ruído, e a maioria melhorou. As melhoras **não** são atribuídas aos índices: o caminho quente (processar transação) não lê nenhum deles, e uma rodada por lado não separa efeito de variação entre execuções. O que os dados sustentam é só "sem regressão mensurável". O ganho dos índices está nas leituras (reconciliação e `findPendingReferenceEventId`), medido por EXPLAIN em [`docs/carga/explain-indices.txt`](carga/explain-indices.txt) e resumido em ARCHITECTURE.md → "Persistência" → "Migrations".
+
+### Comparação com a rodada mais antiga (`4dd9bd7`)
+
+| Cenário | tx/s antes | tx/s agora | Δ | p95 antes | p95 agora | Δ | p99 antes | p99 agora |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| wallet-disputada/10 | 63,6 | 58,9 | −7% | 260,5 | 283,4 | +9% | 600,2 | 3.616,3 |
+| wallet-disputada/50 | 93,8 | 65,4 | −30% | 1.061,6 | 2.345,8 | +121% | 1.188,8 | 2.461,3 |
+| muitas-wallets/10 | 250,9 | 174,0 | −31% | 58,3 | 82,8 | +42% | 72,6 | 104,0 |
+| muitas-wallets/50 | 389,5 | 268,9 | −31% | 195,0 | 267,8 | +37% | 232,5 | 303,0 |
+| misto/10 | 123,6 | 146,8 | +19% | 77,5 | 57,2 | −26% | 100,9 | 70,6 |
+| misto/50 | 204,9 | 224,7 | +10% | 182,5 | 169,3 | −7% | 219,6 | 220,1 |
+
+**Isto não é um A/B.** As duas rodadas foram feitas em sessões diferentes da mesma máquina, e entre elas entraram 31 commits: o diário de partidas dobradas, a reconciliação completa, o `lock_timeout` de 1s com uma tentativa extra (antes, 2s numa tentativa), o modo "banco fora", o desempate das pendentes e os índices. A rodada antiga está em [`docs/carga/resultado-4dd9bd7.json`](carga/resultado-4dd9bd7.json). A queda de ~30% nos cenários limitados pelo Postgres (wallet disputada com 50 clientes, muitas wallets) é maior que o custo isolado do diário (abaixo, −18% de vazão), e o resto não foi atribuído a uma causa. Os cenários mistos, limitados pelo LocalStack, não pioraram.
 
 ## Custo do diário de partidas dobradas
 

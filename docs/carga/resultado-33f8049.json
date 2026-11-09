@@ -1,0 +1,4677 @@
+{
+  "environment": {
+    "capturedAt": "2026-11-08T23:42:39.489Z",
+    "gitCommit": "33f8049",
+    "host": {
+      "os": "win32 10.0.26300 (Windows 11 Home Single Language)",
+      "cpuModel": "11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz",
+      "logicalCores": 8,
+      "ramGiB": 7.7,
+      "freeRamGiBAtStart": 0.5
+    },
+    "bun": "1.4.4",
+    "docker": {
+      "server": "29.9.2",
+      "vm": "Docker Desktop | 8 CPUs | 3948609536 bytes"
+    },
+    "postgres": {
+      "version": "PostgreSQL 16.10 on x86_64-pc-linux-musl, compiled by gcc (Alpine 14.2.0) 14.2.0, 64-bit",
+      "max_connections": "100",
+      "shared_buffers": "128MB",
+      "synchronous_commit": "on"
+    },
+    "localstack": "4.9.2",
+    "app": {
+      "instances": 3,
+      "poolPerInstance": {
+        "min": 0,
+        "max": 10,
+        "acquireTimeoutMillis": 10000
+      },
+      "lockTimeoutMs": 1000,
+      "lockAttempts": 2,
+      "instanceEnv": {
+        "NODE_ENV": "test",
+        "SQS_CONSUMER_ENABLED": "true",
+        "OUTBOX_PUBLISHER_ENABLED": "true",
+        "PENDING_REFERENCE_WORKER_ENABLED": "true",
+        "SQS_WAGER_QUEUE_NAME": "test-wager-547ef815.fifo",
+        "SQS_WAGER_DLQ_NAME": "test-wager-547ef815-dlq.fifo",
+        "SQS_WAGER_EVENTS_QUEUE_NAME": "test-events-cad87606.fifo",
+        "SQS_RETRY_BASE_SECONDS": "1",
+        "SQS_RETRY_MAX_SECONDS": "5"
+      },
+      "logLevel": "info"
+    },
+    "caveat": "gerador de carga, 3 instâncias, Postgres e LocalStack na MESMA máquina (competem por CPU)"
+  },
+  "methodology": {
+    "seed": 20261108,
+    "levels": [
+      10,
+      50
+    ],
+    "warmupSeconds": 10,
+    "measureSeconds": 45,
+    "sqsRatePerProducer": 5,
+    "httpClients": "laço fechado: cada cliente envia, espera a resposta e envia de novo; rodízio entre as 3 instâncias",
+    "sqsProducers": "cenário misto: taxa fixa por produtor (chegada aberta)",
+    "latency": "por tentativa HTTP, medida no cliente (inclui rede local e fila do pool); só tentativas iniciadas na janela",
+    "endToEnd": "início do SendMessage (cliente) → inbox_messages.processed_at (commit do consumidor); mesmo relógio do host",
+    "outboxLag": "amostrado a cada 1s: agora − min(occurred_at) das linhas não publicadas",
+    "tables": "cada rodada começa com as tabelas vazias (TRUNCATE)"
+  },
+  "runs": [
+    {
+      "scenario": "wallet-disputada",
+      "description": "1 wallet (10.000.000,00), BET/WIN 50/50 de 1,00–10,00 com keys únicas, só HTTP",
+      "clients": 10,
+      "split": {
+        "http": 10,
+        "sqs": 0
+      },
+      "quiescenceMs": 21973,
+      "throughput": {
+        "transactionsPerSecond": 43.17777777777778,
+        "processedPerSecond": 43.17777777777778,
+        "rejectedPerSecond": 0,
+        "createdInWindow": 1943,
+        "processedInWindow": 1943
+      },
+      "database": {
+        "totals": {
+          "transactions": "2333",
+          "processed": "2333",
+          "rejected": "0",
+          "failed": "0",
+          "reversals": "0",
+          "ledger_entries": "2334",
+          "inbox": "0",
+          "outbox": "4667"
+        },
+        "rejectedByFailureCode": {}
+      },
+      "http": {
+        "attempts": 1943,
+        "logicalOps": 1943,
+        "requestsPerSecond": 43.17777777777778,
+        "latencyMs": {
+          "n": 1943,
+          "p50": 74.70410000000084,
+          "p95": 334.9837999999945,
+          "p99": 4599.5007000000005,
+          "max": 12237.4964
+        },
+        "statuses": {
+          "200": 1943
+        },
+        "ok2xx": 1943,
+        "business422": 0,
+        "unexpected4xx": 0,
+        "errors": 0,
+        "errorRate": 0,
+        "clientRetries": 0,
+        "failureCodes422": {}
+      },
+      "mix": {},
+      "queue": {
+        "sentInWindow": 0,
+        "sendErrors": 0,
+        "sendsPerSecond": 0,
+        "distinctMessageIdsMeasured": 0,
+        "notFoundInInbox": 0,
+        "endToEndMs": {
+          "n": 0,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "depth": {
+          "max": 0,
+          "p95": 0,
+          "maxUntilQuiescence": 0
+        }
+      },
+      "outbox": {
+        "lagMs": {
+          "n": 45,
+          "p50": 8252,
+          "p95": 21427,
+          "p99": 22920,
+          "max": 22920,
+          "maxUntilQuiescence": 24782
+        },
+        "pendingMax": 1038
+      },
+      "samples": [
+        {
+          "t": 1,
+          "lagMs": 57,
+          "outboxPending": 1,
+          "queueDepth": 0
+        },
+        {
+          "t": 1004,
+          "lagMs": 484,
+          "outboxPending": 11,
+          "queueDepth": 0
+        },
+        {
+          "t": 2006,
+          "lagMs": 221,
+          "outboxPending": 16,
+          "queueDepth": 0
+        },
+        {
+          "t": 3007,
+          "lagMs": 204,
+          "outboxPending": 9,
+          "queueDepth": 0
+        },
+        {
+          "t": 4008,
+          "lagMs": 438,
+          "outboxPending": 20,
+          "queueDepth": 0
+        },
+        {
+          "t": 5009,
+          "lagMs": 329,
+          "outboxPending": 11,
+          "queueDepth": 0
+        },
+        {
+          "t": 6009,
+          "lagMs": 289,
+          "outboxPending": 16,
+          "queueDepth": 0
+        },
+        {
+          "t": 7009,
+          "lagMs": 136,
+          "outboxPending": 5,
+          "queueDepth": 0
+        },
+        {
+          "t": 8011,
+          "lagMs": 449,
+          "outboxPending": 20,
+          "queueDepth": 0
+        },
+        {
+          "t": 9012,
+          "lagMs": 579,
+          "outboxPending": 21,
+          "queueDepth": 0
+        },
+        {
+          "t": 10012,
+          "lagMs": 478,
+          "outboxPending": 19,
+          "queueDepth": 0
+        },
+        {
+          "t": 11012,
+          "lagMs": 524,
+          "outboxPending": 20,
+          "queueDepth": 0
+        },
+        {
+          "t": 12013,
+          "lagMs": 590,
+          "outboxPending": 26,
+          "queueDepth": 0
+        },
+        {
+          "t": 13014,
+          "lagMs": 692,
+          "outboxPending": 32,
+          "queueDepth": 0
+        },
+        {
+          "t": 14015,
+          "lagMs": 1059,
+          "outboxPending": 42,
+          "queueDepth": 0
+        },
+        {
+          "t": 15016,
+          "lagMs": 1097,
+          "outboxPending": 50,
+          "queueDepth": 0
+        },
+        {
+          "t": 16016,
+          "lagMs": 1554,
+          "outboxPending": 66,
+          "queueDepth": 0
+        },
+        {
+          "t": 17016,
+          "lagMs": 1824,
+          "outboxPending": 77,
+          "queueDepth": 0
+        },
+        {
+          "t": 18016,
+          "lagMs": 2023,
+          "outboxPending": 80,
+          "queueDepth": 0
+        },
+        {
+          "t": 19016,
+          "lagMs": 2461,
+          "outboxPending": 88,
+          "queueDepth": 0
+        },
+        {
+          "t": 20017,
+          "lagMs": 2832,
+          "outboxPending": 98,
+          "queueDepth": 0
+        },
+        {
+          "t": 21017,
+          "lagMs": 3141,
+          "outboxPending": 111,
+          "queueDepth": 0
+        },
+        {
+          "t": 22017,
+          "lagMs": 3079,
+          "outboxPending": 128,
+          "queueDepth": 0
+        },
+        {
+          "t": 23017,
+          "lagMs": 3184,
+          "outboxPending": 151,
+          "queueDepth": 0
+        },
+        {
+          "t": 24018,
+          "lagMs": 3522,
+          "outboxPending": 171,
+          "queueDepth": 0
+        },
+        {
+          "t": 25018,
+          "lagMs": 3940,
+          "outboxPending": 195,
+          "queueDepth": 0
+        },
+        {
+          "t": 26019,
+          "lagMs": 4471,
+          "outboxPending": 220,
+          "queueDepth": 0
+        },
+        {
+          "t": 27021,
+          "lagMs": 5045,
+          "outboxPending": 247,
+          "queueDepth": 0
+        },
+        {
+          "t": 28022,
+          "lagMs": 5741,
+          "outboxPending": 279,
+          "queueDepth": 0
+        },
+        {
+          "t": 29023,
+          "lagMs": 6457,
+          "outboxPending": 304,
+          "queueDepth": 0
+        },
+        {
+          "t": 30023,
+          "lagMs": 7235,
+          "outboxPending": 331,
+          "queueDepth": 0
+        },
+        {
+          "t": 31024,
+          "lagMs": 7757,
+          "outboxPending": 344,
+          "queueDepth": 0
+        },
+        {
+          "t": 32024,
+          "lagMs": 8252,
+          "outboxPending": 361,
+          "queueDepth": 0
+        },
+        {
+          "t": 33026,
+          "lagMs": 8800,
+          "outboxPending": 381,
+          "queueDepth": 0
+        },
+        {
+          "t": 34028,
+          "lagMs": 9439,
+          "outboxPending": 394,
+          "queueDepth": 0
+        },
+        {
+          "t": 35029,
+          "lagMs": 9851,
+          "outboxPending": 413,
+          "queueDepth": 0
+        },
+        {
+          "t": 36030,
+          "lagMs": 10446,
+          "outboxPending": 432,
+          "queueDepth": 0
+        },
+        {
+          "t": 37032,
+          "lagMs": 11052,
+          "outboxPending": 458,
+          "queueDepth": 0
+        },
+        {
+          "t": 38032,
+          "lagMs": 11728,
+          "outboxPending": 483,
+          "queueDepth": 0
+        },
+        {
+          "t": 39032,
+          "lagMs": 12361,
+          "outboxPending": 512,
+          "queueDepth": 0
+        },
+        {
+          "t": 40033,
+          "lagMs": 12981,
+          "outboxPending": 541,
+          "queueDepth": 0
+        },
+        {
+          "t": 41034,
+          "lagMs": 13611,
+          "outboxPending": 573,
+          "queueDepth": 0
+        },
+        {
+          "t": 42034,
+          "lagMs": 14337,
+          "outboxPending": 611,
+          "queueDepth": 0
+        },
+        {
+          "t": 43034,
+          "lagMs": 15051,
+          "outboxPending": 646,
+          "queueDepth": 0
+        },
+        {
+          "t": 44034,
+          "lagMs": 15786,
+          "outboxPending": 678,
+          "queueDepth": 0
+        },
+        {
+          "t": 45035,
+          "lagMs": 16504,
+          "outboxPending": 713,
+          "queueDepth": 0
+        },
+        {
+          "t": 46036,
+          "lagMs": 17233,
+          "outboxPending": 749,
+          "queueDepth": 0
+        },
+        {
+          "t": 47038,
+          "lagMs": 17879,
+          "outboxPending": 787,
+          "queueDepth": 0
+        },
+        {
+          "t": 48040,
+          "lagMs": 18505,
+          "outboxPending": 824,
+          "queueDepth": 0
+        },
+        {
+          "t": 49042,
+          "lagMs": 19246,
+          "outboxPending": 858,
+          "queueDepth": 0
+        },
+        {
+          "t": 50043,
+          "lagMs": 19913,
+          "outboxPending": 895,
+          "queueDepth": 0
+        },
+        {
+          "t": 51045,
+          "lagMs": 20675,
+          "outboxPending": 935,
+          "queueDepth": 0
+        },
+        {
+          "t": 52047,
+          "lagMs": 21427,
+          "outboxPending": 970,
+          "queueDepth": 0
+        },
+        {
+          "t": 53047,
+          "lagMs": 22189,
+          "outboxPending": 1007,
+          "queueDepth": 0
+        },
+        {
+          "t": 54048,
+          "lagMs": 22920,
+          "outboxPending": 1038,
+          "queueDepth": 0
+        },
+        {
+          "t": 55049,
+          "lagMs": 23820,
+          "outboxPending": 1067,
+          "queueDepth": 0
+        },
+        {
+          "t": 56050,
+          "lagMs": 24208,
+          "outboxPending": 1039,
+          "queueDepth": 0
+        },
+        {
+          "t": 57051,
+          "lagMs": 24782,
+          "outboxPending": 1021,
+          "queueDepth": 0
+        },
+        {
+          "t": 58052,
+          "lagMs": 24429,
+          "outboxPending": 975,
+          "queueDepth": 0
+        },
+        {
+          "t": 59052,
+          "lagMs": 24404,
+          "outboxPending": 931,
+          "queueDepth": 0
+        },
+        {
+          "t": 60052,
+          "lagMs": 24131,
+          "outboxPending": 884,
+          "queueDepth": 0
+        },
+        {
+          "t": 61053,
+          "lagMs": 24065,
+          "outboxPending": 838,
+          "queueDepth": 0
+        },
+        {
+          "t": 62054,
+          "lagMs": 23834,
+          "outboxPending": 788,
+          "queueDepth": 0
+        },
+        {
+          "t": 63055,
+          "lagMs": 23809,
+          "outboxPending": 737,
+          "queueDepth": 0
+        },
+        {
+          "t": 64057,
+          "lagMs": 23807,
+          "outboxPending": 688,
+          "queueDepth": 0
+        },
+        {
+          "t": 65058,
+          "lagMs": 23724,
+          "outboxPending": 637,
+          "queueDepth": 0
+        },
+        {
+          "t": 66060,
+          "lagMs": 23777,
+          "outboxPending": 590,
+          "queueDepth": 0
+        },
+        {
+          "t": 67061,
+          "lagMs": 23628,
+          "outboxPending": 537,
+          "queueDepth": 0
+        },
+        {
+          "t": 68062,
+          "lagMs": 23542,
+          "outboxPending": 487,
+          "queueDepth": 0
+        },
+        {
+          "t": 69063,
+          "lagMs": 23371,
+          "outboxPending": 433,
+          "queueDepth": 0
+        },
+        {
+          "t": 70064,
+          "lagMs": 23336,
+          "outboxPending": 382,
+          "queueDepth": 0
+        },
+        {
+          "t": 71065,
+          "lagMs": 23265,
+          "outboxPending": 327,
+          "queueDepth": 0
+        },
+        {
+          "t": 72066,
+          "lagMs": 23112,
+          "outboxPending": 273,
+          "queueDepth": 0
+        },
+        {
+          "t": 73067,
+          "lagMs": 22935,
+          "outboxPending": 216,
+          "queueDepth": 0
+        },
+        {
+          "t": 74067,
+          "lagMs": 22738,
+          "outboxPending": 159,
+          "queueDepth": 0
+        },
+        {
+          "t": 75068,
+          "lagMs": 22642,
+          "outboxPending": 106,
+          "queueDepth": 0
+        },
+        {
+          "t": 76069,
+          "lagMs": 22382,
+          "outboxPending": 51,
+          "queueDepth": 0
+        },
+        {
+          "t": 77070,
+          "lagMs": 0,
+          "outboxPending": 0,
+          "queueDepth": 0
+        }
+      ],
+      "metrics": {
+        "window": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 953,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 990
+          },
+          "wagering_outbox_published_total": {
+            "": 2842
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        },
+        "wholeRun": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 1145,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 1188
+          },
+          "wagering_outbox_published_total": {
+            "": 4667
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        }
+      },
+      "perInstance": [
+        {
+          "label": "A",
+          "pid": 21068,
+          "http": 776,
+          "sqsAcked": 0
+        },
+        {
+          "label": "B",
+          "pid": 13624,
+          "http": 779,
+          "sqsAcked": 0
+        },
+        {
+          "label": "C",
+          "pid": 14804,
+          "http": 778,
+          "sqsAcked": 0
+        }
+      ],
+      "consistency": {
+        "ok": true,
+        "outboxEvents": 4667,
+        "eventMessagesReceived": 4667
+      }
+    },
+    {
+      "scenario": "wallet-disputada",
+      "description": "1 wallet (10.000.000,00), BET/WIN 50/50 de 1,00–10,00 com keys únicas, só HTTP",
+      "clients": 50,
+      "split": {
+        "http": 50,
+        "sqs": 0
+      },
+      "quiescenceMs": 20698,
+      "throughput": {
+        "transactionsPerSecond": 65.28888888888889,
+        "processedPerSecond": 65.28888888888889,
+        "rejectedPerSecond": 0,
+        "createdInWindow": 2938,
+        "processedInWindow": 2938
+      },
+      "database": {
+        "totals": {
+          "transactions": "3458",
+          "processed": "3458",
+          "rejected": "0",
+          "failed": "0",
+          "reversals": "0",
+          "ledger_entries": "3459",
+          "inbox": "0",
+          "outbox": "6917"
+        },
+        "rejectedByFailureCode": {}
+      },
+      "http": {
+        "attempts": 2938,
+        "logicalOps": 2938,
+        "requestsPerSecond": 65.28888888888889,
+        "latencyMs": {
+          "n": 2938,
+          "p50": 94.08619999999064,
+          "p95": 2270.2856999999785,
+          "p99": 2516.5913,
+          "max": 2782.4974999999977
+        },
+        "statuses": {
+          "200": 2938
+        },
+        "ok2xx": 2938,
+        "business422": 0,
+        "unexpected4xx": 0,
+        "errors": 0,
+        "errorRate": 0,
+        "clientRetries": 0,
+        "failureCodes422": {}
+      },
+      "mix": {},
+      "queue": {
+        "sentInWindow": 0,
+        "sendErrors": 0,
+        "sendsPerSecond": 0,
+        "distinctMessageIdsMeasured": 0,
+        "notFoundInInbox": 0,
+        "endToEndMs": {
+          "n": 0,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "depth": {
+          "max": 0,
+          "p95": 0,
+          "maxUntilQuiescence": 0
+        }
+      },
+      "outbox": {
+        "lagMs": {
+          "n": 45,
+          "p50": 9424,
+          "p95": 17938,
+          "p99": 18892,
+          "max": 18892,
+          "maxUntilQuiescence": 20668
+        },
+        "pendingMax": 1254
+      },
+      "samples": [
+        {
+          "t": 0,
+          "lagMs": 29,
+          "outboxPending": 1,
+          "queueDepth": 0
+        },
+        {
+          "t": 1001,
+          "lagMs": 835,
+          "outboxPending": 46,
+          "queueDepth": 0
+        },
+        {
+          "t": 2002,
+          "lagMs": 1552,
+          "outboxPending": 76,
+          "queueDepth": 0
+        },
+        {
+          "t": 3002,
+          "lagMs": 2101,
+          "outboxPending": 100,
+          "queueDepth": 0
+        },
+        {
+          "t": 4003,
+          "lagMs": 2673,
+          "outboxPending": 131,
+          "queueDepth": 0
+        },
+        {
+          "t": 5003,
+          "lagMs": 2930,
+          "outboxPending": 127,
+          "queueDepth": 0
+        },
+        {
+          "t": 6004,
+          "lagMs": 2335,
+          "outboxPending": 123,
+          "queueDepth": 0
+        },
+        {
+          "t": 7004,
+          "lagMs": 2701,
+          "outboxPending": 123,
+          "queueDepth": 0
+        },
+        {
+          "t": 8005,
+          "lagMs": 3202,
+          "outboxPending": 149,
+          "queueDepth": 0
+        },
+        {
+          "t": 9006,
+          "lagMs": 3150,
+          "outboxPending": 153,
+          "queueDepth": 0
+        },
+        {
+          "t": 10006,
+          "lagMs": 2787,
+          "outboxPending": 153,
+          "queueDepth": 0
+        },
+        {
+          "t": 11007,
+          "lagMs": 2689,
+          "outboxPending": 157,
+          "queueDepth": 0
+        },
+        {
+          "t": 12007,
+          "lagMs": 2731,
+          "outboxPending": 158,
+          "queueDepth": 0
+        },
+        {
+          "t": 13007,
+          "lagMs": 3298,
+          "outboxPending": 201,
+          "queueDepth": 0
+        },
+        {
+          "t": 14009,
+          "lagMs": 3349,
+          "outboxPending": 202,
+          "queueDepth": 0
+        },
+        {
+          "t": 15010,
+          "lagMs": 3331,
+          "outboxPending": 206,
+          "queueDepth": 0
+        },
+        {
+          "t": 16010,
+          "lagMs": 3330,
+          "outboxPending": 211,
+          "queueDepth": 0
+        },
+        {
+          "t": 17010,
+          "lagMs": 3545,
+          "outboxPending": 219,
+          "queueDepth": 0
+        },
+        {
+          "t": 18010,
+          "lagMs": 3544,
+          "outboxPending": 226,
+          "queueDepth": 0
+        },
+        {
+          "t": 19011,
+          "lagMs": 4186,
+          "outboxPending": 282,
+          "queueDepth": 0
+        },
+        {
+          "t": 20012,
+          "lagMs": 4680,
+          "outboxPending": 313,
+          "queueDepth": 0
+        },
+        {
+          "t": 21013,
+          "lagMs": 5200,
+          "outboxPending": 356,
+          "queueDepth": 0
+        },
+        {
+          "t": 22014,
+          "lagMs": 5501,
+          "outboxPending": 381,
+          "queueDepth": 0
+        },
+        {
+          "t": 23015,
+          "lagMs": 5944,
+          "outboxPending": 411,
+          "queueDepth": 0
+        },
+        {
+          "t": 24016,
+          "lagMs": 6362,
+          "outboxPending": 429,
+          "queueDepth": 0
+        },
+        {
+          "t": 25017,
+          "lagMs": 6635,
+          "outboxPending": 447,
+          "queueDepth": 0
+        },
+        {
+          "t": 26018,
+          "lagMs": 6950,
+          "outboxPending": 467,
+          "queueDepth": 0
+        },
+        {
+          "t": 27018,
+          "lagMs": 7468,
+          "outboxPending": 480,
+          "queueDepth": 0
+        },
+        {
+          "t": 28019,
+          "lagMs": 7901,
+          "outboxPending": 498,
+          "queueDepth": 0
+        },
+        {
+          "t": 29020,
+          "lagMs": 8364,
+          "outboxPending": 520,
+          "queueDepth": 0
+        },
+        {
+          "t": 30021,
+          "lagMs": 8716,
+          "outboxPending": 546,
+          "queueDepth": 0
+        },
+        {
+          "t": 31022,
+          "lagMs": 9003,
+          "outboxPending": 569,
+          "queueDepth": 0
+        },
+        {
+          "t": 32022,
+          "lagMs": 9424,
+          "outboxPending": 597,
+          "queueDepth": 0
+        },
+        {
+          "t": 33022,
+          "lagMs": 9725,
+          "outboxPending": 622,
+          "queueDepth": 0
+        },
+        {
+          "t": 34023,
+          "lagMs": 9966,
+          "outboxPending": 647,
+          "queueDepth": 0
+        },
+        {
+          "t": 35024,
+          "lagMs": 10336,
+          "outboxPending": 675,
+          "queueDepth": 0
+        },
+        {
+          "t": 36024,
+          "lagMs": 10742,
+          "outboxPending": 701,
+          "queueDepth": 0
+        },
+        {
+          "t": 37026,
+          "lagMs": 11178,
+          "outboxPending": 731,
+          "queueDepth": 0
+        },
+        {
+          "t": 38027,
+          "lagMs": 11539,
+          "outboxPending": 756,
+          "queueDepth": 0
+        },
+        {
+          "t": 39028,
+          "lagMs": 11797,
+          "outboxPending": 784,
+          "queueDepth": 0
+        },
+        {
+          "t": 40029,
+          "lagMs": 12167,
+          "outboxPending": 818,
+          "queueDepth": 0
+        },
+        {
+          "t": 41030,
+          "lagMs": 12869,
+          "outboxPending": 868,
+          "queueDepth": 0
+        },
+        {
+          "t": 42031,
+          "lagMs": 13273,
+          "outboxPending": 888,
+          "queueDepth": 0
+        },
+        {
+          "t": 43032,
+          "lagMs": 13708,
+          "outboxPending": 913,
+          "queueDepth": 0
+        },
+        {
+          "t": 44032,
+          "lagMs": 14132,
+          "outboxPending": 937,
+          "queueDepth": 0
+        },
+        {
+          "t": 45032,
+          "lagMs": 14603,
+          "outboxPending": 967,
+          "queueDepth": 0
+        },
+        {
+          "t": 46033,
+          "lagMs": 15030,
+          "outboxPending": 997,
+          "queueDepth": 0
+        },
+        {
+          "t": 47033,
+          "lagMs": 15581,
+          "outboxPending": 1026,
+          "queueDepth": 0
+        },
+        {
+          "t": 48034,
+          "lagMs": 16040,
+          "outboxPending": 1055,
+          "queueDepth": 0
+        },
+        {
+          "t": 49035,
+          "lagMs": 16493,
+          "outboxPending": 1084,
+          "queueDepth": 0
+        },
+        {
+          "t": 50036,
+          "lagMs": 16957,
+          "outboxPending": 1120,
+          "queueDepth": 0
+        },
+        {
+          "t": 51036,
+          "lagMs": 17417,
+          "outboxPending": 1152,
+          "queueDepth": 0
+        },
+        {
+          "t": 52038,
+          "lagMs": 17938,
+          "outboxPending": 1186,
+          "queueDepth": 0
+        },
+        {
+          "t": 53038,
+          "lagMs": 18422,
+          "outboxPending": 1218,
+          "queueDepth": 0
+        },
+        {
+          "t": 54039,
+          "lagMs": 18892,
+          "outboxPending": 1254,
+          "queueDepth": 0
+        },
+        {
+          "t": 55040,
+          "lagMs": 19405,
+          "outboxPending": 1288,
+          "queueDepth": 0
+        },
+        {
+          "t": 56041,
+          "lagMs": 19754,
+          "outboxPending": 1286,
+          "queueDepth": 0
+        },
+        {
+          "t": 57042,
+          "lagMs": 19899,
+          "outboxPending": 1232,
+          "queueDepth": 0
+        },
+        {
+          "t": 58043,
+          "lagMs": 19995,
+          "outboxPending": 1174,
+          "queueDepth": 0
+        },
+        {
+          "t": 59044,
+          "lagMs": 20060,
+          "outboxPending": 1114,
+          "queueDepth": 0
+        },
+        {
+          "t": 60045,
+          "lagMs": 20210,
+          "outboxPending": 1055,
+          "queueDepth": 0
+        },
+        {
+          "t": 61045,
+          "lagMs": 20287,
+          "outboxPending": 993,
+          "queueDepth": 0
+        },
+        {
+          "t": 62046,
+          "lagMs": 20451,
+          "outboxPending": 939,
+          "queueDepth": 0
+        },
+        {
+          "t": 63046,
+          "lagMs": 20383,
+          "outboxPending": 878,
+          "queueDepth": 0
+        },
+        {
+          "t": 64046,
+          "lagMs": 20435,
+          "outboxPending": 815,
+          "queueDepth": 0
+        },
+        {
+          "t": 65046,
+          "lagMs": 20450,
+          "outboxPending": 755,
+          "queueDepth": 0
+        },
+        {
+          "t": 66046,
+          "lagMs": 20499,
+          "outboxPending": 690,
+          "queueDepth": 0
+        },
+        {
+          "t": 67047,
+          "lagMs": 20633,
+          "outboxPending": 632,
+          "queueDepth": 0
+        },
+        {
+          "t": 68048,
+          "lagMs": 20613,
+          "outboxPending": 570,
+          "queueDepth": 0
+        },
+        {
+          "t": 69049,
+          "lagMs": 20655,
+          "outboxPending": 504,
+          "queueDepth": 0
+        },
+        {
+          "t": 70049,
+          "lagMs": 20636,
+          "outboxPending": 435,
+          "queueDepth": 0
+        },
+        {
+          "t": 71050,
+          "lagMs": 20668,
+          "outboxPending": 366,
+          "queueDepth": 0
+        },
+        {
+          "t": 72051,
+          "lagMs": 20610,
+          "outboxPending": 293,
+          "queueDepth": 0
+        },
+        {
+          "t": 73051,
+          "lagMs": 20518,
+          "outboxPending": 218,
+          "queueDepth": 0
+        },
+        {
+          "t": 74052,
+          "lagMs": 20471,
+          "outboxPending": 143,
+          "queueDepth": 0
+        },
+        {
+          "t": 75053,
+          "lagMs": 20289,
+          "outboxPending": 66,
+          "queueDepth": 0
+        },
+        {
+          "t": 76054,
+          "lagMs": 0,
+          "outboxPending": 0,
+          "queueDepth": 0
+        }
+      ],
+      "metrics": {
+        "window": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 1478,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 1460
+          },
+          "wagering_outbox_published_total": {
+            "": 4744
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        },
+        "wholeRun": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 1740,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 1718
+          },
+          "wagering_outbox_published_total": {
+            "": 6917
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        }
+      },
+      "perInstance": [
+        {
+          "label": "A",
+          "pid": 21068,
+          "http": 1153,
+          "sqsAcked": 0
+        },
+        {
+          "label": "B",
+          "pid": 13624,
+          "http": 1168,
+          "sqsAcked": 0
+        },
+        {
+          "label": "C",
+          "pid": 14804,
+          "http": 1137,
+          "sqsAcked": 0
+        }
+      ],
+      "consistency": {
+        "ok": true,
+        "outboxEvents": 6917,
+        "eventMessagesReceived": 6917
+      }
+    },
+    {
+      "scenario": "muitas-wallets",
+      "description": "300 wallets (10.000,00), BET/WIN/LOSS 60/30/10 de 1,00–20,00 em wallet aleatória, só HTTP",
+      "clients": 10,
+      "split": {
+        "http": 10,
+        "sqs": 0
+      },
+      "quiescenceMs": 639,
+      "throughput": {
+        "transactionsPerSecond": 175.84444444444443,
+        "processedPerSecond": 175.82222222222222,
+        "rejectedPerSecond": 0,
+        "createdInWindow": 7913,
+        "processedInWindow": 7912
+      },
+      "database": {
+        "totals": {
+          "transactions": "9817",
+          "processed": "9817",
+          "rejected": "0",
+          "failed": "0",
+          "reversals": "0",
+          "ledger_entries": "9137",
+          "inbox": "0",
+          "outbox": "18954"
+        },
+        "rejectedByFailureCode": {}
+      },
+      "http": {
+        "attempts": 7913,
+        "logicalOps": 7913,
+        "requestsPerSecond": 175.84444444444443,
+        "latencyMs": {
+          "n": 7913,
+          "p50": 54.56960000001709,
+          "p95": 82.42300000000978,
+          "p99": 112.87979999999516,
+          "max": 189.59979999999632
+        },
+        "statuses": {
+          "200": 7913
+        },
+        "ok2xx": 7913,
+        "business422": 0,
+        "unexpected4xx": 0,
+        "errors": 0,
+        "errorRate": 0,
+        "clientRetries": 0,
+        "failureCodes422": {}
+      },
+      "mix": {},
+      "queue": {
+        "sentInWindow": 0,
+        "sendErrors": 0,
+        "sendsPerSecond": 0,
+        "distinctMessageIdsMeasured": 0,
+        "notFoundInInbox": 0,
+        "endToEndMs": {
+          "n": 0,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "depth": {
+          "max": 0,
+          "p95": 0,
+          "maxUntilQuiescence": 0
+        }
+      },
+      "outbox": {
+        "lagMs": {
+          "n": 45,
+          "p50": 143,
+          "p95": 387,
+          "p99": 465,
+          "max": 465,
+          "maxUntilQuiescence": 465
+        },
+        "pendingMax": 155
+      },
+      "samples": [
+        {
+          "t": 0,
+          "lagMs": 265,
+          "outboxPending": 90,
+          "queueDepth": 0
+        },
+        {
+          "t": 1001,
+          "lagMs": 111,
+          "outboxPending": 31,
+          "queueDepth": 0
+        },
+        {
+          "t": 2002,
+          "lagMs": 108,
+          "outboxPending": 25,
+          "queueDepth": 0
+        },
+        {
+          "t": 3003,
+          "lagMs": 102,
+          "outboxPending": 29,
+          "queueDepth": 0
+        },
+        {
+          "t": 4004,
+          "lagMs": 114,
+          "outboxPending": 35,
+          "queueDepth": 0
+        },
+        {
+          "t": 5004,
+          "lagMs": 91,
+          "outboxPending": 28,
+          "queueDepth": 0
+        },
+        {
+          "t": 6005,
+          "lagMs": 132,
+          "outboxPending": 43,
+          "queueDepth": 0
+        },
+        {
+          "t": 7007,
+          "lagMs": 128,
+          "outboxPending": 29,
+          "queueDepth": 0
+        },
+        {
+          "t": 8007,
+          "lagMs": 178,
+          "outboxPending": 48,
+          "queueDepth": 0
+        },
+        {
+          "t": 9008,
+          "lagMs": 119,
+          "outboxPending": 23,
+          "queueDepth": 0
+        },
+        {
+          "t": 10011,
+          "lagMs": 143,
+          "outboxPending": 35,
+          "queueDepth": 0
+        },
+        {
+          "t": 11011,
+          "lagMs": 378,
+          "outboxPending": 136,
+          "queueDepth": 0
+        },
+        {
+          "t": 12012,
+          "lagMs": 159,
+          "outboxPending": 47,
+          "queueDepth": 0
+        },
+        {
+          "t": 13012,
+          "lagMs": 193,
+          "outboxPending": 66,
+          "queueDepth": 0
+        },
+        {
+          "t": 14015,
+          "lagMs": 75,
+          "outboxPending": 22,
+          "queueDepth": 0
+        },
+        {
+          "t": 15016,
+          "lagMs": 161,
+          "outboxPending": 48,
+          "queueDepth": 0
+        },
+        {
+          "t": 16017,
+          "lagMs": 117,
+          "outboxPending": 32,
+          "queueDepth": 0
+        },
+        {
+          "t": 17017,
+          "lagMs": 105,
+          "outboxPending": 26,
+          "queueDepth": 0
+        },
+        {
+          "t": 18018,
+          "lagMs": 131,
+          "outboxPending": 35,
+          "queueDepth": 0
+        },
+        {
+          "t": 19019,
+          "lagMs": 87,
+          "outboxPending": 17,
+          "queueDepth": 0
+        },
+        {
+          "t": 20019,
+          "lagMs": 104,
+          "outboxPending": 29,
+          "queueDepth": 0
+        },
+        {
+          "t": 21019,
+          "lagMs": 124,
+          "outboxPending": 37,
+          "queueDepth": 0
+        },
+        {
+          "t": 22019,
+          "lagMs": 128,
+          "outboxPending": 30,
+          "queueDepth": 0
+        },
+        {
+          "t": 23020,
+          "lagMs": 166,
+          "outboxPending": 48,
+          "queueDepth": 0
+        },
+        {
+          "t": 24022,
+          "lagMs": 323,
+          "outboxPending": 107,
+          "queueDepth": 0
+        },
+        {
+          "t": 25022,
+          "lagMs": 218,
+          "outboxPending": 64,
+          "queueDepth": 0
+        },
+        {
+          "t": 26023,
+          "lagMs": 123,
+          "outboxPending": 33,
+          "queueDepth": 0
+        },
+        {
+          "t": 27023,
+          "lagMs": 138,
+          "outboxPending": 44,
+          "queueDepth": 0
+        },
+        {
+          "t": 28024,
+          "lagMs": 138,
+          "outboxPending": 43,
+          "queueDepth": 0
+        },
+        {
+          "t": 29025,
+          "lagMs": 91,
+          "outboxPending": 27,
+          "queueDepth": 0
+        },
+        {
+          "t": 30025,
+          "lagMs": 170,
+          "outboxPending": 50,
+          "queueDepth": 0
+        },
+        {
+          "t": 31026,
+          "lagMs": 107,
+          "outboxPending": 31,
+          "queueDepth": 0
+        },
+        {
+          "t": 32027,
+          "lagMs": 182,
+          "outboxPending": 62,
+          "queueDepth": 0
+        },
+        {
+          "t": 33028,
+          "lagMs": 140,
+          "outboxPending": 41,
+          "queueDepth": 0
+        },
+        {
+          "t": 34028,
+          "lagMs": 124,
+          "outboxPending": 40,
+          "queueDepth": 0
+        },
+        {
+          "t": 35030,
+          "lagMs": 119,
+          "outboxPending": 28,
+          "queueDepth": 0
+        },
+        {
+          "t": 36031,
+          "lagMs": 139,
+          "outboxPending": 47,
+          "queueDepth": 0
+        },
+        {
+          "t": 37032,
+          "lagMs": 133,
+          "outboxPending": 38,
+          "queueDepth": 0
+        },
+        {
+          "t": 38032,
+          "lagMs": 116,
+          "outboxPending": 32,
+          "queueDepth": 0
+        },
+        {
+          "t": 39032,
+          "lagMs": 277,
+          "outboxPending": 81,
+          "queueDepth": 0
+        },
+        {
+          "t": 40033,
+          "lagMs": 380,
+          "outboxPending": 144,
+          "queueDepth": 0
+        },
+        {
+          "t": 41034,
+          "lagMs": 465,
+          "outboxPending": 155,
+          "queueDepth": 0
+        },
+        {
+          "t": 42034,
+          "lagMs": 379,
+          "outboxPending": 132,
+          "queueDepth": 0
+        },
+        {
+          "t": 43035,
+          "lagMs": 387,
+          "outboxPending": 107,
+          "queueDepth": 0
+        },
+        {
+          "t": 44036,
+          "lagMs": 458,
+          "outboxPending": 78,
+          "queueDepth": 0
+        },
+        {
+          "t": 45037,
+          "lagMs": 189,
+          "outboxPending": 37,
+          "queueDepth": 0
+        },
+        {
+          "t": 46037,
+          "lagMs": 136,
+          "outboxPending": 38,
+          "queueDepth": 0
+        },
+        {
+          "t": 47039,
+          "lagMs": 166,
+          "outboxPending": 36,
+          "queueDepth": 0
+        },
+        {
+          "t": 48040,
+          "lagMs": 157,
+          "outboxPending": 28,
+          "queueDepth": 0
+        },
+        {
+          "t": 49041,
+          "lagMs": 249,
+          "outboxPending": 60,
+          "queueDepth": 0
+        },
+        {
+          "t": 50042,
+          "lagMs": 185,
+          "outboxPending": 42,
+          "queueDepth": 0
+        },
+        {
+          "t": 51042,
+          "lagMs": 104,
+          "outboxPending": 30,
+          "queueDepth": 0
+        },
+        {
+          "t": 52043,
+          "lagMs": 217,
+          "outboxPending": 46,
+          "queueDepth": 0
+        },
+        {
+          "t": 53043,
+          "lagMs": 140,
+          "outboxPending": 32,
+          "queueDepth": 0
+        },
+        {
+          "t": 54045,
+          "lagMs": 153,
+          "outboxPending": 37,
+          "queueDepth": 0
+        },
+        {
+          "t": 55045,
+          "lagMs": 112,
+          "outboxPending": 30,
+          "queueDepth": 0
+        }
+      ],
+      "metrics": {
+        "window": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 2367,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 4767,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 779
+          },
+          "wagering_outbox_published_total": {
+            "": 15044
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        },
+        "wholeRun": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 2966,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 5871,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 980
+          },
+          "wagering_outbox_published_total": {
+            "": 18744
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        }
+      },
+      "perInstance": [
+        {
+          "label": "A",
+          "pid": 21068,
+          "http": 3273,
+          "sqsAcked": 0
+        },
+        {
+          "label": "B",
+          "pid": 13624,
+          "http": 3273,
+          "sqsAcked": 0
+        },
+        {
+          "label": "C",
+          "pid": 14804,
+          "http": 3271,
+          "sqsAcked": 0
+        }
+      ],
+      "consistency": {
+        "ok": true,
+        "outboxEvents": 18954,
+        "eventMessagesReceived": 18954
+      }
+    },
+    {
+      "scenario": "muitas-wallets",
+      "description": "300 wallets (10.000,00), BET/WIN/LOSS 60/30/10 de 1,00–20,00 em wallet aleatória, só HTTP",
+      "clients": 50,
+      "split": {
+        "http": 50,
+        "sqs": 0
+      },
+      "quiescenceMs": 25836,
+      "throughput": {
+        "transactionsPerSecond": 246.8,
+        "processedPerSecond": 246.82222222222222,
+        "rejectedPerSecond": 0,
+        "createdInWindow": 11106,
+        "processedInWindow": 11107
+      },
+      "database": {
+        "totals": {
+          "transactions": "13750",
+          "processed": "13750",
+          "rejected": "0",
+          "failed": "0",
+          "reversals": "0",
+          "ledger_entries": "12689",
+          "inbox": "0",
+          "outbox": "26439"
+        },
+        "rejectedByFailureCode": {}
+      },
+      "http": {
+        "attempts": 11106,
+        "logicalOps": 11106,
+        "requestsPerSecond": 246.8,
+        "latencyMs": {
+          "n": 11106,
+          "p50": 201.44229999999516,
+          "p95": 291.1347999999998,
+          "p99": 345.2121000000043,
+          "max": 483.4872000000032
+        },
+        "statuses": {
+          "200": 11106
+        },
+        "ok2xx": 11106,
+        "business422": 0,
+        "unexpected4xx": 0,
+        "errors": 0,
+        "errorRate": 0,
+        "clientRetries": 0,
+        "failureCodes422": {}
+      },
+      "mix": {},
+      "queue": {
+        "sentInWindow": 0,
+        "sendErrors": 0,
+        "sendsPerSecond": 0,
+        "distinctMessageIdsMeasured": 0,
+        "notFoundInInbox": 0,
+        "endToEndMs": {
+          "n": 0,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "depth": {
+          "max": 0,
+          "p95": 0,
+          "maxUntilQuiescence": 0
+        }
+      },
+      "outbox": {
+        "lagMs": {
+          "n": 45,
+          "p50": 22443,
+          "p95": 36683,
+          "p99": 38080,
+          "max": 38080,
+          "maxUntilQuiescence": 38772
+        },
+        "pendingMax": 17624
+      },
+      "samples": [
+        {
+          "t": 0,
+          "lagMs": 257,
+          "outboxPending": 92,
+          "queueDepth": 0
+        },
+        {
+          "t": 1001,
+          "lagMs": 875,
+          "outboxPending": 422,
+          "queueDepth": 0
+        },
+        {
+          "t": 2002,
+          "lagMs": 1606,
+          "outboxPending": 740,
+          "queueDepth": 0
+        },
+        {
+          "t": 3003,
+          "lagMs": 2286,
+          "outboxPending": 1006,
+          "queueDepth": 0
+        },
+        {
+          "t": 4004,
+          "lagMs": 2864,
+          "outboxPending": 1364,
+          "queueDepth": 0
+        },
+        {
+          "t": 5005,
+          "lagMs": 3510,
+          "outboxPending": 1700,
+          "queueDepth": 0
+        },
+        {
+          "t": 6008,
+          "lagMs": 4214,
+          "outboxPending": 2048,
+          "queueDepth": 0
+        },
+        {
+          "t": 7010,
+          "lagMs": 4809,
+          "outboxPending": 2379,
+          "queueDepth": 0
+        },
+        {
+          "t": 8011,
+          "lagMs": 5413,
+          "outboxPending": 2727,
+          "queueDepth": 0
+        },
+        {
+          "t": 9011,
+          "lagMs": 6033,
+          "outboxPending": 3010,
+          "queueDepth": 0
+        },
+        {
+          "t": 10012,
+          "lagMs": 6725,
+          "outboxPending": 3386,
+          "queueDepth": 0
+        },
+        {
+          "t": 11013,
+          "lagMs": 7445,
+          "outboxPending": 3736,
+          "queueDepth": 0
+        },
+        {
+          "t": 12014,
+          "lagMs": 8153,
+          "outboxPending": 4057,
+          "queueDepth": 0
+        },
+        {
+          "t": 13014,
+          "lagMs": 8852,
+          "outboxPending": 4411,
+          "queueDepth": 0
+        },
+        {
+          "t": 14018,
+          "lagMs": 9537,
+          "outboxPending": 4745,
+          "queueDepth": 0
+        },
+        {
+          "t": 15019,
+          "lagMs": 10267,
+          "outboxPending": 5080,
+          "queueDepth": 0
+        },
+        {
+          "t": 16021,
+          "lagMs": 10999,
+          "outboxPending": 5455,
+          "queueDepth": 0
+        },
+        {
+          "t": 17022,
+          "lagMs": 11736,
+          "outboxPending": 5777,
+          "queueDepth": 0
+        },
+        {
+          "t": 18023,
+          "lagMs": 12504,
+          "outboxPending": 6054,
+          "queueDepth": 0
+        },
+        {
+          "t": 19025,
+          "lagMs": 13288,
+          "outboxPending": 6336,
+          "queueDepth": 0
+        },
+        {
+          "t": 20027,
+          "lagMs": 14010,
+          "outboxPending": 6646,
+          "queueDepth": 0
+        },
+        {
+          "t": 21027,
+          "lagMs": 14836,
+          "outboxPending": 6921,
+          "queueDepth": 0
+        },
+        {
+          "t": 22027,
+          "lagMs": 15654,
+          "outboxPending": 7132,
+          "queueDepth": 0
+        },
+        {
+          "t": 23028,
+          "lagMs": 16392,
+          "outboxPending": 7412,
+          "queueDepth": 0
+        },
+        {
+          "t": 24030,
+          "lagMs": 17078,
+          "outboxPending": 7720,
+          "queueDepth": 0
+        },
+        {
+          "t": 25030,
+          "lagMs": 17735,
+          "outboxPending": 7978,
+          "queueDepth": 0
+        },
+        {
+          "t": 26031,
+          "lagMs": 18464,
+          "outboxPending": 8283,
+          "queueDepth": 0
+        },
+        {
+          "t": 27032,
+          "lagMs": 19084,
+          "outboxPending": 8610,
+          "queueDepth": 0
+        },
+        {
+          "t": 28032,
+          "lagMs": 19705,
+          "outboxPending": 8937,
+          "queueDepth": 0
+        },
+        {
+          "t": 29032,
+          "lagMs": 20328,
+          "outboxPending": 9312,
+          "queueDepth": 0
+        },
+        {
+          "t": 30032,
+          "lagMs": 21005,
+          "outboxPending": 9618,
+          "queueDepth": 0
+        },
+        {
+          "t": 31033,
+          "lagMs": 21689,
+          "outboxPending": 9956,
+          "queueDepth": 0
+        },
+        {
+          "t": 32034,
+          "lagMs": 22443,
+          "outboxPending": 10247,
+          "queueDepth": 0
+        },
+        {
+          "t": 33035,
+          "lagMs": 23110,
+          "outboxPending": 10555,
+          "queueDepth": 0
+        },
+        {
+          "t": 34037,
+          "lagMs": 23842,
+          "outboxPending": 10821,
+          "queueDepth": 0
+        },
+        {
+          "t": 35038,
+          "lagMs": 24642,
+          "outboxPending": 11115,
+          "queueDepth": 0
+        },
+        {
+          "t": 36038,
+          "lagMs": 25319,
+          "outboxPending": 11434,
+          "queueDepth": 0
+        },
+        {
+          "t": 37040,
+          "lagMs": 26008,
+          "outboxPending": 11745,
+          "queueDepth": 0
+        },
+        {
+          "t": 38041,
+          "lagMs": 26659,
+          "outboxPending": 12109,
+          "queueDepth": 0
+        },
+        {
+          "t": 39041,
+          "lagMs": 27335,
+          "outboxPending": 12431,
+          "queueDepth": 0
+        },
+        {
+          "t": 40042,
+          "lagMs": 27989,
+          "outboxPending": 12800,
+          "queueDepth": 0
+        },
+        {
+          "t": 41042,
+          "lagMs": 28648,
+          "outboxPending": 13124,
+          "queueDepth": 0
+        },
+        {
+          "t": 42042,
+          "lagMs": 29369,
+          "outboxPending": 13466,
+          "queueDepth": 0
+        },
+        {
+          "t": 43042,
+          "lagMs": 30067,
+          "outboxPending": 13814,
+          "queueDepth": 0
+        },
+        {
+          "t": 44043,
+          "lagMs": 30981,
+          "outboxPending": 14235,
+          "queueDepth": 0
+        },
+        {
+          "t": 45044,
+          "lagMs": 31934,
+          "outboxPending": 14657,
+          "queueDepth": 0
+        },
+        {
+          "t": 46046,
+          "lagMs": 32645,
+          "outboxPending": 14928,
+          "queueDepth": 0
+        },
+        {
+          "t": 47047,
+          "lagMs": 33302,
+          "outboxPending": 15276,
+          "queueDepth": 0
+        },
+        {
+          "t": 48048,
+          "lagMs": 33913,
+          "outboxPending": 15625,
+          "queueDepth": 0
+        },
+        {
+          "t": 49049,
+          "lagMs": 34599,
+          "outboxPending": 15931,
+          "queueDepth": 0
+        },
+        {
+          "t": 50050,
+          "lagMs": 35285,
+          "outboxPending": 16267,
+          "queueDepth": 0
+        },
+        {
+          "t": 51053,
+          "lagMs": 35967,
+          "outboxPending": 16601,
+          "queueDepth": 0
+        },
+        {
+          "t": 52054,
+          "lagMs": 36683,
+          "outboxPending": 16910,
+          "queueDepth": 0
+        },
+        {
+          "t": 53054,
+          "lagMs": 37370,
+          "outboxPending": 17272,
+          "queueDepth": 0
+        },
+        {
+          "t": 54055,
+          "lagMs": 38080,
+          "outboxPending": 17624,
+          "queueDepth": 0
+        },
+        {
+          "t": 55056,
+          "lagMs": 38772,
+          "outboxPending": 17956,
+          "queueDepth": 0
+        },
+        {
+          "t": 56058,
+          "lagMs": 38076,
+          "outboxPending": 17311,
+          "queueDepth": 0
+        },
+        {
+          "t": 57058,
+          "lagMs": 37097,
+          "outboxPending": 16501,
+          "queueDepth": 0
+        },
+        {
+          "t": 58059,
+          "lagMs": 35877,
+          "outboxPending": 15721,
+          "queueDepth": 0
+        },
+        {
+          "t": 59061,
+          "lagMs": 35004,
+          "outboxPending": 14891,
+          "queueDepth": 0
+        },
+        {
+          "t": 60062,
+          "lagMs": 34234,
+          "outboxPending": 14121,
+          "queueDepth": 0
+        },
+        {
+          "t": 61062,
+          "lagMs": 33825,
+          "outboxPending": 13441,
+          "queueDepth": 0
+        },
+        {
+          "t": 62063,
+          "lagMs": 33419,
+          "outboxPending": 12691,
+          "queueDepth": 0
+        },
+        {
+          "t": 63064,
+          "lagMs": 32873,
+          "outboxPending": 11931,
+          "queueDepth": 0
+        },
+        {
+          "t": 64065,
+          "lagMs": 32382,
+          "outboxPending": 11261,
+          "queueDepth": 0
+        },
+        {
+          "t": 65066,
+          "lagMs": 32019,
+          "outboxPending": 10611,
+          "queueDepth": 0
+        },
+        {
+          "t": 66068,
+          "lagMs": 31197,
+          "outboxPending": 9881,
+          "queueDepth": 0
+        },
+        {
+          "t": 67069,
+          "lagMs": 30703,
+          "outboxPending": 9161,
+          "queueDepth": 0
+        },
+        {
+          "t": 68070,
+          "lagMs": 30211,
+          "outboxPending": 8421,
+          "queueDepth": 0
+        },
+        {
+          "t": 69070,
+          "lagMs": 29727,
+          "outboxPending": 7691,
+          "queueDepth": 0
+        },
+        {
+          "t": 70070,
+          "lagMs": 29351,
+          "outboxPending": 6961,
+          "queueDepth": 0
+        },
+        {
+          "t": 71071,
+          "lagMs": 28873,
+          "outboxPending": 6261,
+          "queueDepth": 0
+        },
+        {
+          "t": 72072,
+          "lagMs": 28686,
+          "outboxPending": 5661,
+          "queueDepth": 0
+        },
+        {
+          "t": 73073,
+          "lagMs": 28199,
+          "outboxPending": 4981,
+          "queueDepth": 0
+        },
+        {
+          "t": 74074,
+          "lagMs": 27847,
+          "outboxPending": 4411,
+          "queueDepth": 0
+        },
+        {
+          "t": 75075,
+          "lagMs": 27501,
+          "outboxPending": 3711,
+          "queueDepth": 0
+        },
+        {
+          "t": 76076,
+          "lagMs": 26979,
+          "outboxPending": 2991,
+          "queueDepth": 0
+        },
+        {
+          "t": 77076,
+          "lagMs": 26611,
+          "outboxPending": 2301,
+          "queueDepth": 0
+        },
+        {
+          "t": 78076,
+          "lagMs": 26132,
+          "outboxPending": 1601,
+          "queueDepth": 0
+        },
+        {
+          "t": 79076,
+          "lagMs": 25809,
+          "outboxPending": 941,
+          "queueDepth": 0
+        },
+        {
+          "t": 80077,
+          "lagMs": 25499,
+          "outboxPending": 251,
+          "queueDepth": 0
+        }
+      ],
+      "metrics": {
+        "window": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 3356,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 6629,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 1120
+          },
+          "wagering_outbox_published_total": {
+            "": 6540
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        },
+        "wholeRun": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 4168,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 8221,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 1361
+          },
+          "wagering_outbox_published_total": {
+            "": 26231
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        }
+      },
+      "perInstance": [
+        {
+          "label": "A",
+          "pid": 21068,
+          "http": 4585,
+          "sqsAcked": 0
+        },
+        {
+          "label": "B",
+          "pid": 13624,
+          "http": 4583,
+          "sqsAcked": 0
+        },
+        {
+          "label": "C",
+          "pid": 14804,
+          "http": 4582,
+          "sqsAcked": 0
+        }
+      ],
+      "consistency": {
+        "ok": true,
+        "outboxEvents": 26439,
+        "eventMessagesReceived": 26439
+      }
+    },
+    {
+      "scenario": "quente-frias",
+      "description": "50 clientes numa wallet disputada (10.000.000,00; BET/WIN 50/50 de 1,00–10,00) + 10 clientes em 300 wallets frias (10.000,00; BET/WIN/LOSS 60/30/10 de 1,00–20,00), ao mesmo tempo, só HTTP; latência e status medidos por grupo",
+      "clients": 60,
+      "split": {
+        "http": 60,
+        "sqs": 0
+      },
+      "quiescenceMs": 31051,
+      "throughput": {
+        "transactionsPerSecond": 70.91111111111111,
+        "processedPerSecond": 70.91111111111111,
+        "rejectedPerSecond": 0,
+        "createdInWindow": 3191,
+        "processedInWindow": 3191
+      },
+      "database": {
+        "totals": {
+          "transactions": "4115",
+          "processed": "4115",
+          "rejected": "0",
+          "failed": "0",
+          "reversals": "0",
+          "ledger_entries": "4345",
+          "inbox": "0",
+          "outbox": "8460"
+        },
+        "rejectedByFailureCode": {}
+      },
+      "http": {
+        "attempts": 3191,
+        "logicalOps": 3191,
+        "requestsPerSecond": 70.91111111111111,
+        "latencyMs": {
+          "n": 3191,
+          "p50": 75.2280000000028,
+          "p95": 2916.3411000000197,
+          "p99": 4124.565000000002,
+          "max": 4769.814199999964
+        },
+        "statuses": {
+          "200": 3191
+        },
+        "ok2xx": 3191,
+        "business422": 0,
+        "unexpected4xx": 0,
+        "errors": 0,
+        "errorRate": 0,
+        "clientRetries": 0,
+        "failureCodes422": {}
+      },
+      "mix": {},
+      "groups": {
+        "quente": {
+          "attempts": 2531,
+          "logicalOps": 2531,
+          "logicalOpsPerSecond": 56.24444444444445,
+          "latencyMs": {
+            "n": 2531,
+            "p50": 84.06010000000242,
+            "p95": 3079.6240000000107,
+            "p99": 4210.9690999999875,
+            "max": 4769.817500000005
+          },
+          "statuses": {
+            "200": 2531
+          },
+          "http503": 0
+        },
+        "frias": {
+          "attempts": 660,
+          "logicalOps": 660,
+          "logicalOpsPerSecond": 14.666666666666666,
+          "latencyMs": {
+            "n": 660,
+            "p50": 35.865800000028685,
+            "p95": 2453.714900000021,
+            "p99": 3472.300499999954,
+            "max": 3623.4487999999546
+          },
+          "statuses": {
+            "200": 660
+          },
+          "http503": 0
+        }
+      },
+      "hotWallet": {
+        "processedInWindow": 2531,
+        "processedPerSecond": 56.24444444444445
+      },
+      "queue": {
+        "sentInWindow": 0,
+        "sendErrors": 0,
+        "sendsPerSecond": 0,
+        "distinctMessageIdsMeasured": 0,
+        "notFoundInInbox": 0,
+        "endToEndMs": {
+          "n": 0,
+          "p50": 0,
+          "p95": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "depth": {
+          "max": 0,
+          "p95": 0,
+          "maxUntilQuiescence": 0
+        }
+      },
+      "outbox": {
+        "lagMs": {
+          "n": 45,
+          "p50": 12768,
+          "p95": 26612,
+          "p99": 27996,
+          "max": 27996,
+          "maxUntilQuiescence": 32504
+        },
+        "pendingMax": 1432
+      },
+      "samples": [
+        {
+          "t": 0,
+          "lagMs": 571,
+          "outboxPending": 181,
+          "queueDepth": 0
+        },
+        {
+          "t": 1000,
+          "lagMs": 1077,
+          "outboxPending": 178,
+          "queueDepth": 0
+        },
+        {
+          "t": 2003,
+          "lagMs": 1204,
+          "outboxPending": 80,
+          "queueDepth": 0
+        },
+        {
+          "t": 3004,
+          "lagMs": 1721,
+          "outboxPending": 167,
+          "queueDepth": 0
+        },
+        {
+          "t": 4005,
+          "lagMs": 1940,
+          "outboxPending": 133,
+          "queueDepth": 0
+        },
+        {
+          "t": 5005,
+          "lagMs": 2543,
+          "outboxPending": 187,
+          "queueDepth": 0
+        },
+        {
+          "t": 6006,
+          "lagMs": 2830,
+          "outboxPending": 195,
+          "queueDepth": 0
+        },
+        {
+          "t": 7007,
+          "lagMs": 3087,
+          "outboxPending": 207,
+          "queueDepth": 0
+        },
+        {
+          "t": 8008,
+          "lagMs": 3381,
+          "outboxPending": 224,
+          "queueDepth": 0
+        },
+        {
+          "t": 9009,
+          "lagMs": 3785,
+          "outboxPending": 242,
+          "queueDepth": 0
+        },
+        {
+          "t": 10009,
+          "lagMs": 4117,
+          "outboxPending": 262,
+          "queueDepth": 0
+        },
+        {
+          "t": 11011,
+          "lagMs": 4396,
+          "outboxPending": 278,
+          "queueDepth": 0
+        },
+        {
+          "t": 12012,
+          "lagMs": 4656,
+          "outboxPending": 300,
+          "queueDepth": 0
+        },
+        {
+          "t": 13013,
+          "lagMs": 4990,
+          "outboxPending": 319,
+          "queueDepth": 0
+        },
+        {
+          "t": 14013,
+          "lagMs": 5223,
+          "outboxPending": 345,
+          "queueDepth": 0
+        },
+        {
+          "t": 15013,
+          "lagMs": 5501,
+          "outboxPending": 365,
+          "queueDepth": 0
+        },
+        {
+          "t": 16014,
+          "lagMs": 5744,
+          "outboxPending": 386,
+          "queueDepth": 0
+        },
+        {
+          "t": 17015,
+          "lagMs": 6076,
+          "outboxPending": 416,
+          "queueDepth": 0
+        },
+        {
+          "t": 18015,
+          "lagMs": 6475,
+          "outboxPending": 439,
+          "queueDepth": 0
+        },
+        {
+          "t": 19016,
+          "lagMs": 6988,
+          "outboxPending": 463,
+          "queueDepth": 0
+        },
+        {
+          "t": 20017,
+          "lagMs": 7401,
+          "outboxPending": 487,
+          "queueDepth": 0
+        },
+        {
+          "t": 21018,
+          "lagMs": 7793,
+          "outboxPending": 512,
+          "queueDepth": 0
+        },
+        {
+          "t": 22019,
+          "lagMs": 8163,
+          "outboxPending": 547,
+          "queueDepth": 0
+        },
+        {
+          "t": 23019,
+          "lagMs": 8597,
+          "outboxPending": 565,
+          "queueDepth": 0
+        },
+        {
+          "t": 24019,
+          "lagMs": 9074,
+          "outboxPending": 592,
+          "queueDepth": 0
+        },
+        {
+          "t": 25020,
+          "lagMs": 9452,
+          "outboxPending": 629,
+          "queueDepth": 0
+        },
+        {
+          "t": 26021,
+          "lagMs": 9937,
+          "outboxPending": 654,
+          "queueDepth": 0
+        },
+        {
+          "t": 27021,
+          "lagMs": 10350,
+          "outboxPending": 679,
+          "queueDepth": 0
+        },
+        {
+          "t": 28022,
+          "lagMs": 10798,
+          "outboxPending": 716,
+          "queueDepth": 0
+        },
+        {
+          "t": 29023,
+          "lagMs": 11353,
+          "outboxPending": 745,
+          "queueDepth": 0
+        },
+        {
+          "t": 30024,
+          "lagMs": 11936,
+          "outboxPending": 778,
+          "queueDepth": 0
+        },
+        {
+          "t": 31025,
+          "lagMs": 12424,
+          "outboxPending": 813,
+          "queueDepth": 0
+        },
+        {
+          "t": 32026,
+          "lagMs": 12768,
+          "outboxPending": 839,
+          "queueDepth": 0
+        },
+        {
+          "t": 33027,
+          "lagMs": 13243,
+          "outboxPending": 870,
+          "queueDepth": 0
+        },
+        {
+          "t": 34027,
+          "lagMs": 13721,
+          "outboxPending": 903,
+          "queueDepth": 0
+        },
+        {
+          "t": 35027,
+          "lagMs": 14249,
+          "outboxPending": 943,
+          "queueDepth": 0
+        },
+        {
+          "t": 36028,
+          "lagMs": 14842,
+          "outboxPending": 976,
+          "queueDepth": 0
+        },
+        {
+          "t": 37029,
+          "lagMs": 15564,
+          "outboxPending": 1000,
+          "queueDepth": 0
+        },
+        {
+          "t": 38030,
+          "lagMs": 16257,
+          "outboxPending": 1025,
+          "queueDepth": 0
+        },
+        {
+          "t": 39031,
+          "lagMs": 17019,
+          "outboxPending": 1062,
+          "queueDepth": 0
+        },
+        {
+          "t": 40032,
+          "lagMs": 17739,
+          "outboxPending": 1070,
+          "queueDepth": 0
+        },
+        {
+          "t": 41032,
+          "lagMs": 18478,
+          "outboxPending": 1096,
+          "queueDepth": 0
+        },
+        {
+          "t": 42033,
+          "lagMs": 19297,
+          "outboxPending": 1119,
+          "queueDepth": 0
+        },
+        {
+          "t": 43034,
+          "lagMs": 20043,
+          "outboxPending": 1138,
+          "queueDepth": 0
+        },
+        {
+          "t": 44034,
+          "lagMs": 20770,
+          "outboxPending": 1167,
+          "queueDepth": 0
+        },
+        {
+          "t": 45034,
+          "lagMs": 21448,
+          "outboxPending": 1192,
+          "queueDepth": 0
+        },
+        {
+          "t": 46035,
+          "lagMs": 22259,
+          "outboxPending": 1207,
+          "queueDepth": 0
+        },
+        {
+          "t": 47036,
+          "lagMs": 23107,
+          "outboxPending": 1216,
+          "queueDepth": 0
+        },
+        {
+          "t": 48037,
+          "lagMs": 23905,
+          "outboxPending": 1261,
+          "queueDepth": 0
+        },
+        {
+          "t": 49037,
+          "lagMs": 24604,
+          "outboxPending": 1278,
+          "queueDepth": 0
+        },
+        {
+          "t": 50038,
+          "lagMs": 25287,
+          "outboxPending": 1314,
+          "queueDepth": 0
+        },
+        {
+          "t": 51039,
+          "lagMs": 25982,
+          "outboxPending": 1338,
+          "queueDepth": 0
+        },
+        {
+          "t": 52040,
+          "lagMs": 26612,
+          "outboxPending": 1368,
+          "queueDepth": 0
+        },
+        {
+          "t": 53041,
+          "lagMs": 27307,
+          "outboxPending": 1395,
+          "queueDepth": 0
+        },
+        {
+          "t": 54042,
+          "lagMs": 27996,
+          "outboxPending": 1432,
+          "queueDepth": 0
+        },
+        {
+          "t": 55042,
+          "lagMs": 28790,
+          "outboxPending": 1465,
+          "queueDepth": 0
+        },
+        {
+          "t": 56043,
+          "lagMs": 29454,
+          "outboxPending": 1483,
+          "queueDepth": 0
+        },
+        {
+          "t": 57043,
+          "lagMs": 29849,
+          "outboxPending": 1444,
+          "queueDepth": 0
+        },
+        {
+          "t": 58043,
+          "lagMs": 30251,
+          "outboxPending": 1404,
+          "queueDepth": 0
+        },
+        {
+          "t": 59044,
+          "lagMs": 30709,
+          "outboxPending": 1364,
+          "queueDepth": 0
+        },
+        {
+          "t": 60044,
+          "lagMs": 30923,
+          "outboxPending": 1318,
+          "queueDepth": 0
+        },
+        {
+          "t": 61045,
+          "lagMs": 31141,
+          "outboxPending": 1272,
+          "queueDepth": 0
+        },
+        {
+          "t": 62046,
+          "lagMs": 31346,
+          "outboxPending": 1224,
+          "queueDepth": 0
+        },
+        {
+          "t": 63047,
+          "lagMs": 31547,
+          "outboxPending": 1172,
+          "queueDepth": 0
+        },
+        {
+          "t": 64048,
+          "lagMs": 31785,
+          "outboxPending": 1119,
+          "queueDepth": 0
+        },
+        {
+          "t": 65049,
+          "lagMs": 31946,
+          "outboxPending": 1066,
+          "queueDepth": 0
+        },
+        {
+          "t": 66050,
+          "lagMs": 32117,
+          "outboxPending": 1012,
+          "queueDepth": 0
+        },
+        {
+          "t": 67051,
+          "lagMs": 32328,
+          "outboxPending": 961,
+          "queueDepth": 0
+        },
+        {
+          "t": 68052,
+          "lagMs": 32496,
+          "outboxPending": 907,
+          "queueDepth": 0
+        },
+        {
+          "t": 69053,
+          "lagMs": 32504,
+          "outboxPending": 857,
+          "queueDepth": 0
+        },
+        {
+          "t": 70053,
+          "lagMs": 32375,
+          "outboxPending": 803,
+          "queueDepth": 0
+        },
+        {
+          "t": 71054,
+          "lagMs": 32155,
+          "outboxPending": 752,
+          "queueDepth": 0
+        },
+        {
+          "t": 72055,
+          "lagMs": 31771,
+          "outboxPending": 697,
+          "queueDepth": 0
+        },
+        {
+          "t": 73055,
+          "lagMs": 31338,
+          "outboxPending": 643,
+          "queueDepth": 0
+        },
+        {
+          "t": 74056,
+          "lagMs": 31006,
+          "outboxPending": 589,
+          "queueDepth": 0
+        },
+        {
+          "t": 75057,
+          "lagMs": 30927,
+          "outboxPending": 539,
+          "queueDepth": 0
+        },
+        {
+          "t": 76057,
+          "lagMs": 30747,
+          "outboxPending": 486,
+          "queueDepth": 0
+        },
+        {
+          "t": 77058,
+          "lagMs": 29274,
+          "outboxPending": 430,
+          "queueDepth": 0
+        },
+        {
+          "t": 78058,
+          "lagMs": 29244,
+          "outboxPending": 377,
+          "queueDepth": 0
+        },
+        {
+          "t": 79060,
+          "lagMs": 29272,
+          "outboxPending": 322,
+          "queueDepth": 0
+        },
+        {
+          "t": 80061,
+          "lagMs": 29422,
+          "outboxPending": 275,
+          "queueDepth": 0
+        },
+        {
+          "t": 81062,
+          "lagMs": 29437,
+          "outboxPending": 222,
+          "queueDepth": 0
+        },
+        {
+          "t": 82068,
+          "lagMs": 29299,
+          "outboxPending": 166,
+          "queueDepth": 0
+        },
+        {
+          "t": 83071,
+          "lagMs": 29944,
+          "outboxPending": 145,
+          "queueDepth": 0
+        },
+        {
+          "t": 84072,
+          "lagMs": 30855,
+          "outboxPending": 140,
+          "queueDepth": 0
+        },
+        {
+          "t": 85073,
+          "lagMs": 30744,
+          "outboxPending": 84,
+          "queueDepth": 0
+        },
+        {
+          "t": 86073,
+          "lagMs": 30611,
+          "outboxPending": 23,
+          "queueDepth": 0
+        }
+      ],
+      "metrics": {
+        "window": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 1491,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 1646,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 54
+          },
+          "wagering_outbox_published_total": {
+            "": 5129
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        },
+        "wholeRun": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {},
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 1923,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 2121,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 71
+          },
+          "wagering_outbox_published_total": {
+            "": 8340
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {},
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {}
+        }
+      },
+      "perInstance": [
+        {
+          "label": "A",
+          "pid": 21068,
+          "http": 1354,
+          "sqsAcked": 0
+        },
+        {
+          "label": "B",
+          "pid": 13624,
+          "http": 1371,
+          "sqsAcked": 0
+        },
+        {
+          "label": "C",
+          "pid": 14804,
+          "http": 1390,
+          "sqsAcked": 0
+        }
+      ],
+      "consistency": {
+        "ok": true,
+        "outboxEvents": 8460,
+        "eventMessagesReceived": 8460
+      }
+    },
+    {
+      "scenario": "misto",
+      "description": "200 wallets (1.000,00); metade dos clientes HTTP (laço fechado), metade produtores SQS (taxa fixa); 10% reenvio duplicado, 5% REFUND/ROLLBACK antes da BET, 5% BET acima do saldo, resto BET/WIN/LOSS 50/35/15",
+      "clients": 10,
+      "split": {
+        "http": 5,
+        "sqs": 5
+      },
+      "quiescenceMs": 833,
+      "throughput": {
+        "transactionsPerSecond": 114.88888888888889,
+        "processedPerSecond": 109,
+        "rejectedPerSecond": 5.844444444444444,
+        "createdInWindow": 5170,
+        "processedInWindow": 4905
+      },
+      "database": {
+        "totals": {
+          "transactions": "6344",
+          "processed": "6015",
+          "rejected": "329",
+          "failed": "0",
+          "reversals": "327",
+          "ledger_entries": "5409",
+          "inbox": "1367",
+          "outbox": "12080"
+        },
+        "rejectedByFailureCode": {
+          "INSUFFICIENT_BALANCE": 329
+        }
+      },
+      "http": {
+        "attempts": 4589,
+        "logicalOps": 4380,
+        "requestsPerSecond": 101.97777777777777,
+        "latencyMs": {
+          "n": 4589,
+          "p50": 48.8802999999607,
+          "p95": 79.59210000000894,
+          "p99": 99.11999999999534,
+          "max": 144.50640000001295
+        },
+        "statuses": {
+          "200": 4143,
+          "202": 209,
+          "422": 237
+        },
+        "ok2xx": 4352,
+        "business422": 237,
+        "unexpected4xx": 0,
+        "errors": 0,
+        "errorRate": 0,
+        "clientRetries": 0,
+        "failureCodes422": {
+          "INSUFFICIENT_BALANCE": 237
+        }
+      },
+      "mix": {
+        "http:normal": 3518,
+        "sqs:normal": 859,
+        "http:dup": 441,
+        "sqs:dup": 102,
+        "http:reversal": 209,
+        "http:oversize": 212,
+        "sqs:oversize": 51,
+        "sqs:reversal": 56
+      },
+      "queue": {
+        "sentInWindow": 1124,
+        "sendErrors": 0,
+        "sendsPerSecond": 24.977777777777778,
+        "distinctMessageIdsMeasured": 1116,
+        "notFoundInInbox": 0,
+        "endToEndMs": {
+          "n": 1116,
+          "p50": 96,
+          "p95": 172,
+          "p99": 213,
+          "max": 303
+        },
+        "depth": {
+          "max": 6,
+          "p95": 5,
+          "maxUntilQuiescence": 6
+        }
+      },
+      "outbox": {
+        "lagMs": {
+          "n": 45,
+          "p50": 132,
+          "p95": 258,
+          "p99": 369,
+          "max": 369,
+          "maxUntilQuiescence": 369
+        },
+        "pendingMax": 51
+      },
+      "samples": [
+        {
+          "t": 0,
+          "lagMs": 147,
+          "outboxPending": 30,
+          "queueDepth": 0
+        },
+        {
+          "t": 1001,
+          "lagMs": 127,
+          "outboxPending": 24,
+          "queueDepth": 3
+        },
+        {
+          "t": 2002,
+          "lagMs": 98,
+          "outboxPending": 19,
+          "queueDepth": 2
+        },
+        {
+          "t": 3002,
+          "lagMs": 104,
+          "outboxPending": 15,
+          "queueDepth": 3
+        },
+        {
+          "t": 4002,
+          "lagMs": 94,
+          "outboxPending": 14,
+          "queueDepth": 2
+        },
+        {
+          "t": 5002,
+          "lagMs": 147,
+          "outboxPending": 33,
+          "queueDepth": 3
+        },
+        {
+          "t": 6003,
+          "lagMs": 112,
+          "outboxPending": 19,
+          "queueDepth": 3
+        },
+        {
+          "t": 7004,
+          "lagMs": 82,
+          "outboxPending": 9,
+          "queueDepth": 3
+        },
+        {
+          "t": 8005,
+          "lagMs": 57,
+          "outboxPending": 7,
+          "queueDepth": 2
+        },
+        {
+          "t": 9006,
+          "lagMs": 280,
+          "outboxPending": 38,
+          "queueDepth": 3
+        },
+        {
+          "t": 10006,
+          "lagMs": 272,
+          "outboxPending": 29,
+          "queueDepth": 5
+        },
+        {
+          "t": 11007,
+          "lagMs": 81,
+          "outboxPending": 11,
+          "queueDepth": 3
+        },
+        {
+          "t": 12007,
+          "lagMs": 258,
+          "outboxPending": 22,
+          "queueDepth": 3
+        },
+        {
+          "t": 13007,
+          "lagMs": 108,
+          "outboxPending": 24,
+          "queueDepth": 3
+        },
+        {
+          "t": 14007,
+          "lagMs": 191,
+          "outboxPending": 36,
+          "queueDepth": 2
+        },
+        {
+          "t": 15009,
+          "lagMs": 369,
+          "outboxPending": 51,
+          "queueDepth": 3
+        },
+        {
+          "t": 16009,
+          "lagMs": 119,
+          "outboxPending": 28,
+          "queueDepth": 4
+        },
+        {
+          "t": 17009,
+          "lagMs": 164,
+          "outboxPending": 38,
+          "queueDepth": 2
+        },
+        {
+          "t": 18009,
+          "lagMs": 141,
+          "outboxPending": 31,
+          "queueDepth": 3
+        },
+        {
+          "t": 19009,
+          "lagMs": 89,
+          "outboxPending": 14,
+          "queueDepth": 3
+        },
+        {
+          "t": 20010,
+          "lagMs": 160,
+          "outboxPending": 31,
+          "queueDepth": 2
+        },
+        {
+          "t": 21010,
+          "lagMs": 185,
+          "outboxPending": 30,
+          "queueDepth": 4
+        },
+        {
+          "t": 22010,
+          "lagMs": 119,
+          "outboxPending": 23,
+          "queueDepth": 4
+        },
+        {
+          "t": 23012,
+          "lagMs": 182,
+          "outboxPending": 43,
+          "queueDepth": 3
+        },
+        {
+          "t": 24012,
+          "lagMs": 124,
+          "outboxPending": 26,
+          "queueDepth": 5
+        },
+        {
+          "t": 25013,
+          "lagMs": 67,
+          "outboxPending": 9,
+          "queueDepth": 5
+        },
+        {
+          "t": 26015,
+          "lagMs": 147,
+          "outboxPending": 22,
+          "queueDepth": 3
+        },
+        {
+          "t": 27016,
+          "lagMs": 157,
+          "outboxPending": 41,
+          "queueDepth": 4
+        },
+        {
+          "t": 28016,
+          "lagMs": 92,
+          "outboxPending": 19,
+          "queueDepth": 2
+        },
+        {
+          "t": 29017,
+          "lagMs": 78,
+          "outboxPending": 16,
+          "queueDepth": 2
+        },
+        {
+          "t": 30017,
+          "lagMs": 192,
+          "outboxPending": 24,
+          "queueDepth": 3
+        },
+        {
+          "t": 31018,
+          "lagMs": 196,
+          "outboxPending": 38,
+          "queueDepth": 3
+        },
+        {
+          "t": 32019,
+          "lagMs": 132,
+          "outboxPending": 20,
+          "queueDepth": 3
+        },
+        {
+          "t": 33019,
+          "lagMs": 101,
+          "outboxPending": 18,
+          "queueDepth": 2
+        },
+        {
+          "t": 34021,
+          "lagMs": 111,
+          "outboxPending": 22,
+          "queueDepth": 3
+        },
+        {
+          "t": 35022,
+          "lagMs": 161,
+          "outboxPending": 28,
+          "queueDepth": 4
+        },
+        {
+          "t": 36022,
+          "lagMs": 183,
+          "outboxPending": 24,
+          "queueDepth": 6
+        },
+        {
+          "t": 37023,
+          "lagMs": 170,
+          "outboxPending": 24,
+          "queueDepth": 5
+        },
+        {
+          "t": 38025,
+          "lagMs": 128,
+          "outboxPending": 27,
+          "queueDepth": 2
+        },
+        {
+          "t": 39025,
+          "lagMs": 145,
+          "outboxPending": 28,
+          "queueDepth": 3
+        },
+        {
+          "t": 40026,
+          "lagMs": 70,
+          "outboxPending": 14,
+          "queueDepth": 3
+        },
+        {
+          "t": 41026,
+          "lagMs": 120,
+          "outboxPending": 21,
+          "queueDepth": 3
+        },
+        {
+          "t": 42027,
+          "lagMs": 120,
+          "outboxPending": 16,
+          "queueDepth": 1
+        },
+        {
+          "t": 43028,
+          "lagMs": 156,
+          "outboxPending": 32,
+          "queueDepth": 3
+        },
+        {
+          "t": 44029,
+          "lagMs": 143,
+          "outboxPending": 25,
+          "queueDepth": 3
+        },
+        {
+          "t": 45029,
+          "lagMs": 149,
+          "outboxPending": 21,
+          "queueDepth": 4
+        },
+        {
+          "t": 46029,
+          "lagMs": 72,
+          "outboxPending": 14,
+          "queueDepth": 3
+        },
+        {
+          "t": 47029,
+          "lagMs": 93,
+          "outboxPending": 18,
+          "queueDepth": 3
+        },
+        {
+          "t": 48030,
+          "lagMs": 127,
+          "outboxPending": 24,
+          "queueDepth": 4
+        },
+        {
+          "t": 49030,
+          "lagMs": 126,
+          "outboxPending": 18,
+          "queueDepth": 5
+        },
+        {
+          "t": 50031,
+          "lagMs": 114,
+          "outboxPending": 19,
+          "queueDepth": 3
+        },
+        {
+          "t": 51032,
+          "lagMs": 141,
+          "outboxPending": 17,
+          "queueDepth": 3
+        },
+        {
+          "t": 52034,
+          "lagMs": 153,
+          "outboxPending": 26,
+          "queueDepth": 5
+        },
+        {
+          "t": 53034,
+          "lagMs": 126,
+          "outboxPending": 26,
+          "queueDepth": 4
+        },
+        {
+          "t": 54035,
+          "lagMs": 80,
+          "outboxPending": 15,
+          "queueDepth": 4
+        },
+        {
+          "t": 55036,
+          "lagMs": 147,
+          "outboxPending": 20,
+          "queueDepth": 3
+        }
+      ],
+      "metrics": {
+        "window": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {
+            "{kind=\"WIN\"}": 162,
+            "{kind=\"BET\"}": 299,
+            "{kind=\"LOSS\"}": 82
+          },
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 1685,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 2730,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 734,
+            "{status=\"REJECTED\",kind=\"BET\",failure_code=\"INSUFFICIENT_BALANCE\"}": 291,
+            "{status=\"PENDING_REFERENCE\",kind=\"REFUND\",failure_code=\"NONE\"}": 142,
+            "{status=\"PENDING_REFERENCE\",kind=\"ROLLBACK\",failure_code=\"NONE\"}": 123
+          },
+          "wagering_outbox_published_total": {
+            "": 9701
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {
+            "{status=\"PROCESSED\"}": 265
+          },
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {
+            "{reason=\"wallet_busy\"}": 437,
+            "{reason=\"not_due\"}": 56
+          }
+        },
+        "wholeRun": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {
+            "{kind=\"WIN\"}": 196,
+            "{kind=\"BET\"}": 367,
+            "{kind=\"LOSS\"}": 101
+          },
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 2075,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 3324,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 906,
+            "{status=\"REJECTED\",kind=\"BET\",failure_code=\"INSUFFICIENT_BALANCE\"}": 363,
+            "{status=\"PENDING_REFERENCE\",kind=\"REFUND\",failure_code=\"NONE\"}": 180,
+            "{status=\"PENDING_REFERENCE\",kind=\"ROLLBACK\",failure_code=\"NONE\"}": 147
+          },
+          "wagering_outbox_published_total": {
+            "": 11930
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {
+            "{status=\"PROCESSED\"}": 327
+          },
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {},
+          "wagering_pending_reference_skipped_total": {
+            "{reason=\"wallet_busy\"}": 522,
+            "{reason=\"not_due\"}": 66
+          }
+        }
+      },
+      "perInstance": [
+        {
+          "label": "A",
+          "pid": 21068,
+          "http": 1875,
+          "sqsAcked": 456
+        },
+        {
+          "label": "B",
+          "pid": 13624,
+          "http": 1877,
+          "sqsAcked": 462
+        },
+        {
+          "label": "C",
+          "pid": 14804,
+          "http": 1876,
+          "sqsAcked": 462
+        }
+      ],
+      "consistency": {
+        "ok": true,
+        "outboxEvents": 12080,
+        "eventMessagesReceived": 12080
+      }
+    },
+    {
+      "scenario": "misto",
+      "description": "200 wallets (1.000,00); metade dos clientes HTTP (laço fechado), metade produtores SQS (taxa fixa); 10% reenvio duplicado, 5% REFUND/ROLLBACK antes da BET, 5% BET acima do saldo, resto BET/WIN/LOSS 50/35/15",
+      "clients": 50,
+      "split": {
+        "http": 25,
+        "sqs": 25
+      },
+      "quiescenceMs": 78963,
+      "throughput": {
+        "transactionsPerSecond": 200.46666666666667,
+        "processedPerSecond": 189.55555555555554,
+        "rejectedPerSecond": 10.755555555555556,
+        "createdInWindow": 9021,
+        "processedInWindow": 8530
+      },
+      "database": {
+        "totals": {
+          "transactions": "15848",
+          "processed": "14987",
+          "rejected": "861",
+          "failed": "0",
+          "reversals": "859",
+          "ledger_entries": "13212",
+          "inbox": "6294",
+          "outbox": "29890"
+        },
+        "rejectedByFailureCode": {
+          "INSUFFICIENT_BALANCE": 861
+        }
+      },
+      "http": {
+        "attempts": 9306,
+        "logicalOps": 8849,
+        "requestsPerSecond": 206.8,
+        "latencyMs": {
+          "n": 9306,
+          "p50": 117.63850000000093,
+          "p95": 193.9157000000123,
+          "p99": 266.30650000000605,
+          "max": 437.12919999996666
+        },
+        "statuses": {
+          "200": 8342,
+          "202": 458,
+          "422": 506
+        },
+        "ok2xx": 8800,
+        "business422": 506,
+        "unexpected4xx": 0,
+        "errors": 0,
+        "errorRate": 0,
+        "clientRetries": 0,
+        "failureCodes422": {
+          "INSUFFICIENT_BALANCE": 506
+        }
+      },
+      "mix": {
+        "sqs:normal": 4137,
+        "http:normal": 7054,
+        "sqs:dup": 561,
+        "http:dup": 894,
+        "http:oversize": 443,
+        "sqs:oversize": 273,
+        "sqs:reversal": 262,
+        "http:reversal": 458
+      },
+      "queue": {
+        "sentInWindow": 5497,
+        "sendErrors": 0,
+        "sendsPerSecond": 122.15555555555555,
+        "distinctMessageIdsMeasured": 5408,
+        "notFoundInInbox": 0,
+        "endToEndMs": {
+          "n": 5408,
+          "p50": 70199,
+          "p95": 86462,
+          "p99": 92894,
+          "max": 100241
+        },
+        "depth": {
+          "max": 5787,
+          "p95": 5567,
+          "maxUntilQuiescence": 5850
+        }
+      },
+      "outbox": {
+        "lagMs": {
+          "n": 45,
+          "p50": 25677,
+          "p95": 41104,
+          "p99": 42750,
+          "max": 42750,
+          "maxUntilQuiescence": 43155
+        },
+        "pendingMax": 16057
+      },
+      "samples": [
+        {
+          "t": 0,
+          "lagMs": 304,
+          "outboxPending": 60,
+          "queueDepth": 1
+        },
+        {
+          "t": 1001,
+          "lagMs": 967,
+          "outboxPending": 303,
+          "queueDepth": 85
+        },
+        {
+          "t": 2001,
+          "lagMs": 1721,
+          "outboxPending": 566,
+          "queueDepth": 169
+        },
+        {
+          "t": 3002,
+          "lagMs": 2523,
+          "outboxPending": 863,
+          "queueDepth": 263
+        },
+        {
+          "t": 4005,
+          "lagMs": 3320,
+          "outboxPending": 1094,
+          "queueDepth": 354
+        },
+        {
+          "t": 5006,
+          "lagMs": 4179,
+          "outboxPending": 1376,
+          "queueDepth": 456
+        },
+        {
+          "t": 6006,
+          "lagMs": 5018,
+          "outboxPending": 1643,
+          "queueDepth": 551
+        },
+        {
+          "t": 7007,
+          "lagMs": 5917,
+          "outboxPending": 1970,
+          "queueDepth": 579
+        },
+        {
+          "t": 8409,
+          "lagMs": 7319,
+          "outboxPending": 2481,
+          "queueDepth": 600
+        },
+        {
+          "t": 9409,
+          "lagMs": 8062,
+          "outboxPending": 2744,
+          "queueDepth": 702
+        },
+        {
+          "t": 10411,
+          "lagMs": 8859,
+          "outboxPending": 3020,
+          "queueDepth": 797
+        },
+        {
+          "t": 11412,
+          "lagMs": 9673,
+          "outboxPending": 3288,
+          "queueDepth": 902
+        },
+        {
+          "t": 12413,
+          "lagMs": 10373,
+          "outboxPending": 3570,
+          "queueDepth": 1011
+        },
+        {
+          "t": 13413,
+          "lagMs": 11205,
+          "outboxPending": 3832,
+          "queueDepth": 1124
+        },
+        {
+          "t": 14413,
+          "lagMs": 11981,
+          "outboxPending": 4103,
+          "queueDepth": 1228
+        },
+        {
+          "t": 15414,
+          "lagMs": 12781,
+          "outboxPending": 4368,
+          "queueDepth": 1337
+        },
+        {
+          "t": 16415,
+          "lagMs": 13594,
+          "outboxPending": 4662,
+          "queueDepth": 1454
+        },
+        {
+          "t": 17416,
+          "lagMs": 14385,
+          "outboxPending": 4942,
+          "queueDepth": 1565
+        },
+        {
+          "t": 18416,
+          "lagMs": 15058,
+          "outboxPending": 5209,
+          "queueDepth": 1661
+        },
+        {
+          "t": 19418,
+          "lagMs": 15885,
+          "outboxPending": 5507,
+          "queueDepth": 1763
+        },
+        {
+          "t": 20421,
+          "lagMs": 16609,
+          "outboxPending": 5814,
+          "queueDepth": 1868
+        },
+        {
+          "t": 21422,
+          "lagMs": 17263,
+          "outboxPending": 6193,
+          "queueDepth": 1967
+        },
+        {
+          "t": 22422,
+          "lagMs": 18013,
+          "outboxPending": 6566,
+          "queueDepth": 2089
+        },
+        {
+          "t": 23426,
+          "lagMs": 18810,
+          "outboxPending": 6887,
+          "queueDepth": 2209
+        },
+        {
+          "t": 24427,
+          "lagMs": 19594,
+          "outboxPending": 7266,
+          "queueDepth": 2308
+        },
+        {
+          "t": 25428,
+          "lagMs": 20298,
+          "outboxPending": 7575,
+          "queueDepth": 2439
+        },
+        {
+          "t": 26428,
+          "lagMs": 21010,
+          "outboxPending": 7847,
+          "queueDepth": 2551
+        },
+        {
+          "t": 27428,
+          "lagMs": 21727,
+          "outboxPending": 8212,
+          "queueDepth": 2669
+        },
+        {
+          "t": 28430,
+          "lagMs": 22468,
+          "outboxPending": 8515,
+          "queueDepth": 2786
+        },
+        {
+          "t": 29431,
+          "lagMs": 23301,
+          "outboxPending": 8813,
+          "queueDepth": 2892
+        },
+        {
+          "t": 30432,
+          "lagMs": 24060,
+          "outboxPending": 9153,
+          "queueDepth": 3009
+        },
+        {
+          "t": 31433,
+          "lagMs": 24887,
+          "outboxPending": 9434,
+          "queueDepth": 3121
+        },
+        {
+          "t": 32434,
+          "lagMs": 25677,
+          "outboxPending": 9787,
+          "queueDepth": 3247
+        },
+        {
+          "t": 33436,
+          "lagMs": 26469,
+          "outboxPending": 10130,
+          "queueDepth": 3360
+        },
+        {
+          "t": 34439,
+          "lagMs": 27341,
+          "outboxPending": 10391,
+          "queueDepth": 3476
+        },
+        {
+          "t": 35439,
+          "lagMs": 28084,
+          "outboxPending": 10665,
+          "queueDepth": 3573
+        },
+        {
+          "t": 36441,
+          "lagMs": 28865,
+          "outboxPending": 10944,
+          "queueDepth": 3706
+        },
+        {
+          "t": 37442,
+          "lagMs": 29597,
+          "outboxPending": 11293,
+          "queueDepth": 3828
+        },
+        {
+          "t": 38443,
+          "lagMs": 30343,
+          "outboxPending": 11644,
+          "queueDepth": 3953
+        },
+        {
+          "t": 39443,
+          "lagMs": 31092,
+          "outboxPending": 12020,
+          "queueDepth": 4074
+        },
+        {
+          "t": 40443,
+          "lagMs": 31769,
+          "outboxPending": 12345,
+          "queueDepth": 4190
+        },
+        {
+          "t": 41444,
+          "lagMs": 32555,
+          "outboxPending": 12722,
+          "queueDepth": 4310
+        },
+        {
+          "t": 42444,
+          "lagMs": 33351,
+          "outboxPending": 12951,
+          "queueDepth": 4425
+        },
+        {
+          "t": 43445,
+          "lagMs": 34108,
+          "outboxPending": 13145,
+          "queueDepth": 4535
+        },
+        {
+          "t": 44446,
+          "lagMs": 35000,
+          "outboxPending": 13329,
+          "queueDepth": 4660
+        },
+        {
+          "t": 45446,
+          "lagMs": 35801,
+          "outboxPending": 13598,
+          "queueDepth": 4759
+        },
+        {
+          "t": 46447,
+          "lagMs": 36495,
+          "outboxPending": 13839,
+          "queueDepth": 4882
+        },
+        {
+          "t": 47448,
+          "lagMs": 37273,
+          "outboxPending": 14032,
+          "queueDepth": 5000
+        },
+        {
+          "t": 48449,
+          "lagMs": 38068,
+          "outboxPending": 14322,
+          "queueDepth": 5105
+        },
+        {
+          "t": 49450,
+          "lagMs": 38827,
+          "outboxPending": 14624,
+          "queueDepth": 5220
+        },
+        {
+          "t": 50450,
+          "lagMs": 39600,
+          "outboxPending": 14937,
+          "queueDepth": 5327
+        },
+        {
+          "t": 51451,
+          "lagMs": 40318,
+          "outboxPending": 15319,
+          "queueDepth": 5445
+        },
+        {
+          "t": 52452,
+          "lagMs": 41104,
+          "outboxPending": 15595,
+          "queueDepth": 5567
+        },
+        {
+          "t": 53452,
+          "lagMs": 41916,
+          "outboxPending": 15780,
+          "queueDepth": 5684
+        },
+        {
+          "t": 54453,
+          "lagMs": 42750,
+          "outboxPending": 16057,
+          "queueDepth": 5787
+        },
+        {
+          "t": 55454,
+          "lagMs": 43155,
+          "outboxPending": 16146,
+          "queueDepth": 5850
+        },
+        {
+          "t": 56456,
+          "lagMs": 42518,
+          "outboxPending": 15688,
+          "queueDepth": 5796
+        },
+        {
+          "t": 57457,
+          "lagMs": 41927,
+          "outboxPending": 15206,
+          "queueDepth": 5737
+        },
+        {
+          "t": 58458,
+          "lagMs": 41378,
+          "outboxPending": 14727,
+          "queueDepth": 5679
+        },
+        {
+          "t": 59459,
+          "lagMs": 40907,
+          "outboxPending": 14303,
+          "queueDepth": 5626
+        },
+        {
+          "t": 60460,
+          "lagMs": 40572,
+          "outboxPending": 13886,
+          "queueDepth": 5574
+        },
+        {
+          "t": 61460,
+          "lagMs": 40235,
+          "outboxPending": 13391,
+          "queueDepth": 5515
+        },
+        {
+          "t": 62461,
+          "lagMs": 40324,
+          "outboxPending": 13009,
+          "queueDepth": 5470
+        },
+        {
+          "t": 63882,
+          "lagMs": 41745,
+          "outboxPending": 13013,
+          "queueDepth": 5469
+        },
+        {
+          "t": 64883,
+          "lagMs": 41213,
+          "outboxPending": 12513,
+          "queueDepth": 5405
+        },
+        {
+          "t": 65883,
+          "lagMs": 40968,
+          "outboxPending": 12056,
+          "queueDepth": 5352
+        },
+        {
+          "t": 66883,
+          "lagMs": 40612,
+          "outboxPending": 11618,
+          "queueDepth": 5296
+        },
+        {
+          "t": 67883,
+          "lagMs": 40262,
+          "outboxPending": 11144,
+          "queueDepth": 5239
+        },
+        {
+          "t": 68884,
+          "lagMs": 39791,
+          "outboxPending": 10680,
+          "queueDepth": 5179
+        },
+        {
+          "t": 69885,
+          "lagMs": 39323,
+          "outboxPending": 10198,
+          "queueDepth": 5117
+        },
+        {
+          "t": 70886,
+          "lagMs": 38931,
+          "outboxPending": 9745,
+          "queueDepth": 5061
+        },
+        {
+          "t": 71887,
+          "lagMs": 38724,
+          "outboxPending": 9286,
+          "queueDepth": 5002
+        },
+        {
+          "t": 72888,
+          "lagMs": 37968,
+          "outboxPending": 8824,
+          "queueDepth": 4941
+        },
+        {
+          "t": 73888,
+          "lagMs": 37589,
+          "outboxPending": 8396,
+          "queueDepth": 4883
+        },
+        {
+          "t": 74888,
+          "lagMs": 37327,
+          "outboxPending": 7947,
+          "queueDepth": 4824
+        },
+        {
+          "t": 75890,
+          "lagMs": 37129,
+          "outboxPending": 7501,
+          "queueDepth": 4762
+        },
+        {
+          "t": 76892,
+          "lagMs": 36866,
+          "outboxPending": 7039,
+          "queueDepth": 4702
+        },
+        {
+          "t": 77893,
+          "lagMs": 36710,
+          "outboxPending": 6611,
+          "queueDepth": 4642
+        },
+        {
+          "t": 78894,
+          "lagMs": 36164,
+          "outboxPending": 6195,
+          "queueDepth": 4586
+        },
+        {
+          "t": 79894,
+          "lagMs": 35170,
+          "outboxPending": 5778,
+          "queueDepth": 4528
+        },
+        {
+          "t": 80895,
+          "lagMs": 34669,
+          "outboxPending": 5364,
+          "queueDepth": 4469
+        },
+        {
+          "t": 81896,
+          "lagMs": 33912,
+          "outboxPending": 4938,
+          "queueDepth": 4407
+        },
+        {
+          "t": 82897,
+          "lagMs": 33540,
+          "outboxPending": 4496,
+          "queueDepth": 4347
+        },
+        {
+          "t": 83897,
+          "lagMs": 33261,
+          "outboxPending": 4075,
+          "queueDepth": 4289
+        },
+        {
+          "t": 84899,
+          "lagMs": 33006,
+          "outboxPending": 3625,
+          "queueDepth": 4223
+        },
+        {
+          "t": 85899,
+          "lagMs": 32458,
+          "outboxPending": 3261,
+          "queueDepth": 4166
+        },
+        {
+          "t": 86900,
+          "lagMs": 32045,
+          "outboxPending": 2856,
+          "queueDepth": 4106
+        },
+        {
+          "t": 87900,
+          "lagMs": 28866,
+          "outboxPending": 2451,
+          "queueDepth": 4043
+        },
+        {
+          "t": 88901,
+          "lagMs": 23203,
+          "outboxPending": 2031,
+          "queueDepth": 3981
+        },
+        {
+          "t": 89902,
+          "lagMs": 18103,
+          "outboxPending": 1627,
+          "queueDepth": 3917
+        },
+        {
+          "t": 90902,
+          "lagMs": 14537,
+          "outboxPending": 1210,
+          "queueDepth": 3853
+        },
+        {
+          "t": 91902,
+          "lagMs": 9500,
+          "outboxPending": 823,
+          "queueDepth": 3790
+        },
+        {
+          "t": 92903,
+          "lagMs": 5550,
+          "outboxPending": 413,
+          "queueDepth": 3728
+        },
+        {
+          "t": 93905,
+          "lagMs": 2112,
+          "outboxPending": 93,
+          "queueDepth": 3678
+        },
+        {
+          "t": 94905,
+          "lagMs": 21,
+          "outboxPending": 6,
+          "queueDepth": 3597
+        },
+        {
+          "t": 95906,
+          "lagMs": 501,
+          "outboxPending": 84,
+          "queueDepth": 3498
+        },
+        {
+          "t": 96907,
+          "lagMs": 45,
+          "outboxPending": 8,
+          "queueDepth": 3409
+        },
+        {
+          "t": 97908,
+          "lagMs": 30,
+          "outboxPending": 4,
+          "queueDepth": 3321
+        },
+        {
+          "t": 98908,
+          "lagMs": 24,
+          "outboxPending": 4,
+          "queueDepth": 3229
+        },
+        {
+          "t": 99910,
+          "lagMs": 56,
+          "outboxPending": 12,
+          "queueDepth": 3138
+        },
+        {
+          "t": 100910,
+          "lagMs": 224,
+          "outboxPending": 35,
+          "queueDepth": 3043
+        },
+        {
+          "t": 101912,
+          "lagMs": 285,
+          "outboxPending": 7,
+          "queueDepth": 2946
+        },
+        {
+          "t": 102914,
+          "lagMs": 26,
+          "outboxPending": 1,
+          "queueDepth": 2856
+        },
+        {
+          "t": 103914,
+          "lagMs": 119,
+          "outboxPending": 7,
+          "queueDepth": 2768
+        },
+        {
+          "t": 104914,
+          "lagMs": 214,
+          "outboxPending": 42,
+          "queueDepth": 2669
+        },
+        {
+          "t": 105915,
+          "lagMs": 56,
+          "outboxPending": 6,
+          "queueDepth": 2584
+        },
+        {
+          "t": 106916,
+          "lagMs": 124,
+          "outboxPending": 24,
+          "queueDepth": 2488
+        },
+        {
+          "t": 107916,
+          "lagMs": 430,
+          "outboxPending": 52,
+          "queueDepth": 2393
+        },
+        {
+          "t": 108917,
+          "lagMs": 12,
+          "outboxPending": 2,
+          "queueDepth": 2308
+        },
+        {
+          "t": 109918,
+          "lagMs": 470,
+          "outboxPending": 64,
+          "queueDepth": 2210
+        },
+        {
+          "t": 110919,
+          "lagMs": 56,
+          "outboxPending": 9,
+          "queueDepth": 2131
+        },
+        {
+          "t": 111920,
+          "lagMs": 337,
+          "outboxPending": 23,
+          "queueDepth": 2043
+        },
+        {
+          "t": 112921,
+          "lagMs": 35,
+          "outboxPending": 4,
+          "queueDepth": 1956
+        },
+        {
+          "t": 113922,
+          "lagMs": 63,
+          "outboxPending": 8,
+          "queueDepth": 1854
+        },
+        {
+          "t": 114922,
+          "lagMs": 388,
+          "outboxPending": 70,
+          "queueDepth": 1745
+        },
+        {
+          "t": 115923,
+          "lagMs": 83,
+          "outboxPending": 6,
+          "queueDepth": 1654
+        },
+        {
+          "t": 116923,
+          "lagMs": 166,
+          "outboxPending": 29,
+          "queueDepth": 1560
+        },
+        {
+          "t": 117925,
+          "lagMs": 147,
+          "outboxPending": 13,
+          "queueDepth": 1457
+        },
+        {
+          "t": 118925,
+          "lagMs": 331,
+          "outboxPending": 71,
+          "queueDepth": 1352
+        },
+        {
+          "t": 119926,
+          "lagMs": 220,
+          "outboxPending": 31,
+          "queueDepth": 1264
+        },
+        {
+          "t": 120927,
+          "lagMs": 375,
+          "outboxPending": 6,
+          "queueDepth": 1177
+        },
+        {
+          "t": 121928,
+          "lagMs": 48,
+          "outboxPending": 8,
+          "queueDepth": 1090
+        },
+        {
+          "t": 122929,
+          "lagMs": 200,
+          "outboxPending": 8,
+          "queueDepth": 990
+        },
+        {
+          "t": 123931,
+          "lagMs": 334,
+          "outboxPending": 67,
+          "queueDepth": 892
+        },
+        {
+          "t": 124931,
+          "lagMs": 34,
+          "outboxPending": 1,
+          "queueDepth": 805
+        },
+        {
+          "t": 125933,
+          "lagMs": 35,
+          "outboxPending": 3,
+          "queueDepth": 712
+        },
+        {
+          "t": 126934,
+          "lagMs": 327,
+          "outboxPending": 52,
+          "queueDepth": 605
+        },
+        {
+          "t": 127934,
+          "lagMs": 36,
+          "outboxPending": 5,
+          "queueDepth": 513
+        },
+        {
+          "t": 128935,
+          "lagMs": 39,
+          "outboxPending": 4,
+          "queueDepth": 481
+        },
+        {
+          "t": 129936,
+          "lagMs": 120,
+          "outboxPending": 17,
+          "queueDepth": 367
+        },
+        {
+          "t": 130936,
+          "lagMs": 0,
+          "outboxPending": 0,
+          "queueDepth": 262
+        },
+        {
+          "t": 131937,
+          "lagMs": 66,
+          "outboxPending": 5,
+          "queueDepth": 152
+        },
+        {
+          "t": 132938,
+          "lagMs": 16,
+          "outboxPending": 5,
+          "queueDepth": 51
+        },
+        {
+          "t": 133940,
+          "lagMs": 0,
+          "outboxPending": 0,
+          "queueDepth": 0
+        }
+      ],
+      "metrics": {
+        "window": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {
+            "{kind=\"WIN\"}": 239,
+            "{kind=\"BET\"}": 341,
+            "{kind=\"LOSS\"}": 97
+          },
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 2893,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 4552,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 1237,
+            "{status=\"REJECTED\",kind=\"BET\",failure_code=\"INSUFFICIENT_BALANCE\"}": 532,
+            "{status=\"PENDING_REFERENCE\",kind=\"REFUND\",failure_code=\"NONE\"}": 249,
+            "{status=\"PENDING_REFERENCE\",kind=\"ROLLBACK\",failure_code=\"NONE\"}": 227,
+            "{status=\"PROCESSED\",kind=\"ROLLBACK\",failure_code=\"NONE\"}": 1
+          },
+          "wagering_outbox_published_total": {
+            "": 3600
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {
+            "{status=\"PROCESSED\"}": 473
+          },
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {
+            "": 3
+          },
+          "wagering_pending_reference_skipped_total": {
+            "{reason=\"wallet_busy\"}": 732,
+            "{reason=\"not_due\"}": 142
+          }
+        },
+        "wholeRun": {
+          "wagering_lock_conflicts_total": {},
+          "wagering_retries_total": {},
+          "wagering_dlq_messages_total": {},
+          "wagering_idempotent_replays_total": {
+            "{kind=\"WIN\"}": 554,
+            "{kind=\"BET\"}": 959,
+            "{kind=\"LOSS\"}": 243
+          },
+          "wagering_idempotency_conflicts_total": {},
+          "wagering_transactions_total": {
+            "{status=\"PROCESSED\",kind=\"WIN\",failure_code=\"NONE\"}": 5205,
+            "{status=\"PROCESSED\",kind=\"BET\",failure_code=\"NONE\"}": 8244,
+            "{status=\"PROCESSED\",kind=\"LOSS\",failure_code=\"NONE\"}": 2207,
+            "{status=\"REJECTED\",kind=\"BET\",failure_code=\"INSUFFICIENT_BALANCE\"}": 980,
+            "{status=\"PENDING_REFERENCE\",kind=\"REFUND\",failure_code=\"NONE\"}": 440,
+            "{status=\"PENDING_REFERENCE\",kind=\"ROLLBACK\",failure_code=\"NONE\"}": 390,
+            "{status=\"PROCESSED\",kind=\"ROLLBACK\",failure_code=\"NONE\"}": 15,
+            "{status=\"PROCESSED\",kind=\"REFUND\",failure_code=\"NONE\"}": 14
+          },
+          "wagering_outbox_published_total": {
+            "": 29750
+          },
+          "wagering_outbox_publish_failures_total": {},
+          "wagering_outbox_retries_total": {},
+          "wagering_pending_reference_resolved_total": {
+            "{status=\"PROCESSED\"}": 830
+          },
+          "wagering_pending_reference_expired_total": {},
+          "wagering_pending_reference_rescheduled_total": {
+            "": 43
+          },
+          "wagering_pending_reference_skipped_total": {
+            "{reason=\"wallet_busy\"}": 1346,
+            "{reason=\"not_due\"}": 244
+          }
+        }
+      },
+      "perInstance": [
+        {
+          "label": "A",
+          "pid": 21068,
+          "http": 3735,
+          "sqsAcked": 2120
+        },
+        {
+          "label": "B",
+          "pid": 13624,
+          "http": 3733,
+          "sqsAcked": 2142
+        },
+        {
+          "label": "C",
+          "pid": 14804,
+          "http": 3733,
+          "sqsAcked": 2141
+        }
+      ],
+      "consistency": {
+        "ok": true,
+        "outboxEvents": 29890,
+        "eventMessagesReceived": 29890
+      }
+    }
+  ]
+}
